@@ -1,0 +1,43 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+"""Turn individual check results into one pass/fail decision."""
+
+from __future__ import annotations
+
+from mvdirector.models import CheckResult, CheckStatus, QCReport
+
+
+def linear_score(value: float, bad: float, good: float) -> float:
+    """Map ``value`` onto 0-1, where ``bad`` scores 0 and ``good`` scores 1.
+
+    Works for metrics where lower is better too: pass ``bad`` greater than ``good``.
+    """
+    if bad == good:
+        return 1.0 if value >= good else 0.0
+    return float(min(1.0, max(0.0, (value - bad) / (good - bad))))
+
+
+def skipped(name: str, reason: str) -> CheckResult:
+    return CheckResult(name=name, status=CheckStatus.SKIPPED, detail=reason)
+
+
+def aggregate(checks: list[CheckResult], weights: dict[str, float], pass_score: float) -> QCReport:
+    """An asset passes when no hard check failed and its weighted score clears the bar.
+
+    Skipped checks are recorded for the audit trail but do not affect the score.
+    """
+    active = [c for c in checks if c.status is not CheckStatus.SKIPPED]
+    for check in active:
+        check.weight = weights.get(check.name, check.weight)
+    scored = [c for c in active if c.score is not None]
+    total_weight = sum(c.weight for c in scored)
+    if total_weight > 0:
+        score = sum((c.score or 0.0) * c.weight for c in scored) / total_weight
+    else:
+        score = 0.0 if any(c.status is CheckStatus.FAILED for c in active) else 1.0
+    hard_failure = any(c.hard and c.status is CheckStatus.FAILED for c in active)
+    return QCReport(
+        passed=not hard_failure and score >= pass_score, score=round(score, 4), checks=checks
+    )

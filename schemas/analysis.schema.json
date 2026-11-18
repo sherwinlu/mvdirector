@@ -1,0 +1,146 @@
+{
+  "$defs": {
+    "LyricLine": {
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "section": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section"
+        },
+        "start": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Start"
+        },
+        "end": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "End"
+        },
+        "timing_source": {
+          "default": "none",
+          "enum": [
+            "aligned",
+            "estimated",
+            "none"
+          ],
+          "title": "Timing Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "LyricLine",
+      "type": "object"
+    },
+    "TimeSpan": {
+      "additionalProperties": false,
+      "properties": {
+        "start": {
+          "title": "Start",
+          "type": "number"
+        },
+        "end": {
+          "title": "End",
+          "type": "number"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "title": "TimeSpan",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "duration": {
+      "title": "Duration",
+      "type": "number"
+    },
+    "tempo_bpm": {
+      "title": "Tempo Bpm",
+      "type": "number"
+    },
+    "beats": {
+      "items": {
+        "type": "number"
+      },
+      "title": "Beats",
+      "type": "array"
+    },
+    "bars": {
+      "description": "Start time of each bar, in seconds.",
+      "items": {
+        "type": "number"
+      },
+      "title": "Bars",
+      "type": "array"
+    },
+    "bar_intensity": {
+      "description": "Loudness of each bar, scaled 0-1.",
+      "items": {
+        "type": "number"
+      },
+      "title": "Bar Intensity",
+      "type": "array"
+    },
+    "vocal_windows": {
+      "items": {
+        "$ref": "#/$defs/TimeSpan"
+      },
+      "title": "Vocal Windows",
+      "type": "array"
+    },
+    "lyric_lines": {
+      "items": {
+        "$ref": "#/$defs/LyricLine"
+      },
+      "title": "Lyric Lines",
+      "type": "array"
+    }
+  },
+  "required": [
+    "duration",
+    "tempo_bpm",
+    "beats",
+    "bars",
+    "bar_intensity",
+    "vocal_windows"
+  ],
+  "title": "Analysis",
+  "type": "object"
+}

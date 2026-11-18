@@ -1,0 +1,52 @@
+name: Bug report
+description: Something failed or produced the wrong result.
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: mvdirector version
+      description: Output of `pip show mvdirector | grep Version`, or the commit hash.
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Language model provider
+      options: [anthropic, openai, gemini, ollama, openai_compatible, disabled]
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model name (`llm.model`)
+  - type: input
+    id: workflows
+    attributes:
+      label: Image and video models in your ComfyUI workflows
+      placeholder: e.g. Qwen-Image-Edit 2.1 still, LTX-2.5 i2v, InfiniteTalk lipsync
+  - type: textarea
+    id: validate
+    attributes:
+      label: Output of `mvd validate`
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: llmcheck
+    attributes:
+      label: Output of `mvd llm-check`
+      description: Skip if `llm.enabled` is false.
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Command and output
+      description: The exact command, run with `mvd -v`, and the output around the failure.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead

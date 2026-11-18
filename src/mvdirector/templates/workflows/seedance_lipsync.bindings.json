@@ -1,0 +1,17 @@
+{
+  "description": "Placeholder starter bindings for Seedance Reference-to-Video lip-sync using an auto-generated black-screen MP4 audio container ('audio_video'). Pair with comfy.reference_notation: tags and video.motion_include_lyrics: true in project.yaml, and replace example node ids with ids from your exported workflow.",
+  "workflow": "seedance_lipsync.api.json",
+  "inputs": {
+    "positive_prompt": [{"node": "6", "field": "prompt"}],
+    "image": [{"node": "20", "field": "image"}],
+    "audio_video": [{"node": "21", "field": "video"}],
+    "seed": [{"node": "30", "field": "seed"}],
+    "duration": [{"node": "30", "field": "duration"}],
+    "api_key": [{"node": "30", "field": "api_key"}]
+  },
+  "required": ["positive_prompt", "image", "audio_video", "seed"],
+  "defaults": {
+    "api_key": "${COMFY_SEEDANCE_API_KEY}"
+  },
+  "output": {"node": "50", "extensions": [".mp4"]}
+}

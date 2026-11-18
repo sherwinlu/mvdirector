@@ -1,0 +1,15 @@
+{
+  "description": "Qwen-Image text-to-image. Used for reference portrait candidates and b-roll stills. Node ids below are examples: replace them with the ids from your exported workflow.",
+  "workflow": "qwen_t2i.api.json",
+  "inputs": {
+    "positive_prompt": [{"node": "6", "field": "text"}],
+    "negative_prompt": [{"node": "7", "field": "text"}],
+    "seed": [{"node": "3", "field": "seed"}],
+    "width": [{"node": "58", "field": "width"}],
+    "height": [{"node": "58", "field": "height"}],
+    "steps": [{"node": "3", "field": "steps"}]
+  },
+  "required": ["positive_prompt", "seed"],
+  "defaults": {},
+  "output": {"node": "60", "extensions": [".png"]}
+}

@@ -1,0 +1,165 @@
+# Pick and choose what runs in Docker using `--profile`:
+#
+#   1. Full NVIDIA desktop/laptop stack (GPU ComfyUI + GPU Ollama + Review UI):
+#        docker compose --profile comfy-gpu --profile llm-gpu --profile ui up -d
+#
+#   2. Laptop with paid cloud ComfyUI API nodes + local Ollama (CPU):
+#        docker compose --profile comfy-cpu --profile llm --profile ui up -d
+#
+#   3. Laptop with cloud LLM (Claude/Gemini/OpenAI) + CPU ComfyUI (for paid API nodes):
+#        docker compose --profile comfy-cpu --profile ui up -d
+#
+#   4. Apple Silicon (M1-M4) Mac with native macOS Ollama & ComfyUI:
+#        COMFY_URL=http://host.docker.internal:8188 \
+#        MVD_LLM_URL=http://host.docker.internal:11434 \
+#        docker compose --profile ui up -d
+#
+#   Run CLI commands with:
+#        docker compose run --rm mvd validate -p /workspace/projects/my-song
+
+services:
+  # ---------------------------------------------------------------------------
+  # 1. Orchestrator CLI (`docker compose run --rm mvd <command>`)
+  # ---------------------------------------------------------------------------
+  mvd:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.mvd
+    volumes:
+      - ./projects:/workspace/projects
+    environment:
+      COMFY_URL: ${COMFY_URL:-http://host.docker.internal:8188}
+      MVD_LLM_URL: ${MVD_LLM_URL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # ---------------------------------------------------------------------------
+  # 2. Streamlit Review UI (`--profile ui`, http://localhost:8501)
+  # ---------------------------------------------------------------------------
+  review-ui:
+    profiles: ["ui"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.mvd
+    command: ["review", "--project", "/workspace/projects/${MVD_PROJECT:-my-song}"]
+    ports:
+      - "${MVD_BIND_ADDR:-127.0.0.1}:${MVD_UI_PORT:-8501}:8501"
+    volumes:
+      - ./projects:/workspace/projects
+    environment:
+      COMFY_URL: ${COMFY_URL:-http://host.docker.internal:8188}
+      MVD_LLM_URL: ${MVD_LLM_URL:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # ---------------------------------------------------------------------------
+  # 3a. Local LLM via Ollama — CPU / generic (`--profile llm`, :11434)
+  # ---------------------------------------------------------------------------
+  ollama:
+    profiles: ["llm"]
+    image: ollama/ollama:${OLLAMA_VERSION:-0.40.16}
+    ports:
+      - "${MVD_BIND_ADDR:-127.0.0.1}:${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    environment:
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-5m}
+
+  # ---------------------------------------------------------------------------
+  # 3b. Local LLM via Ollama — NVIDIA GPU (`--profile llm-gpu`, :11434)
+  # ---------------------------------------------------------------------------
+  ollama-gpu:
+    profiles: ["llm-gpu"]
+    image: ollama/ollama:${OLLAMA_VERSION:-0.40.16}
+    ports:
+      - "${MVD_BIND_ADDR:-127.0.0.1}:${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    environment:
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:--1}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # Auto-pulls the chosen open-weight vision LLM (e.g. qwen2.5vl:7b or gemma3:12b)
+  ollama-pull:
+    profiles: ["llm", "llm-gpu"]
+    image: curlimages/curl:${CURL_IMAGE_TAG:-8.23.0}
+    restart: "no"
+    environment:
+      OLLAMA_HOST_URL: ${OLLAMA_INTERNAL_URL:-http://host.docker.internal:11434}
+      MVD_OLLAMA_MODEL: ${MVD_OLLAMA_MODEL:-qwen2.5vl:7b}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    entrypoint:
+      - sh
+      - -c
+      - |
+        echo "Waiting for Ollama at $${OLLAMA_HOST_URL}..."
+        for i in $$(seq 1 30); do
+          if curl -sf "$${OLLAMA_HOST_URL}/api/tags" >/dev/null 2>&1; then
+            echo "Pulling model $${MVD_OLLAMA_MODEL}..."
+            curl -sf "$${OLLAMA_HOST_URL}/api/pull" -d "{\"name\": \"$${MVD_OLLAMA_MODEL}\", \"stream\": false}"
+            exit 0
+          fi
+          sleep 2
+        done
+        echo "Timed out waiting for Ollama" >&2
+        exit 1
+
+  # ---------------------------------------------------------------------------
+  # 4a. ComfyUI — NVIDIA GPU (`--profile comfy-gpu`, :8188)
+  # ---------------------------------------------------------------------------
+  comfy-gpu:
+    profiles: ["comfy-gpu"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.comfy
+      target: gpu
+    ports:
+      - "${MVD_BIND_ADDR:-127.0.0.1}:${COMFY_PORT:-8188}:8188"
+    volumes:
+      - comfy-models:/opt/ComfyUI/models
+      - comfy-custom-nodes:/opt/ComfyUI/custom_nodes
+      - comfy-output:/opt/ComfyUI/output
+    environment:
+      COMFY_RESERVE_VRAM: ${COMFY_RESERVE_VRAM:-10}
+      COMFY_EXTRA_ARGS: ${COMFY_EXTRA_ARGS:-}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # ---------------------------------------------------------------------------
+  # 4b. ComfyUI — CPU-only for paid cloud API nodes (`--profile comfy-cpu`, :8188)
+  # ---------------------------------------------------------------------------
+  comfy-cpu:
+    profiles: ["comfy-cpu"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.comfy
+      target: cpu
+    ports:
+      - "${MVD_BIND_ADDR:-127.0.0.1}:${COMFY_PORT:-8188}:8188"
+    volumes:
+      - comfy-custom-nodes:/opt/ComfyUI/custom_nodes
+      - comfy-output:/opt/ComfyUI/output
+    environment:
+      COMFY_EXTRA_ARGS: ${COMFY_EXTRA_ARGS:-}
+
+volumes:
+  ollama-models:
+  comfy-models:
+  comfy-custom-nodes:
+  comfy-output:

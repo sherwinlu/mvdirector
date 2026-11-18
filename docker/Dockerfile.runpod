@@ -1,0 +1,66 @@
+# All-in-one RunPod container: ComfyUI (CUDA) + Ollama (local Qwen/Gemma LLM) + mvdirector (`mvd`).
+# Designed for single-VM GPU pods (e.g. A100 80GB or RTX 6000 Ada 48GB) where RunPod runs one container.
+ARG OLLAMA_VERSION=0.40.16
+FROM ollama/ollama:${OLLAMA_VERSION} AS ollama
+
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+ARG COMFYUI_REF=v0.45.4
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    COMFY_PORT=8188 \
+    COMFY_RESERVE_VRAM=11 \
+    COMFY_URL=http://127.0.0.1:8188 \
+    MVD_LLM_URL=http://127.0.0.1:11434 \
+    MVD_OLLAMA_MODEL=qwen2.5vl:7b \
+    ENABLE_OLLAMA=true \
+    ENABLE_COMFY=true \
+    STREAMLIT_SERVER_ADDRESS=0.0.0.0 \
+    STREAMLIT_SERVER_PORT=8501 \
+    STREAMLIT_SERVER_HEADLESS=true \
+    STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        python3-venv \
+        git \
+        ffmpeg \
+        libgl1 \
+        libglib2.0-0 \
+        curl \
+        ca-certificates \
+        zstd \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Ollama binary from the pinned official Ollama image
+COPY --from=ollama /bin/ollama /usr/local/bin/ollama
+
+# Install ComfyUI with CUDA PyTorch
+WORKDIR /opt/ComfyUI
+RUN git clone --depth 1 --branch "${COMFYUI_REF}" https://github.com/Comfy-Org/ComfyUI.git . && \
+    pip3 install --no-cache-dir --upgrade pip && \
+    pip3 install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 && \
+    pip3 install --no-cache-dir -r requirements.txt
+
+# Install mvdirector with QC, alignment, review UI, and Anthropic SDK extras
+WORKDIR /opt/mvdirector
+COPY pyproject.toml README.md LICENSE ./
+COPY src/ ./src/
+RUN pip3 install --no-cache-dir ".[qc,align,ui,anthropic]"
+
+# Pre-fetch the MediaPipe face models so QC needs no network access at run time.
+ENV MVD_MEDIAPIPE_CACHE_DIR=/opt/mvdirector/models
+RUN python3 -c "from mvdirector.qc.faces import MediaPipeFaceAnalyzer, MediaPipeMouthTracker; MediaPipeFaceAnalyzer().close(); MediaPipeMouthTracker()"
+
+COPY docker/runpod-entrypoint.sh /usr/local/bin/runpod-entrypoint.sh
+RUN chmod +x /usr/local/bin/runpod-entrypoint.sh
+
+WORKDIR /workspace
+
+# 8188 = ComfyUI, 11434 = Ollama, 8501 = mvd review (Streamlit UI)
+EXPOSE 8188 11434 8501
+
+ENTRYPOINT ["/usr/local/bin/runpod-entrypoint.sh"]

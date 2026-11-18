@@ -1,0 +1,115 @@
+# mvdirector project configuration.
+# Every value below is the default; delete what you do not need to change.
+# Connection strings (comfy.base_url, comfy.headers, llm.base_url) may reference
+# allowed environment variables (MVD_*, COMFY_*, RUNPOD_TOKEN, or names listed in
+# MVD_ALLOWED_ENV_VARS) via ${NAME} or ${NAME:-fallback}.
+
+title: My Song
+seed: 1234            # base seed; every attempt's seed is derived from it
+
+inputs:
+  mix: inputs/mix.wav            # full Suno mix (also the final soundtrack)
+  vocals: inputs/vocals.wav      # Suno vocal stem (drives lip-sync)
+  drums: null                    # optional drum stem, e.g. inputs/drums.wav (cleaner beat grid)
+  lyrics: inputs/lyrics.txt
+  style: inputs/style.md
+  word_timestamps: null          # optional JSON [{word, start, end}], skips transcription
+
+video:
+  width: 1280
+  height: 720
+  draft_width: null              # optional width for --draft runs (defaults to half-res)
+  draft_height: null             # optional height for --draft runs
+  fps: 24
+  max_clip_seconds: 8.0          # longest clip your LTX workflow handles well
+  min_clip_seconds: 1.5
+  handle_seconds: 0.25           # extra on each side of a shot, trimmed at assembly
+  frame_multiple: 8              # frame rule multiple*n+offset (LTX: 8/1, Wan: 4/1, MiniMax: 1/0)
+  frame_offset: 1
+  beats_per_bar: 4
+  cut_mode: bars                 # bars (musical grid) | phrases (vocal/section phrases, e.g. MiniMax H3)
+  dynamic_pacing: false          # true = cut faster on high-intensity bars and snap to sections
+  snap_sections: auto            # auto (snap when section tags name >1 singer) | always | never
+  lipsync_min_vocal_fraction: 0.25
+  lipsync_audio_source: vocals   # vocals | mix
+  motion_single_take: true       # enforce single-take and framing continuity in motion prompts
+  motion_no_subtitles: true      # prevent video models from rendering karaoke subtitles
+  motion_no_music: true          # tell audio-video models not to hallucinate background music
+  motion_include_lyrics: false   # set true for prompt-driven lip-sync models (e.g. Seedance)
+
+comfy:
+  base_url: ${COMFY_URL:-http://127.0.0.1:8188}   # e.g. https://<pod-id>-8188.proxy.runpod.net
+  headers: {}                    # e.g. {Authorization: "Bearer ${RUNPOD_TOKEN}"}
+  request_timeout: 60
+  job_timeout: 1800
+  poll_interval: 3
+  workflows_dir: workflows
+  reference_notation: prose      # prose ('first/second reference image') | tags ('@image1', '@video1')
+  workflows:
+    t2i: qwen_t2i.bindings.json            # reference portrait and b-roll stills
+    still: qwen_edit_still.bindings.json   # singer stills from the reference portrait
+    lipsync: ltx_lipsync.bindings.json     # image + audio -> video
+    i2v: ltx_i2v.bindings.json             # image -> video
+
+llm:
+  # One model does every text task: planning, vision checks and prompt rewrites.
+  enabled: true                  # false = rule-based planning, no vision checks, no prompt rewrites
+  provider: anthropic            # anthropic | openai | gemini | ollama | openai_compatible
+  model: claude-sonnet-5-5       # any model name your provider offers; must be set
+                                 #   explicitly for every provider except anthropic
+  base_url: null                 # server address (or set MVD_LLM_URL); required for openai_compatible
+  api_key_env: null              # env var holding the key; defaults: ANTHROPIC_API_KEY,
+                                 #   OPENAI_API_KEY, GEMINI_API_KEY (ollama needs none). Custom
+                                 #   names must be MVD_* or listed in MVD_ALLOWED_ENV_VARS.
+  max_tokens: 8000               # response limit; raise it if replies are cut off
+  shots_per_request: 20          # shots directed per call; use fewer (5-10) for small models
+  timeout_seconds: 180           # raise for slow local models
+  json_mode: auto                # auto | off | object | schema
+  context_tokens: null           # context window to request (ollama default 16384)
+  # Examples:
+  #   provider: openai            model: <an OpenAI model>
+  #   provider: gemini            model: <a Gemini model>
+  #   provider: ollama            model: <a local model that accepts images>
+  #   provider: openai_compatible base_url: http://localhost:1234/v1   (LM Studio)
+
+planning:
+  wardrobe_monotonic: true       # a costume change is one-way (a cape taken off stays off)
+  allow_multicut_shots: false    # allow the planner to emit multi-angle montage cuts (allow_cuts)
+
+reference:
+  layout: row                    # row (1x4) | grid (2x2) | columns (headshots + front/back body)
+  background: white              # white | grey (neutral grey avoids clipping glowing outfits)
+  width: null                    # sheet size; defaults depend on layout
+  height: null
+  candidates: 4
+  video_candidates: 2
+  panel_inset: 0.012             # trimmed from each panel edge to drop dividers and labels
+
+plates:
+  candidates: 3                  # candidate images per set
+
+props:
+  candidates: 3                  # candidate two-angle sheets per hero prop
+
+qc:
+  pass_score: 0.70
+  vision_enabled: true
+  face_backend: mediapipe        # mediapipe (Apache-2.0, commercial-safe) | insightface (non-commercial research)
+  on_missing_dependency: fail    # fail (recommended) | skip
+  # image: and video: thresholds are listed in the README; calibrate them on your own clips.
+
+retry:
+  max_attempts: 4
+  strategies: [new_seed, rewrite_prompt, adjust_params]
+  max_generations_per_run: 300
+  adjust_params:
+    still: {steps: 40}
+    video: {steps: 40}
+
+review:
+  mode: light                    # light | strict (override with --review-mode)
+  closeup_rate: 1.0
+  other_rate: 0.25
+  include_retried: true
+  include_near_threshold: true
+  near_threshold_margin: 0.05

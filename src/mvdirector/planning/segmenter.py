@@ -1,0 +1,256 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+"""Deterministic timing: turn the beat grid into a gap-free list of shot time ranges.
+
+Timing is computed in code, not by the language model, so cuts always land on bar
+lines and the shots always cover the whole song.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+
+import numpy as np
+
+from mvdirector.config import VideoConfig
+from mvdirector.models import Analysis, ShotType
+
+_VALID_BAR_STEPS = (16, 8, 4, 2, 1)
+_HIGH_INTENSITY_THRESHOLD = 0.80
+_MEDIUM_INTENSITY_THRESHOLD = 0.55
+_MIN_INTENSITY_SPREAD = 0.15
+
+
+@dataclass(frozen=True)
+class Segment:
+    start: float
+    end: float
+    type: ShotType
+    lyrics: str
+    intensity: float
+    section: str | None = None
+
+    @property
+    def duration(self) -> float:
+        return self.end - self.start
+
+
+def frames_for(duration: float, fps: int, multiple: int, offset: int) -> int:
+    """Smallest frame count of the form ``multiple * n + offset`` covering ``duration``."""
+    needed = math.ceil(duration * fps - 1e-6)
+    steps = max(1, math.ceil((needed - offset) / multiple))
+    return multiple * steps + offset
+
+
+def _allowed_bar_steps(bar_length: float, video: VideoConfig) -> list[int]:
+    """Bar step sizes (from 8, 4, 2, 1) that fit within [min_clip_seconds, max_clip_seconds]."""
+    max_bars = next((n for n in _VALID_BAR_STEPS if n * bar_length <= video.max_clip_seconds), 1)
+    min_bars = next(
+        (n for n in reversed(_VALID_BAR_STEPS) if n * bar_length >= video.min_clip_seconds),
+        1,
+    )
+    steps = [n for n in _VALID_BAR_STEPS if min_bars <= n <= max_bars]
+    return steps or [max_bars]
+
+
+def _step_for_intensity(intensity: float, allowed_steps: list[int]) -> int:
+    """Map bar intensity (0-1) to a bar count: calmer bars hold longer, peaks cut faster."""
+    max_bars = allowed_steps[0]
+    min_bars = allowed_steps[-1]
+    if intensity >= _HIGH_INTENSITY_THRESHOLD:
+        target = max(min_bars, max_bars // 4)
+    elif intensity >= _MEDIUM_INTENSITY_THRESHOLD:
+        target = max(min_bars, max_bars // 2)
+    else:
+        target = max_bars
+    return min(allowed_steps, key=lambda n: abs(n - target))
+
+
+def _section_bar_indices(analysis: Analysis, bars: list[float]) -> set[int]:
+    """Bar indices where a new song section begins, snapped to the nearest bar line."""
+    if not bars:
+        return set()
+    bar_arr = np.asarray(bars, dtype=np.float64)
+    indices: set[int] = set()
+    for start_time, _ in section_timeline(analysis):
+        idx = int(np.argmin(np.abs(bar_arr - start_time)))
+        if 0 < idx < len(bars):
+            indices.add(idx)
+    return indices
+
+
+def _phrase_points(analysis: Analysis, bars: list[float]) -> list[float]:
+    """Candidate cut points at vocal-window and lyric-section boundaries, snapped to near bars."""
+    duration = analysis.duration
+    raw: set[float] = {0.0, duration}
+    for window in analysis.vocal_windows:
+        if 0.0 < window.start < duration:
+            raw.add(window.start)
+        if 0.0 < window.end < duration:
+            raw.add(window.end)
+    for start_time, _ in section_timeline(analysis):
+        if 0.0 < start_time < duration:
+            raw.add(start_time)
+    if len(bars) < 2:
+        return sorted(raw)
+    bar_arr = np.asarray(bars, dtype=np.float64)
+    snap_tolerance = float(np.median(np.diff(bar_arr))) * 0.5
+    snapped: set[float] = {0.0, duration}
+    for point in raw:
+        if point in (0.0, duration):
+            continue
+        nearest = float(bar_arr[int(np.argmin(np.abs(bar_arr - point)))])
+        chosen = nearest if abs(nearest - point) <= snap_tolerance else point
+        if 0.0 < chosen < duration:
+            snapped.add(round(chosen, 3))
+    return sorted(snapped)
+
+
+def cut_points(
+    analysis: Analysis, video: VideoConfig, *, snap_sections: bool = False
+) -> list[float]:
+    """Shot boundaries from 0 to the song's end, on bar lines or phrase boundaries.
+
+    When ``video.cut_mode`` is ``"phrases"``, cuts follow vocal windows and lyric sections
+    (snapping to nearby bar lines). Otherwise cuts step along the bar grid—either at a uniform
+    bar interval (``video.dynamic_pacing: false``) or scaled by bar intensity and snapped to
+    section boundaries (``video.dynamic_pacing: true``, or when ``snap_sections`` is enabled for
+    multi-character songs).
+    """
+    duration, bars = analysis.duration, analysis.bars
+    points = [0.0]
+    if video.cut_mode == "phrases":
+        points = _phrase_points(analysis, bars)
+    elif len(bars) >= 2:
+        bar_length = float(np.median(np.diff(bars)))
+        allowed_steps = _allowed_bar_steps(bar_length, video)
+        bars_per_shot = allowed_steps[0]
+
+        if not video.dynamic_pacing and not snap_sections:
+            points += [b for b in bars[::bars_per_shot] if 0.0 < b < duration]
+        else:
+            intensities = analysis.bar_intensity
+            has_contrast = (
+                video.dynamic_pacing
+                and len(intensities) >= len(bars)
+                and (max(intensities[: len(bars)]) - min(intensities[: len(bars)]))
+                >= _MIN_INTENSITY_SPREAD
+            )
+            section_bars = _section_bar_indices(analysis, bars)
+            idx = 0
+            num_bars = len(bars)
+            while idx < num_bars:
+                bar_time = bars[idx]
+                if 0.0 < bar_time < duration and bar_time != points[-1]:
+                    points.append(bar_time)
+
+                step = (
+                    _step_for_intensity(float(intensities[idx]), allowed_steps)
+                    if has_contrast
+                    else bars_per_shot
+                )
+
+                # Snap early if a new section starts or intensity surges to a faster tier.
+                next_idx = idx + step
+                for candidate in range(idx + 1, min(num_bars, next_idx)):
+                    is_section_start = candidate in section_bars
+                    is_intensity_surge = (
+                        has_contrast
+                        and _step_for_intensity(float(intensities[candidate]), allowed_steps) < step
+                    )
+                    if (is_section_start or is_intensity_surge) and (
+                        bars[candidate] - bars[idx] >= video.min_clip_seconds
+                    ):
+                        next_idx = candidate
+                        break
+                idx = next_idx
+    if points[-1] != duration:
+        points.append(duration)
+
+    # Drop boundaries that would leave a sliver (typically a pickup before bar one).
+    merged = [points[0]]
+    for point in points[1:-1]:
+        if point - merged[-1] >= video.min_clip_seconds:
+            merged.append(point)
+    if len(merged) > 1 and duration - merged[-1] < video.min_clip_seconds:
+        merged.pop()
+    merged.append(duration)
+
+    # Split anything too long (merged slivers, very slow songs, no beat grid) into equal parts.
+    final = [merged[0]]
+    for point in merged[1:]:
+        span = point - final[-1]
+        parts = max(1, math.ceil(span / video.max_clip_seconds - 1e-9))
+        origin = final[-1]
+        final += [origin + span * k / parts for k in range(1, parts + 1)]
+    return [round(p, 3) for p in final]
+
+
+def section_timeline(analysis: Analysis) -> list[tuple[float, str]]:
+    """(start time, section label) each time the lyrics move into a new section."""
+    timeline: list[tuple[float, str]] = []
+    for line in sorted(
+        (ln for ln in analysis.lyric_lines if ln.start is not None and ln.section),
+        key=lambda ln: ln.start,  # type: ignore[arg-type, return-value]
+    ):
+        if not timeline or timeline[-1][1] != line.section:
+            timeline.append((line.start, line.section))  # type: ignore[arg-type]
+    return timeline
+
+
+def section_at(timeline: list[tuple[float, str]], time: float) -> str | None:
+    """The section in progress at ``time``; None before the first sung section."""
+    current = None
+    for start, label in timeline:
+        if start <= time:
+            current = label
+        else:
+            break
+    return current
+
+
+def segment(
+    analysis: Analysis, video: VideoConfig, *, snap_sections: bool = False
+) -> list[Segment]:
+    points = cut_points(analysis, video, snap_sections=snap_sections)
+    timeline = section_timeline(analysis)
+    segments = []
+    for start, end in zip(points[:-1], points[1:]):
+        sung = sum(window.overlap(start, end) for window in analysis.vocal_windows)
+        is_lipsync = sung / (end - start) >= video.lipsync_min_vocal_fraction
+        segments.append(
+            Segment(
+                start=start,
+                end=end,
+                type=ShotType.LIPSYNC if is_lipsync else ShotType.PERFORMANCE,
+                lyrics=_lyrics_between(analysis, start, end),
+                intensity=_intensity_between(analysis, start, end),
+                section=section_at(timeline, (start + end) / 2),
+            )
+        )
+    return segments
+
+
+def _lyrics_between(analysis: Analysis, start: float, end: float) -> str:
+    """Lines whose midpoint falls inside the shot, so each line belongs to one shot."""
+    lines = [
+        line.text
+        for line in analysis.lyric_lines
+        if line.start is not None
+        and line.end is not None
+        and start <= (line.start + line.end) / 2 < end
+    ]
+    return " / ".join(lines)
+
+
+def _intensity_between(analysis: Analysis, start: float, end: float) -> float:
+    edges = [*analysis.bars, analysis.duration]
+    weighted, total = 0.0, 0.0
+    for bar_start, bar_end, value in zip(edges[:-1], edges[1:], analysis.bar_intensity):
+        shared = max(0.0, min(bar_end, end) - max(bar_start, start))
+        weighted += shared * value
+        total += shared
+    return round(weighted / total, 3) if total > 0 else 0.5

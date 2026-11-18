@@ -1,0 +1,18 @@
+{
+  "description": "LTX image to video, for shots where the singer is not singing and for b-roll. Node ids below are examples: replace them with the ids from your exported workflow.",
+  "workflow": "ltx_i2v.api.json",
+  "inputs": {
+    "positive_prompt": [{"node": "6", "field": "text"}],
+    "negative_prompt": [{"node": "7", "field": "text"}],
+    "image": [{"node": "20", "field": "image"}],
+    "seed": [{"node": "30", "field": "noise_seed"}],
+    "width": [{"node": "40", "field": "width"}],
+    "height": [{"node": "40", "field": "height"}],
+    "num_frames": [{"node": "40", "field": "length"}],
+    "fps": [{"node": "41", "field": "frame_rate"}, {"node": "50", "field": "fps"}],
+    "steps": [{"node": "31", "field": "steps"}]
+  },
+  "required": ["positive_prompt", "image", "seed", "num_frames"],
+  "defaults": {},
+  "output": {"node": "50", "extensions": [".mp4"]}
+}

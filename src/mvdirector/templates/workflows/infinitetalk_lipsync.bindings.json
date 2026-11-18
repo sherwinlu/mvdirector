@@ -1,0 +1,18 @@
+{
+  "description": "Wan 2.1 + InfiniteTalk Single (Apache-2.0): audio-driven singing/talking video from a shot's still and vocal slice. Set video.frame_multiple: 4 and video.frame_offset: 1 in project.yaml, and comfy.workflows.lipsync: infinitetalk_lipsync.bindings.json. Replace example node ids with ids from your exported workflow.",
+  "workflow": "infinitetalk_lipsync.api.json",
+  "inputs": {
+    "positive_prompt": [{"node": "332", "field": "positive_prompt"}],
+    "negative_prompt": [{"node": "332", "field": "negative_prompt"}],
+    "image": [{"node": "284", "field": "image"}],
+    "audio": [{"node": "125", "field": "audio"}],
+    "seed": [{"node": "333", "field": "seed"}],
+    "width": [{"node": "339", "field": "width"}, {"node": "340", "field": "width"}],
+    "height": [{"node": "339", "field": "height"}, {"node": "340", "field": "height"}],
+    "num_frames": [{"node": "337", "field": "max_frames"}, {"node": "339", "field": "num_frames"}],
+    "fps": [{"node": "337", "field": "fps"}, {"node": "334", "field": "fps"}]
+  },
+  "required": ["positive_prompt", "image", "audio", "seed", "num_frames"],
+  "defaults": {},
+  "output": {"node": "325", "extensions": [".mp4"]}
+}

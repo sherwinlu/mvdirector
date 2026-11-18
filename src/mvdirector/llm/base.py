@@ -1,0 +1,187 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+"""Pieces shared by every language-model backend.
+
+All calls ask for one JSON object and validate it against a pydantic model. Requests are built
+from neutral content blocks (``text_block`` and ``image_block``); each backend translates them
+into its provider's wire format.
+"""
+
+from __future__ import annotations
+
+import base64
+import io
+import json
+import logging
+import re
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Protocol, TypeVar
+
+import numpy as np
+from PIL import Image
+from pydantic import BaseModel, ValidationError
+
+from mvdirector.errors import LLMError
+
+log = logging.getLogger("mvdirector.llm")
+
+T = TypeVar("T", bound=BaseModel)
+ContentBlock = dict[str, Any]
+Message = dict[str, Any]  # {"role": "user" | "assistant", "content": str | list[ContentBlock]}
+
+MAX_IMAGE_SIDE = 1024
+IMAGE_TOKEN_ESTIMATE = 1000  # rough cost of one image, for context warnings only
+_MAX_CORRECTION_CHARS = 1500
+
+
+class LLMClient(Protocol):
+    def complete_json(self, *, system: str, content: list[ContentBlock], schema: type[T]) -> T:
+        """Send one request and return the reply parsed into ``schema``."""
+        ...
+
+
+def text_block(text: str) -> ContentBlock:
+    return {"type": "text", "text": text}
+
+
+def image_block(image: Path | np.ndarray) -> ContentBlock:
+    """Encode an image file or RGB array as a JPEG block, downscaled to save tokens."""
+    if isinstance(image, Path):
+        with Image.open(image) as opened:
+            pil = opened.convert("RGB")
+    else:
+        pil = Image.fromarray(image).convert("RGB")
+    pil.thumbnail((MAX_IMAGE_SIDE, MAX_IMAGE_SIDE))
+    buffer = io.BytesIO()
+    pil.save(buffer, format="JPEG", quality=85)
+    data = base64.standard_b64encode(buffer.getvalue()).decode("ascii")
+    return {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": data}}
+
+
+_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+
+def extract_json(text: str) -> str:
+    """Pull the JSON object out of a reply that may include fences, prose or reasoning.
+
+    Reasoning models (often run locally) put their thinking in ``<think>`` tags before the answer,
+    and any model may add prose after it. The first complete object is returned. If none decodes,
+    the outermost braces are returned instead, so validation reports the real syntax error and
+    the correction request can quote it.
+    """
+    cleaned = _THINK_BLOCK.sub("", text)
+    unfinished = cleaned.lower().find("<think>")  # reasoning that never ended: nothing follows
+    if unfinished != -1:
+        cleaned = cleaned[:unfinished]
+    start = cleaned.find("{")
+    if start == -1:
+        raise LLMError("The model reply contained no JSON object")
+    try:
+        value, end = json.JSONDecoder().raw_decode(cleaned, start)
+    except ValueError:
+        value = end = None
+    if isinstance(value, dict) and end is not None:
+        return cleaned[start:end]
+    last = cleaned.rfind("}")
+    if last <= start:
+        raise LLMError("The model reply contained no JSON object")
+    return cleaned[start : last + 1]
+
+
+def blocks_of(content: str | list[ContentBlock]) -> list[ContentBlock]:
+    return [text_block(content)] if isinstance(content, str) else content
+
+
+def has_images(messages: list[Message]) -> bool:
+    return any(block.get("type") == "image" for m in messages for block in blocks_of(m["content"]))
+
+
+def estimate_tokens(system: str, messages: list[Message]) -> int:
+    """A rough token count (four characters per token, a fixed cost per image)."""
+    chars, images = len(system), 0
+    for message in messages:
+        for block in blocks_of(message["content"]):
+            if block.get("type") == "image":
+                images += 1
+            else:
+                chars += len(block.get("text", ""))
+    return chars // 4 + images * IMAGE_TOKEN_ESTIMATE
+
+
+def schema_prompt(system: str, schema: type[BaseModel]) -> str:
+    """The system prompt plus the instruction to reply with JSON matching ``schema``."""
+    return (
+        f"{system}\n\nReply with a single JSON object and nothing else. "
+        f"It must match this JSON Schema:\n{json.dumps(schema.model_json_schema())}"
+    )
+
+
+@dataclass(frozen=True)
+class Reply:
+    text: str
+    truncated: bool = False  # the model stopped because it hit the token limit
+
+
+class ChatBackend(ABC):
+    """The request loop common to every provider: ask for JSON, validate, correct once."""
+
+    def __init__(self, *, model: str, max_tokens: int, context_tokens: int | None = None) -> None:
+        self._model = model
+        self._max_tokens = max_tokens
+        self._context_tokens = context_tokens
+        self._warned_context = False
+
+    def complete_json(self, *, system: str, content: list[ContentBlock], schema: type[T]) -> T:
+        system_prompt = schema_prompt(system, schema)
+        messages: list[Message] = [{"role": "user", "content": content}]
+        self._warn_if_large(system_prompt, messages)
+        last_error: Exception | None = None
+        for _ in range(2):
+            reply = self._send(system_prompt, messages, schema)
+            log.debug("Model reply (%d characters): %s", len(reply.text), reply.text[:500])
+            try:
+                return schema.model_validate_json(extract_json(reply.text))
+            except (ValidationError, LLMError) as exc:
+                last_error = exc
+                if reply.truncated:
+                    # A correction cannot help: the reply needs more room, not different words.
+                    raise LLMError(
+                        f"The model's reply was cut off at max_tokens ({self._max_tokens}) before "
+                        "the JSON was complete. Raise llm.max_tokens in project.yaml, or lower "
+                        "llm.shots_per_request."
+                    ) from exc
+                log.warning("Model reply failed validation; asking for a correction")
+                detail = str(exc)[:_MAX_CORRECTION_CHARS]
+                messages += [
+                    {"role": "assistant", "content": reply.text},
+                    {
+                        "role": "user",
+                        "content": f"That did not validate: {detail}\nSend corrected JSON.",
+                    },
+                ]
+        raise LLMError(
+            f"Model reply could not be parsed as {schema.__name__}: {last_error} "
+            f"The reply began: {reply.text[:200]!r}. Run with -v to see more."
+        )
+
+    def _warn_if_large(self, system: str, messages: list[Message]) -> None:
+        if self._context_tokens is None or self._warned_context:
+            return
+        estimate = estimate_tokens(system, messages)
+        if estimate > 0.8 * self._context_tokens:
+            self._warned_context = True
+            log.warning(
+                "This request is about %d tokens and the context window is %d. A server may "
+                "silently drop the start of an oversized prompt. Raise llm.context_tokens or "
+                "lower llm.shots_per_request.",
+                estimate,
+                self._context_tokens,
+            )
+
+    @abstractmethod
+    def _send(self, system: str, messages: list[Message], schema: type[BaseModel]) -> Reply:
+        """Send one request and return the model's text."""

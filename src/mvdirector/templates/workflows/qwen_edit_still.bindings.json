@@ -1,0 +1,16 @@
+{
+  "description": "Qwen-Image-Edit: places the singer from the reference portrait into each shot's first frame. Node ids below are examples: replace them with the ids from your exported workflow.",
+  "workflow": "qwen_edit_still.api.json",
+  "inputs": {
+    "positive_prompt": [{"node": "76", "field": "prompt"}],
+    "negative_prompt": [{"node": "77", "field": "prompt"}],
+    "reference_image": [{"node": "78", "field": "image"}],
+    "seed": [{"node": "3", "field": "seed"}],
+    "width": [{"node": "93", "field": "width"}],
+    "height": [{"node": "93", "field": "height"}],
+    "steps": [{"node": "3", "field": "steps"}]
+  },
+  "required": ["positive_prompt", "reference_image", "seed"],
+  "defaults": {},
+  "output": {"node": "60", "extensions": [".png"]}
+}

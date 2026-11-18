@@ -1,0 +1,18 @@
+{
+  "description": "Placeholder starter bindings for a two-stage I2V + LatentSync 1.6 mouth-dubbing pass: animates the shot's still with an I2V model (e.g. LTX or Wan) and re-syncs the mouth with LatentSync 1.6 from the vocal slice. Point comfy.workflows.lipsync at latentsync_lipsync.bindings.json and replace example node ids with ids from your exported workflow. Note: LatentSync weights use the OpenRAIL++ license — review its use restrictions before commercial use.",
+  "workflow": "latentsync_lipsync.api.json",
+  "inputs": {
+    "positive_prompt": [{"node": "6", "field": "text"}],
+    "negative_prompt": [{"node": "7", "field": "text"}],
+    "image": [{"node": "20", "field": "image"}],
+    "audio": [{"node": "21", "field": "audio"}],
+    "seed": [{"node": "30", "field": "noise_seed"}, {"node": "60", "field": "seed"}],
+    "width": [{"node": "40", "field": "width"}],
+    "height": [{"node": "40", "field": "height"}],
+    "num_frames": [{"node": "40", "field": "length"}],
+    "fps": [{"node": "41", "field": "frame_rate"}, {"node": "50", "field": "fps"}]
+  },
+  "required": ["positive_prompt", "image", "audio", "seed", "num_frames"],
+  "defaults": {},
+  "output": {"node": "65", "extensions": [".mp4"]}
+}

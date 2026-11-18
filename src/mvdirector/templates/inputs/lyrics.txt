@@ -1,0 +1,6 @@
+[Verse 1]
+Replace this file with your lyrics, one line per sung line
+Section tags in square brackets are kept as labels, not sung
+
+[Chorus]
+Paste the same lyrics you gave Suno

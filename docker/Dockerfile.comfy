@@ -1,0 +1,75 @@
+# Multi-target ComfyUI Dockerfile:
+#   - target `cpu`: lightweight CPU-only ComfyUI for laptops/MacBooks using paid cloud API nodes
+#                   (Nano Banana, Seedance, Kling, Grok, MiniMax P-H3) or workflow validation.
+#   - target `gpu`: NVIDIA CUDA ComfyUI for local open-weight generation (Qwen-Image, LTX-2, Wan),
+#                   with configurable `--reserve-vram` so a local LLM can share the GPU.
+
+ARG COMFYUI_REF=v0.45.4
+
+# ==============================================================================
+# Target 1: CPU-only ComfyUI (for cloud API nodes & laptops without NVIDIA GPUs)
+# ==============================================================================
+FROM python:3.11-slim AS cpu
+
+ARG COMFYUI_REF
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    COMFY_PORT=8188 \
+    COMFY_EXTRA_ARGS=""
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        ffmpeg \
+        libgl1 \
+        libglib2.0-0 \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/ComfyUI
+
+RUN git clone --depth 1 --branch "${COMFYUI_REF}" https://github.com/Comfy-Org/ComfyUI.git . && \
+    pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir -r requirements.txt
+
+EXPOSE 8188
+
+CMD ["sh", "-c", "python3 main.py --cpu --listen 0.0.0.0 --port ${COMFY_PORT} ${COMFY_EXTRA_ARGS}"]
+
+# ==============================================================================
+# Target 2: NVIDIA GPU ComfyUI (for open-weight Qwen, LTX, Wan, Flux workflows)
+# ==============================================================================
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 AS gpu
+
+ARG COMFYUI_REF
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    COMFY_PORT=8188 \
+    COMFY_RESERVE_VRAM=10 \
+    COMFY_EXTRA_ARGS=""
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        python3-venv \
+        git \
+        ffmpeg \
+        libgl1 \
+        libglib2.0-0 \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/ComfyUI
+
+RUN git clone --depth 1 --branch "${COMFYUI_REF}" https://github.com/Comfy-Org/ComfyUI.git . && \
+    pip3 install --no-cache-dir --upgrade pip && \
+    pip3 install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124 && \
+    pip3 install --no-cache-dir -r requirements.txt
+
+EXPOSE 8188
+
+CMD ["sh", "-c", "python3 main.py --listen 0.0.0.0 --port ${COMFY_PORT} --reserve-vram ${COMFY_RESERVE_VRAM} ${COMFY_EXTRA_ARGS}"]

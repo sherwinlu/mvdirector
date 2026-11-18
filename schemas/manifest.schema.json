@@ -1,0 +1,932 @@
+{
+  "$defs": {
+    "AssetState": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/AssetStatus",
+          "default": "pending"
+        },
+        "attempts": {
+          "items": {
+            "$ref": "#/$defs/Attempt"
+          },
+          "title": "Attempts",
+          "type": "array"
+        },
+        "attempts_allowed": {
+          "default": 0,
+          "title": "Attempts Allowed",
+          "type": "integer"
+        },
+        "selected_attempt": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Selected Attempt"
+        },
+        "prompt_override": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Rewritten shot prompt, set by the retry policy.",
+          "title": "Prompt Override"
+        },
+        "param_overrides": {
+          "additionalProperties": true,
+          "title": "Param Overrides",
+          "type": "object"
+        },
+        "director_note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Reviewer feedback to apply on the next attempt.",
+          "title": "Director Note"
+        },
+        "accepted_by_reviewer": {
+          "default": false,
+          "description": "A person accepted an attempt that did not pass QC.",
+          "title": "Accepted By Reviewer",
+          "type": "boolean"
+        },
+        "upscaled_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional upscaled output derived from the selected attempt.",
+          "title": "Upscaled Path"
+        },
+        "upscaled_from_attempt": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Attempt number that upscaled_path was generated from.",
+          "title": "Upscaled From Attempt"
+        }
+      },
+      "title": "AssetState",
+      "type": "object"
+    },
+    "AssetStatus": {
+      "enum": [
+        "pending",
+        "passed",
+        "exhausted"
+      ],
+      "title": "AssetStatus",
+      "type": "string"
+    },
+    "Attempt": {
+      "additionalProperties": false,
+      "properties": {
+        "number": {
+          "title": "Number",
+          "type": "integer"
+        },
+        "strategy": {
+          "$ref": "#/$defs/RetryStrategy"
+        },
+        "seed": {
+          "title": "Seed",
+          "type": "integer"
+        },
+        "prompt": {
+          "title": "Prompt",
+          "type": "string"
+        },
+        "params": {
+          "additionalProperties": true,
+          "title": "Params",
+          "type": "object"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Path"
+        },
+        "qc": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QCReport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        },
+        "created_at": {
+          "title": "Created At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "number",
+        "strategy",
+        "seed",
+        "prompt"
+      ],
+      "title": "Attempt",
+      "type": "object"
+    },
+    "AudioSlice": {
+      "additionalProperties": false,
+      "description": "Audio handed to the video model. Includes handles trimmed off at assembly.",
+      "properties": {
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "start": {
+          "title": "Start",
+          "type": "number"
+        },
+        "end": {
+          "title": "End",
+          "type": "number"
+        },
+        "head_handle": {
+          "description": "Seconds between slice start and shot start.",
+          "title": "Head Handle",
+          "type": "number"
+        }
+      },
+      "required": [
+        "path",
+        "start",
+        "end",
+        "head_handle"
+      ],
+      "title": "AudioSlice",
+      "type": "object"
+    },
+    "Character": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "default": "",
+          "description": "Display name or role of the character.",
+          "title": "Name",
+          "type": "string"
+        },
+        "appearance": {
+          "default": "",
+          "description": "Permanent look: face, hair, makeup, build, marks. No clothing.",
+          "title": "Appearance",
+          "type": "string"
+        },
+        "invariants": {
+          "default": "",
+          "description": "Signature accessories or details kept intact across wardrobe changes.",
+          "title": "Invariants",
+          "type": "string"
+        },
+        "parent_character": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional character id whose locked base sheet this base sheet edits.",
+          "title": "Parent Character"
+        },
+        "wardrobe": {
+          "description": "Costume states in the order they appear in the song.",
+          "items": {
+            "$ref": "#/$defs/WardrobeState"
+          },
+          "title": "Wardrobe",
+          "type": "array"
+        },
+        "references": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ReferenceSet"
+          },
+          "description": "Locked reference sheets, keyed by wardrobe state id ('base' if none).",
+          "title": "References",
+          "type": "object"
+        }
+      },
+      "title": "Character",
+      "type": "object"
+    },
+    "CheckResult": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/CheckStatus"
+        },
+        "hard": {
+          "default": false,
+          "description": "A failed hard check rejects the asset whatever its score.",
+          "title": "Hard",
+          "type": "boolean"
+        },
+        "score": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "0-1, higher is better.",
+          "title": "Score"
+        },
+        "weight": {
+          "default": 1.0,
+          "title": "Weight",
+          "type": "number"
+        },
+        "detail": {
+          "default": "",
+          "title": "Detail",
+          "type": "string"
+        },
+        "fix_hint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Advice fed into the next attempt's prompt.",
+          "title": "Fix Hint"
+        },
+        "metrics": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Metrics",
+          "type": "object"
+        }
+      },
+      "required": [
+        "name",
+        "status"
+      ],
+      "title": "CheckResult",
+      "type": "object"
+    },
+    "CheckStatus": {
+      "enum": [
+        "passed",
+        "failed",
+        "skipped"
+      ],
+      "title": "CheckStatus",
+      "type": "string"
+    },
+    "Framing": {
+      "enum": [
+        "close_up",
+        "medium_close",
+        "medium",
+        "wide"
+      ],
+      "title": "Framing",
+      "type": "string"
+    },
+    "PropDesign": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "description": "Physical design, materials, scale in cm, and negative exclusions.",
+          "title": "Description",
+          "type": "string"
+        },
+        "sections": {
+          "description": "Parts of the song where this prop appears.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Sections",
+          "type": "array"
+        },
+        "plate": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Locked two-angle reference image of the prop.",
+          "title": "Plate"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "title": "PropDesign",
+      "type": "object"
+    },
+    "QCReport": {
+      "additionalProperties": false,
+      "properties": {
+        "passed": {
+          "title": "Passed",
+          "type": "boolean"
+        },
+        "score": {
+          "title": "Score",
+          "type": "number"
+        },
+        "checks": {
+          "items": {
+            "$ref": "#/$defs/CheckResult"
+          },
+          "title": "Checks",
+          "type": "array"
+        }
+      },
+      "required": [
+        "passed",
+        "score"
+      ],
+      "title": "QCReport",
+      "type": "object"
+    },
+    "ReferenceSet": {
+      "additionalProperties": false,
+      "description": "A locked character reference sheet and the panels cut from it.",
+      "properties": {
+        "sheet": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The locked reference sheet image.",
+          "title": "Sheet"
+        },
+        "panels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Panel crops cut from the sheet (front, profile, three_quarter, face, back).",
+          "title": "Panels",
+          "type": "object"
+        },
+        "video": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional locked silent turnaround and expression reference video.",
+          "title": "Video"
+        }
+      },
+      "title": "ReferenceSet",
+      "type": "object"
+    },
+    "RetryStrategy": {
+      "enum": [
+        "initial",
+        "new_seed",
+        "rewrite_prompt",
+        "adjust_params"
+      ],
+      "title": "RetryStrategy",
+      "type": "string"
+    },
+    "Review": {
+      "additionalProperties": false,
+      "properties": {
+        "required": {
+          "default": false,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "reasons": {
+          "items": {
+            "$ref": "#/$defs/ReviewReason"
+          },
+          "title": "Reasons",
+          "type": "array"
+        },
+        "decision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReviewDecision"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        },
+        "decided_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Decided At"
+        }
+      },
+      "title": "Review",
+      "type": "object"
+    },
+    "ReviewDecision": {
+      "enum": [
+        "approved",
+        "rejected"
+      ],
+      "title": "ReviewDecision",
+      "type": "string"
+    },
+    "ReviewReason": {
+      "enum": [
+        "exhausted",
+        "retried",
+        "near_threshold",
+        "sampled",
+        "escalated"
+      ],
+      "title": "ReviewReason",
+      "type": "string"
+    },
+    "SetDesign": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "sections": {
+          "description": "Parts of the song this set is used for.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Sections",
+          "type": "array"
+        },
+        "description": {
+          "default": "",
+          "description": "What the set looks like.",
+          "title": "Description",
+          "type": "string"
+        },
+        "movement": {
+          "default": "",
+          "description": "How the singer moves and the camera works here.",
+          "title": "Movement",
+          "type": "string"
+        },
+        "parent_set": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional set name whose locked plate this set's plate is edited from.",
+          "title": "Parent Set"
+        },
+        "plate": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Locked image of the empty location, used as a second reference.",
+          "title": "Plate"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "SetDesign",
+      "type": "object"
+    },
+    "Shot": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "index": {
+          "title": "Index",
+          "type": "integer"
+        },
+        "start": {
+          "title": "Start",
+          "type": "number"
+        },
+        "end": {
+          "title": "End",
+          "type": "number"
+        },
+        "type": {
+          "$ref": "#/$defs/ShotType"
+        },
+        "framing": {
+          "$ref": "#/$defs/Framing",
+          "default": "medium"
+        },
+        "section": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Song section this shot falls in, from the lyric tags.",
+          "title": "Section"
+        },
+        "setting": {
+          "default": "",
+          "description": "Name of a set in the visual bible.",
+          "title": "Setting",
+          "type": "string"
+        },
+        "character": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Primary character id on camera / singing in this shot.",
+          "title": "Character"
+        },
+        "characters": {
+          "description": "All character ids visible in this shot (for duets, two-shots, or bands).",
+          "items": {
+            "type": "string"
+          },
+          "title": "Characters",
+          "type": "array"
+        },
+        "wardrobe": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Wardrobe state id worn in the shot's first frame.",
+          "title": "Wardrobe"
+        },
+        "character_wardrobes": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Wardrobe state id per visible character in multi-character shots.",
+          "title": "Character Wardrobes",
+          "type": "object"
+        },
+        "lyrics": {
+          "default": "",
+          "title": "Lyrics",
+          "type": "string"
+        },
+        "intensity": {
+          "default": 0.5,
+          "title": "Intensity",
+          "type": "number"
+        },
+        "still_prompt": {
+          "default": "",
+          "title": "Still Prompt",
+          "type": "string"
+        },
+        "motion_prompt": {
+          "default": "",
+          "title": "Motion Prompt",
+          "type": "string"
+        },
+        "allow_cuts": {
+          "default": false,
+          "description": "Opt-in multi-angle montage mode: allows internal cuts inside this clip.",
+          "title": "Allow Cuts",
+          "type": "boolean"
+        },
+        "props": {
+          "description": "Recurring hero prop ids or names visible in this shot.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Props",
+          "type": "array"
+        },
+        "previz_video": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional 3D blocking / previz video path guiding camera motion and staging.",
+          "title": "Previz Video"
+        },
+        "previz_mapping": {
+          "default": "",
+          "description": "Stand-in mapping from blocking shapes in previz_video to real subjects/props.",
+          "title": "Previz Mapping",
+          "type": "string"
+        },
+        "audio_slice": {
+          "$ref": "#/$defs/AudioSlice"
+        },
+        "num_frames": {
+          "title": "Num Frames",
+          "type": "integer"
+        },
+        "still": {
+          "$ref": "#/$defs/AssetState"
+        },
+        "video": {
+          "$ref": "#/$defs/AssetState"
+        },
+        "review": {
+          "$ref": "#/$defs/Review"
+        }
+      },
+      "required": [
+        "id",
+        "index",
+        "start",
+        "end",
+        "type",
+        "audio_slice",
+        "num_frames"
+      ],
+      "title": "Shot",
+      "type": "object"
+    },
+    "ShotType": {
+      "enum": [
+        "lipsync",
+        "performance",
+        "broll"
+      ],
+      "title": "ShotType",
+      "type": "string"
+    },
+    "VisualBible": {
+      "additionalProperties": false,
+      "properties": {
+        "concept": {
+          "default": "",
+          "title": "Concept",
+          "type": "string"
+        },
+        "style": {
+          "default": "",
+          "title": "Style",
+          "type": "string"
+        },
+        "palette": {
+          "default": "",
+          "title": "Palette",
+          "type": "string"
+        },
+        "lighting": {
+          "default": "",
+          "title": "Lighting",
+          "type": "string"
+        },
+        "negative_prompt": {
+          "default": "",
+          "title": "Negative Prompt",
+          "type": "string"
+        },
+        "settings": {
+          "items": {
+            "$ref": "#/$defs/SetDesign"
+          },
+          "title": "Settings",
+          "type": "array"
+        },
+        "props": {
+          "items": {
+            "$ref": "#/$defs/PropDesign"
+          },
+          "title": "Props",
+          "type": "array"
+        },
+        "rules": {
+          "description": "Rules every shot follows, shown to the director model.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Rules",
+          "type": "array"
+        }
+      },
+      "title": "VisualBible",
+      "type": "object"
+    },
+    "WardrobeState": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "description": {
+          "description": "Everything worn in this state, including what is absent (e.g. 'no cape').",
+          "title": "Description",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "description"
+      ],
+      "title": "WardrobeState",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "title": {
+      "title": "Title",
+      "type": "string"
+    },
+    "duration": {
+      "title": "Duration",
+      "type": "number"
+    },
+    "fps": {
+      "title": "Fps",
+      "type": "integer"
+    },
+    "created_at": {
+      "title": "Created At",
+      "type": "string"
+    },
+    "updated_at": {
+      "title": "Updated At",
+      "type": "string"
+    },
+    "character": {
+      "$ref": "#/$defs/Character"
+    },
+    "characters": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Character"
+      },
+      "description": "Named characters/performers (for duets, bands, or ensembles), keyed by id.",
+      "title": "Characters",
+      "type": "object"
+    },
+    "visual_bible": {
+      "$ref": "#/$defs/VisualBible"
+    },
+    "shots": {
+      "items": {
+        "$ref": "#/$defs/Shot"
+      },
+      "title": "Shots",
+      "type": "array"
+    },
+    "escalated_types": {
+      "description": "Shot types a reviewer has rejected; all of them get spot-checked.",
+      "items": {
+        "$ref": "#/$defs/ShotType"
+      },
+      "title": "Escalated Types",
+      "type": "array"
+    },
+    "total_generations": {
+      "default": 0,
+      "title": "Total Generations",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "title",
+    "duration",
+    "fps"
+  ],
+  "title": "Manifest",
+  "type": "object"
+}

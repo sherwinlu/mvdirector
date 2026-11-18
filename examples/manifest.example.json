@@ -1,0 +1,555 @@
+{
+  "schema_version": 1,
+  "title": "Knight Moves (example)",
+  "duration": 40.0,
+  "fps": 24,
+  "created_at": "2026-11-12T18:30:00+00:00",
+  "updated_at": "2026-11-12T18:30:00+00:00",
+  "character": {
+    "appearance": "A woman of about 30 with medium-deep brown skin, an elongated oval face, high cheekbones, dark almond-shaped eyes under straight brows, and a small beauty mark beneath the outer corner of her LEFT eye. Jet-black blunt jaw-length bob with a center part, ends curved inward. Tall, lean, athletic build. Satin skin, extended black winged liner, deep rose-brown lipstick.",
+    "wardrobe": [
+      {
+        "id": "cape",
+        "description": "Fitted black structured bodysuit with a high square neckline, brushed-silver shoulder caps and forearm cuffs, a floor-length black cape with an oxblood lining clasped at the collarbone, pointed black ankle boots."
+      },
+      {
+        "id": "bare",
+        "description": "The same black bodysuit, silver shoulder caps, cuffs and boots. No cape: the collarbone clasps are open and nothing hangs from the shoulders."
+      }
+    ],
+    "references": {
+      "cape": {
+        "sheet": "assets/reference/cape_sheet.png",
+        "panels": {
+          "front": "assets/reference/cape/cape_front.png",
+          "profile": "assets/reference/cape/cape_profile.png",
+          "three_quarter": "assets/reference/cape/cape_three_quarter.png",
+          "face": "assets/reference/cape/cape_face.png"
+        }
+      },
+      "bare": {
+        "sheet": "assets/reference/bare_sheet.png",
+        "panels": {
+          "front": "assets/reference/bare/bare_front.png",
+          "profile": "assets/reference/bare/bare_profile.png",
+          "three_quarter": "assets/reference/bare/bare_three_quarter.png",
+          "face": "assets/reference/bare/bare_face.png"
+        }
+      }
+    }
+  },
+  "visual_bible": {
+    "concept": "A self-crowned club knight turns the architecture of confinement into her own stage.",
+    "style": "glossy editorial club-pop, architectural fashion film, polished metal against matte fabric",
+    "palette": "obsidian black, brushed silver, electric cobalt, saturated oxblood",
+    "lighting": "large soft neutral face key, hard cobalt side light, narrow white rim light",
+    "negative_prompt": "changing hairstyle, knight helmet, face-covering visor, gold armor, watermarks",
+    "settings": [
+      {
+        "name": "The Blade Corridor",
+        "sections": [
+          "Intro",
+          "Verse"
+        ],
+        "description": "A long, narrow passage of matte-black panels with vertical silver strips and thin cobalt light seams; a white floor line leads toward the lens.",
+        "movement": "She walks toward a retreating camera, placing each heel on the beat. Mostly waist-up.",
+        "plate": "assets/plates/blade_corridor.png"
+      },
+      {
+        "name": "The Knight Floor",
+        "sections": [
+          "Chorus",
+          "Post-Chorus"
+        ],
+        "description": "A black stage with oversized alternating matte-black and charcoal floor squares, silver perimeter rails and a suspended lighting grid.",
+        "movement": "Two decisive steps, a quarter-turn and an angular arm frame.",
+        "plate": "assets/plates/knight_floor.png"
+      },
+      {
+        "name": "The Quiet Chamber",
+        "sections": [
+          "Bridge"
+        ],
+        "description": "A small, nearly empty charcoal room with a dark oxblood rear wall, a narrow steel bench and one vertical opening of warm white light.",
+        "movement": "She begins seated, then stands, and lifts her chin to meet the lens.",
+        "plate": "assets/plates/quiet_chamber.png"
+      }
+    ],
+    "rules": [
+      "Keep the singer visibly performing for most of the video; cutaways belong to her body or costume.",
+      "Eye-level medium shots and close-ups are the foundation; camera moves are smooth and on one axis.",
+      "Armor stays brushed silver, never chrome or gold.",
+      "The cape comes off in the bridge and never reappears.",
+      "Never duplicate or smear her face during a sung line."
+    ]
+  },
+  "shots": [
+    {
+      "id": "s001",
+      "index": 0,
+      "start": 0.0,
+      "end": 4.505,
+      "type": "performance",
+      "framing": "wide",
+      "section": "Intro",
+      "setting": "The Blade Corridor",
+      "wardrobe": "cape",
+      "lyrics": "",
+      "intensity": 0.909,
+      "still_prompt": "Wide shot of the singer moving to the music, not singing, high-energy mood, performance stage.",
+      "motion_prompt": "The singer moves with the music. Slow, steady camera drift.",
+      "audio_slice": {
+        "path": "assets/audio_slices/s001.wav",
+        "start": 0.0,
+        "end": 4.755,
+        "head_handle": 0.0
+      },
+      "num_frames": 121,
+      "still": {
+        "status": "pending",
+        "attempts": [],
+        "attempts_allowed": 4,
+        "selected_attempt": null,
+        "prompt_override": null,
+        "param_overrides": {},
+        "director_note": null,
+        "accepted_by_reviewer": false
+      },
+      "video": {
+        "status": "pending",
+        "attempts": [],
+        "attempts_allowed": 4,
+        "selected_attempt": null,
+        "prompt_override": null,
+        "param_overrides": {},
+        "director_note": null,
+        "accepted_by_reviewer": false
+      },
+      "review": {
+        "required": false,
+        "reasons": [],
+        "decision": null,
+        "note": null,
+        "decided_at": null
+      }
+    },
+    {
+      "id": "s002",
+      "index": 1,
+      "start": 4.505,
+      "end": 9.009,
+      "type": "lipsync",
+      "framing": "close_up",
+      "section": "Verse 1",
+      "setting": "The Blade Corridor",
+      "wardrobe": "cape",
+      "lyrics": "",
+      "intensity": 0.9,
+      "still_prompt": "Close-up, chin level, eyes on the lens, head turned a few degrees.",
+      "motion_prompt": "She delivers the line straight to camera with small head movements. Slow push-in.",
+      "audio_slice": {
+        "path": "assets/audio_slices/s002.wav",
+        "start": 4.255,
+        "end": 9.259,
+        "head_handle": 0.25
+      },
+      "num_frames": 121,
+      "still": {
+        "status": "passed",
+        "attempts": [
+          {
+            "number": 1,
+            "strategy": "initial",
+            "seed": 1818420611,
+            "prompt": "Close-up of the singer on a rooftop at night, city lights behind, singing to camera.",
+            "params": {},
+            "path": "assets/stills/s002_a01.png",
+            "qc": {
+              "passed": true,
+              "score": 0.91,
+              "checks": [
+                {
+                  "name": "dimensions",
+                  "status": "passed",
+                  "hard": true,
+                  "score": null,
+                  "weight": 1.0,
+                  "detail": "",
+                  "fix_hint": null,
+                  "metrics": {
+                    "width": 1280.0,
+                    "height": 720.0
+                  }
+                },
+                {
+                  "name": "sharpness",
+                  "status": "passed",
+                  "hard": false,
+                  "score": 1.0,
+                  "weight": 1.0,
+                  "detail": "",
+                  "fix_hint": null,
+                  "metrics": {
+                    "laplacian_variance": 212.4
+                  }
+                },
+                {
+                  "name": "face_present",
+                  "status": "passed",
+                  "hard": true,
+                  "score": null,
+                  "weight": 1.0,
+                  "detail": "",
+                  "fix_hint": null,
+                  "metrics": {}
+                },
+                {
+                  "name": "face_framing",
+                  "status": "passed",
+                  "hard": true,
+                  "score": 1.0,
+                  "weight": 1.0,
+                  "detail": "",
+                  "fix_hint": null,
+                  "metrics": {
+                    "face_height_fraction": 0.44
+                  }
+                },
+                {
+                  "name": "identity",
+                  "status": "passed",
+                  "hard": true,
+                  "score": 0.84,
+                  "weight": 1.0,
+                  "detail": "",
+                  "fix_hint": null,
+                  "metrics": {
+                    "similarity": 0.51
+                  }
+                },
+                {
+                  "name": "vision_spec",
+                  "status": "passed",
+                  "hard": false,
+                  "score": 0.9,
+                  "weight": 1.0,
+                  "detail": "",
+                  "fix_hint": null,
+                  "metrics": {}
+                },
+                {
+                  "name": "vision_artifacts",
+                  "status": "passed",
+                  "hard": true,
+                  "score": 0.95,
+                  "weight": 1.0,
+                  "detail": "",
+                  "fix_hint": null,
+                  "metrics": {}
+                }
+              ]
+            },
+            "error": null,
+            "created_at": "2026-11-12T18:00:00+00:00"
+          }
+        ],
+        "attempts_allowed": 4,
+        "selected_attempt": 1,
+        "prompt_override": null,
+        "param_overrides": {},
+        "director_note": null,
+        "accepted_by_reviewer": false
+      },
+      "video": {
+        "status": "passed",
+        "attempts": [
+          {
+            "number": 1,
+            "strategy": "initial",
+            "seed": 904113237,
+            "prompt": "She sings the line straight to camera with small head movements. Slow push-in.",
+            "params": {},
+            "path": "assets/videos/s002_a01.mp4",
+            "qc": {
+              "passed": false,
+              "score": 0.38,
+              "checks": [
+                {
+                  "name": "dimensions",
+                  "status": "passed",
+                  "hard": true,
+                  "score": null,
+                  "weight": 1.0,
+                  "detail": "",
+                  "fix_hint": null,
+                  "metrics": {
+                    "width": 1280.0,
+                    "height": 720.0
+                  }
+                },
+                {
+                  "name": "duration",
+                  "status": "passed",
+                  "hard": true,
+                  "score": null,
+                  "weight": 1.0,
+                  "detail": "",
+                  "fix_hint": null,
+                  "metrics": {
+                    "duration": 4.375
+                  }
+                },
+                {
+                  "name": "temporal",
+                  "status": "passed",
+                  "hard": false,
+                  "score": 0.9,
+                  "weight": 1.0,
+                  "detail": "",
+                  "fix_hint": null,
+                  "metrics": {}
+                },
+                {
+                  "name": "face_presence",
+                  "status": "passed",
+                  "hard": true,
+                  "score": null,
+                  "weight": 1.0,
+                  "detail": "",
+                  "fix_hint": null,
+                  "metrics": {
+                    "face_presence": 1.0
+                  }
+                },
+                {
+                  "name": "lipsync",
+                  "status": "failed",
+                  "hard": true,
+                  "score": 0.09,
+                  "weight": 1.0,
+                  "detail": "mouth movement does not follow the vocal (correlation 0.13)",
+                  "fix_hint": "Keep the face frontal with the mouth unobstructed, and simplify body and camera movement so the mouth can follow the vocal.",
+                  "metrics": {
+                    "correlation": 0.13,
+                    "lag_seconds": 0.0
+                  }
+                },
+                {
+                  "name": "identity",
+                  "status": "passed",
+                  "hard": true,
+                  "score": 0.8,
+                  "weight": 1.0,
+                  "detail": "",
+                  "fix_hint": null,
+                  "metrics": {
+                    "similarity": 0.45
+                  }
+                },
+                {
+                  "name": "vision_spec",
+                  "status": "passed",
+                  "hard": false,
+                  "score": 0.85,
+                  "weight": 1.0,
+                  "detail": "",
+                  "fix_hint": null,
+                  "metrics": {}
+                },
+                {
+                  "name": "vision_artifacts",
+                  "status": "passed",
+                  "hard": true,
+                  "score": 0.9,
+                  "weight": 1.0,
+                  "detail": "",
+                  "fix_hint": null,
+                  "metrics": {}
+                }
+              ]
+            },
+            "error": null,
+            "created_at": "2026-11-12T18:04:00+00:00"
+          },
+          {
+            "number": 2,
+            "strategy": "new_seed",
+            "seed": 1295517801,
+            "prompt": "She sings the line straight to camera with small head movements. Slow push-in.",
+            "params": {},
+            "path": "assets/videos/s002_a02.mp4",
+            "qc": {
+              "passed": true,
+              "score": 0.88,
+              "checks": [
+                {
+                  "name": "dimensions",
+                  "status": "passed",
+                  "hard": true,
+                  "score": null,
+                  "weight": 1.0,
+                  "detail": "",
+                  "fix_hint": null,
+                  "metrics": {
+                    "width": 1280.0,
+                    "height": 720.0
+                  }
+                },
+                {
+                  "name": "duration",
+                  "status": "passed",
+                  "hard": true,
+                  "score": null,
+                  "weight": 1.0,
+                  "detail": "",
+                  "fix_hint": null,
+                  "metrics": {
+                    "duration": 4.375
+                  }
+                },
+                {
+                  "name": "temporal",
+                  "status": "passed",
+                  "hard": false,
+                  "score": 0.92,
+                  "weight": 1.0,
+                  "detail": "",
+                  "fix_hint": null,
+                  "metrics": {}
+                },
+                {
+                  "name": "face_presence",
+                  "status": "passed",
+                  "hard": true,
+                  "score": null,
+                  "weight": 1.0,
+                  "detail": "",
+                  "fix_hint": null,
+                  "metrics": {
+                    "face_presence": 1.0
+                  }
+                },
+                {
+                  "name": "lipsync",
+                  "status": "passed",
+                  "hard": true,
+                  "score": 0.86,
+                  "weight": 1.0,
+                  "detail": "",
+                  "fix_hint": null,
+                  "metrics": {
+                    "correlation": 0.4,
+                    "lag_seconds": 0.042
+                  }
+                },
+                {
+                  "name": "identity",
+                  "status": "passed",
+                  "hard": true,
+                  "score": 0.84,
+                  "weight": 1.0,
+                  "detail": "",
+                  "fix_hint": null,
+                  "metrics": {
+                    "similarity": 0.46
+                  }
+                },
+                {
+                  "name": "vision_spec",
+                  "status": "passed",
+                  "hard": false,
+                  "score": 0.9,
+                  "weight": 1.0,
+                  "detail": "",
+                  "fix_hint": null,
+                  "metrics": {}
+                },
+                {
+                  "name": "vision_artifacts",
+                  "status": "passed",
+                  "hard": true,
+                  "score": 0.9,
+                  "weight": 1.0,
+                  "detail": "",
+                  "fix_hint": null,
+                  "metrics": {}
+                }
+              ]
+            },
+            "error": null,
+            "created_at": "2026-11-12T18:09:00+00:00"
+          }
+        ],
+        "attempts_allowed": 4,
+        "selected_attempt": 2,
+        "prompt_override": null,
+        "param_overrides": {},
+        "director_note": null,
+        "accepted_by_reviewer": false
+      },
+      "review": {
+        "required": true,
+        "reasons": [
+          "retried",
+          "sampled"
+        ],
+        "decision": "approved",
+        "note": null,
+        "decided_at": "2026-11-12T18:30:00+00:00"
+      }
+    },
+    {
+      "id": "s003",
+      "index": 2,
+      "start": 9.009,
+      "end": 13.014,
+      "type": "lipsync",
+      "framing": "medium",
+      "section": "Chorus",
+      "setting": "The Knight Floor",
+      "wardrobe": "cape",
+      "lyrics": "Replace this file with your lyrics, one line per sung line",
+      "intensity": 0.922,
+      "still_prompt": "Medium shot of the singer singing directly to camera, high-energy mood, performance stage.",
+      "motion_prompt": "The singer performs the line to camera with natural head movement. Slow push-in.",
+      "audio_slice": {
+        "path": "assets/audio_slices/s003.wav",
+        "start": 8.759,
+        "end": 13.264,
+        "head_handle": 0.25
+      },
+      "num_frames": 113,
+      "still": {
+        "status": "pending",
+        "attempts": [],
+        "attempts_allowed": 4,
+        "selected_attempt": null,
+        "prompt_override": null,
+        "param_overrides": {},
+        "director_note": null,
+        "accepted_by_reviewer": false
+      },
+      "video": {
+        "status": "pending",
+        "attempts": [],
+        "attempts_allowed": 4,
+        "selected_attempt": null,
+        "prompt_override": null,
+        "param_overrides": {},
+        "director_note": null,
+        "accepted_by_reviewer": false
+      },
+      "review": {
+        "required": false,
+        "reasons": [],
+        "decision": null,
+        "note": null,
+        "decided_at": null
+      }
+    }
+  ],
+  "escalated_types": [
+    "lipsync"
+  ],
+  "total_generations": 3
+}

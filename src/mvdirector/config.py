@@ -1,0 +1,532 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+"""Project configuration, loaded from ``project.yaml`` and validated with pydantic.
+
+Thresholds live here, not in code, so they can be calibrated per project.
+Connection and workflow-default strings may reference allowed environment variables
+(``MVD_*``, ``COMFY_*``, or ``RUNPOD_TOKEN``) as ``${NAME}`` or ``${NAME:-default}``.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+from enum import Enum
+from pathlib import Path
+from typing import Any, Literal
+
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+
+from mvdirector.errors import ConfigError
+from mvdirector.models import Framing, RetryStrategy
+
+CONFIG_FILENAME = "project.yaml"
+_ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ALLOWED_ENV_PREFIXES = ("MVD_", "COMFY_")
+_ALLOWED_ENV_EXACT = {"RUNPOD_TOKEN"}
+_ALLOWED_LLM_KEY_NAMES = {
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+}
+_BLOCKED_ENV_PREFIXES = (
+    "AWS_",
+    "AZURE_",
+    "DOCKER_",
+    "GCP_",
+    "GH_",
+    "GITHUB_",
+    "GITLAB_",
+    "GPG_",
+    "KUBE",
+    "NPM_",
+    "PYPI_",
+    "SSH_",
+)
+
+
+def _extra_allowed_env_vars() -> set[str]:
+    """Optional user-configured comma-separated allowlist from ``MVD_ALLOWED_ENV_VARS``."""
+    raw = os.environ.get("MVD_ALLOWED_ENV_VARS", "")
+    allowed: set[str] = set()
+    for item in raw.split(","):
+        name = item.strip()
+        if not name or not _ENV_NAME.match(name):
+            continue
+        upper = name.upper()
+        if not upper.startswith(_BLOCKED_ENV_PREFIXES):
+            allowed.add(upper)
+    return allowed
+
+
+def is_allowed_env_var(name: str) -> bool:
+    """Least-privilege allowlist for ``${NAME}`` expansion in connection/workflow fields.
+
+    Only ``MVD_*``, ``COMFY_*``, ``RUNPOD_TOKEN``, and names explicitly listed in
+    ``MVD_ALLOWED_ENV_VARS`` may be expanded into strings such as ``comfy.base_url``,
+    ``comfy.headers``, ``llm.base_url``, or workflow ``defaults``. LLM API keys and
+    unrelated secrets (such as ``DATABASE_URL``) are never expanded by default.
+    """
+    if not _ENV_NAME.match(name):
+        return False
+    upper = name.upper()
+    if upper.startswith(_BLOCKED_ENV_PREFIXES):
+        return False
+    return (
+        upper in _ALLOWED_ENV_EXACT
+        or upper.startswith(_ALLOWED_ENV_PREFIXES)
+        or upper in _extra_allowed_env_vars()
+    )
+
+
+def is_allowed_api_key_env(name: str) -> bool:
+    """Validate ``llm.api_key_env``, the variable whose value is sent to ``llm.base_url``.
+
+    Because ``project.yaml`` also controls ``llm.base_url``, this is as sensitive as header
+    expansion: only the standard provider key names, ``MVD_*`` names, and names explicitly
+    listed in ``MVD_ALLOWED_ENV_VARS`` are accepted. Arbitrary ``*_KEY`` / ``*_TOKEN`` names
+    are rejected so an unrelated credential cannot be sent to a server named in the YAML.
+    """
+    if not _ENV_NAME.match(name):
+        return False
+    upper = name.upper()
+    if upper.startswith(_BLOCKED_ENV_PREFIXES):
+        return False
+    return (
+        upper in _ALLOWED_LLM_KEY_NAMES
+        or upper.startswith("MVD_")
+        or upper in _extra_allowed_env_vars()
+    )
+
+
+class _Section(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class InputsConfig(_Section):
+    mix: str = "inputs/mix.wav"
+    vocals: str = "inputs/vocals.wav"
+    drums: str | None = None
+    lyrics: str = "inputs/lyrics.txt"
+    style: str = "inputs/style.md"
+    word_timestamps: str | None = Field(
+        default=None,
+        description="Optional JSON list of {word, start, end}; skips transcription.",
+    )
+
+
+class VideoConfig(_Section):
+    width: int = 1280
+    height: int = 720
+    draft_width: int | None = Field(
+        default=None, ge=64, description="Optional width used when running with --draft."
+    )
+    draft_height: int | None = Field(
+        default=None, ge=64, description="Optional height used when running with --draft."
+    )
+    fps: int = 24
+    max_clip_seconds: float = 8.0
+    min_clip_seconds: float = 1.5
+    handle_seconds: float = Field(
+        default=0.25, description="Extra audio/video on each side of a shot, trimmed at assembly."
+    )
+    # Frame count rule: multiple * n + offset (LTX: 8n+1, Wan/Hunyuan: 4n+1, MiniMax/exact: 1n+0).
+    frame_multiple: int = Field(default=8, ge=1)
+    frame_offset: int = Field(default=1, ge=0)
+    beats_per_bar: int = 4
+    cut_mode: Literal["bars", "phrases"] = Field(
+        default="bars",
+        description=(
+            "'bars' cuts on musical bar lines (best for 2-8s LTX/Wan clips); 'phrases' cuts on "
+            "vocal phrase and section boundaries (best for 5-15s MiniMax H3 clips)."
+        ),
+    )
+    dynamic_pacing: bool = Field(
+        default=False,
+        description="Cut faster during high-intensity bars and snap cuts to section boundaries.",
+    )
+    snap_sections: Literal["auto", "always", "never"] = Field(
+        default="auto",
+        description=(
+            "'auto' snaps bar cuts to lyric section boundaries when the section tags name more "
+            "than one singer; 'always' / 'never' override that detection."
+        ),
+    )
+    lipsync_min_vocal_fraction: float = Field(
+        default=0.25, description="Share of a shot that must be sung to make it a lip-sync shot."
+    )
+    lipsync_audio_source: Literal["vocals", "mix"] = "vocals"
+    motion_single_take: bool = Field(
+        default=True,
+        description="Append framing continuity and single-take (no cuts) cues to motion prompts.",
+    )
+    motion_no_subtitles: bool = Field(
+        default=True,
+        description="Append a 'No subtitles, no text.' guard to composed motion prompts.",
+    )
+    motion_no_music: bool = Field(
+        default=True,
+        description=(
+            "Append a 'No music.' guard on generated clips so audio-video models do not invent "
+            "competing background music."
+        ),
+    )
+    motion_include_lyrics: bool = Field(
+        default=False,
+        description=(
+            "Embed the shot's lyrics in composed motion prompts on lip-sync shots (useful for "
+            "video models like Seedance that read lyrics from the prompt rather than an input)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _check_draft_dimensions(self) -> VideoConfig:
+        if (self.draft_width is None) != (self.draft_height is None):
+            raise ValueError("Set both video.draft_width and video.draft_height together.")
+        return self
+
+    def generation_size(self, draft: bool = False) -> tuple[int, int]:
+        """Target (width, height) for still/video generation."""
+        if not draft:
+            return (self.width, self.height)
+        if self.draft_width is not None and self.draft_height is not None:
+            return (self.draft_width, self.draft_height)
+        dw = max(64, (self.width // 2) - ((self.width // 2) % 2))
+        dh = max(64, (self.height // 2) - ((self.height // 2) % 2))
+        return (dw, dh)
+
+
+class ComfyConfig(_Section):
+    base_url: str = Field(default="${COMFY_URL:-http://127.0.0.1:8188}", validate_default=True)
+    headers: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("base_url", "headers", mode="before")
+    @classmethod
+    def _expand_connection_env(cls, value: Any) -> Any:
+        """Expand ``${NAME}`` here (defaults included) rather than on the raw YAML."""
+        return expand_env(value)
+
+    request_timeout: float = 60.0
+    job_timeout: float = 1800.0
+    poll_interval: float = 3.0
+    workflows_dir: str = "workflows"
+    reference_notation: Literal["prose", "tags"] = Field(
+        default="prose",
+        description=(
+            "How composed prompts refer to multi-image/video workflow inputs: 'prose' "
+            "('first/second reference image') or 'tags' ('@image1', '@image2', '@video1')."
+        ),
+    )
+    # Logical workflow name -> bindings file inside workflows_dir.
+    workflows: dict[str, str] = Field(
+        default_factory=lambda: {
+            "t2i": "qwen_t2i.bindings.json",
+            "still": "qwen_edit_still.bindings.json",
+            "lipsync": "ltx_lipsync.bindings.json",
+            "i2v": "ltx_i2v.bindings.json",
+        }
+    )
+
+
+LLMProvider = Literal["anthropic", "openai", "gemini", "ollama", "openai_compatible"]
+
+
+class LLMConfig(_Section):
+    """One model for every text task: planning, vision checks and prompt rewrites."""
+
+    enabled: bool = True
+    provider: LLMProvider = Field(
+        default="anthropic",
+        description="anthropic, openai, gemini, ollama (native API), or openai_compatible "
+        "(LM Studio, llama.cpp, vLLM, OpenRouter and similar).",
+    )
+    model: str = "claude-sonnet-5-5"
+    base_url: str | None = Field(
+        default=None,
+        description="Server address. Required for openai_compatible; optional for other providers.",
+    )
+    api_key_env: str | None = Field(
+        default=None, description="Name of the environment variable that holds the API key."
+    )
+    max_tokens: int = Field(default=8000, ge=256)
+    shots_per_request: int = Field(default=20, ge=1)
+    timeout_seconds: float = Field(default=180.0, gt=0)
+    json_mode: Literal["auto", "off", "object", "schema"] = Field(
+        default="auto",
+        description="How to ask the server for JSON: 'object' (valid JSON), 'schema' (JSON "
+        "Schema, where supported), 'off' (prompt only). 'auto' picks a safe default per provider.",
+    )
+    context_tokens: int | None = Field(
+        default=None,
+        ge=1024,
+        description="Context window to request. Used by ollama (default 16384) and for warnings.",
+    )
+
+    @field_validator("base_url", mode="before")
+    @classmethod
+    def _expand_base_url_env(cls, value: Any) -> Any:
+        return expand_env(value)
+
+    @model_validator(mode="after")
+    def _check_provider(self) -> LLMConfig:
+        if not self.model.strip():
+            raise ValueError("llm.model must not be empty")
+        if self.provider != "anthropic" and "model" not in self.model_fields_set:
+            # The default names a Claude model, which no other provider has.
+            raise ValueError(
+                f"llm.model must be set when llm.provider is '{self.provider}'. Use the model "
+                "name your provider or server lists."
+            )
+        if self.provider == "openai_compatible" and not self.base_url:
+            env_url = os.environ.get("MVD_LLM_URL", "").strip()
+            if env_url:
+                self.base_url = env_url
+            else:
+                raise ValueError(
+                    "llm.base_url is required when llm.provider is 'openai_compatible', for "
+                    "example http://localhost:1234/v1 (or set MVD_LLM_URL)"
+                )
+        if self.api_key_env is not None and not is_allowed_api_key_env(self.api_key_env):
+            raise ValueError(
+                f"llm.api_key_env {self.api_key_env!r} is not allowed. Use a provider key name "
+                "(ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, GOOGLE_API_KEY), an MVD_* "
+                "name (for example MVD_LLM_KEY), or a name listed in MVD_ALLOWED_ENV_VARS."
+            )
+        return self
+
+
+class PlanningConfig(_Section):
+    wardrobe_monotonic: bool = Field(
+        default=True,
+        description="A costume change is one-way: once a later wardrobe state appears, "
+        "earlier states never return (e.g. a cape taken off stays off).",
+    )
+    allow_multicut_shots: bool = Field(
+        default=False,
+        description="Allow the planner to flag high-energy shots as multi-angle montage cuts.",
+    )
+
+
+class ReferenceConfig(_Section):
+    layout: Literal["row", "grid", "columns"] = Field(
+        default="row",
+        description=(
+            "Reference sheet layout: 'row' (1x4), 'grid' (2x2), or 'columns' (left stacked "
+            "headshots + full-height neck-down front/back body panels)."
+        ),
+    )
+    background: Literal["white", "grey"] = Field(
+        default="white",
+        description=(
+            "Studio background for reference sheets: 'white' seamless or 'grey' neutral flat-lit "
+            "(avoids clipping on bright or glowing outfits)."
+        ),
+    )
+    width: int | None = Field(default=None, description="Sheet width. Default depends on layout.")
+    height: int | None = Field(default=None, description="Sheet height. Default depends on layout.")
+    candidates: int = Field(default=4, ge=1)
+    video_candidates: int = Field(
+        default=2,
+        ge=1,
+        description="Candidate turnaround reference videos generated per run.",
+    )
+    panel_inset: float = Field(
+        default=0.012,
+        ge=0.0,
+        lt=0.2,
+        description="Share of each panel trimmed on every side, to drop dividers and labels.",
+    )
+
+    def size(self) -> tuple[int, int]:
+        defaults = {"row": (2048, 896), "grid": (1536, 1536), "columns": (1536, 1024)}
+        default = defaults[self.layout]
+        return (self.width or default[0], self.height or default[1])
+
+
+class PlatesConfig(_Section):
+    candidates: int = Field(default=3, ge=1)
+
+
+class PropsConfig(_Section):
+    candidates: int = Field(default=3, ge=1)
+
+
+class ImageQCConfig(_Section):
+    aspect_tolerance: float = 0.03
+    min_resolution_scale: float = 0.5
+    sharpness_bad: float = 40.0
+    sharpness_good: float = 150.0
+    identity_hard_min: float = 0.30
+    identity_good: float = 0.55
+    # Minimum face height as a share of frame height, per framing.
+    min_face_fraction: dict[Framing, float] = Field(
+        default_factory=lambda: {
+            Framing.CLOSE_UP: 0.30,
+            Framing.MEDIUM_CLOSE: 0.18,
+            Framing.MEDIUM: 0.09,
+            Framing.WIDE: 0.03,
+        }
+    )
+    vision_hard_min: float = 0.30
+    vision_character_hard_min: float = 0.40
+
+
+class VideoQCConfig(_Section):
+    duration_tolerance: float = 0.3
+    aspect_tolerance: float = 0.03
+    min_resolution_scale: float = 0.5
+    analysis_width: int = 512
+    # Lip-sync: correlation between mouth opening and vocal loudness.
+    # The 0.40 floor suppresses random-noise false passes while the ±0.25s (±6 frames at 24fps)
+    # lag window avoids rejecting workflows with a small constant AV offset.
+    lipsync_bad: float = 0.25
+    lipsync_good: float = 0.65
+    lipsync_min: float = 0.40
+    lipsync_max_lag_seconds: float = 0.25
+    lipsync_framings: list[Framing] = Field(
+        default_factory=lambda: [Framing.CLOSE_UP, Framing.MEDIUM_CLOSE, Framing.MEDIUM],
+        description="Mouths are too small to measure in wider shots.",
+    )
+    face_presence_min: float = 0.90
+    identity_sample_seconds: float = 0.5
+    identity_hard_min: float = 0.25
+    identity_good: float = 0.50
+    # Mean absolute frame-to-frame difference, 0-1.
+    static_max_motion: float = 0.0008
+    jump_cut_threshold: float = 0.25
+    flicker_good: float = 0.03
+    flicker_bad: float = 0.12
+    vision_frames: int = 5
+    vision_hard_min: float = 0.30
+    vision_character_hard_min: float = 0.40
+
+
+class QCConfig(_Section):
+    pass_score: float = 0.70
+    vision_enabled: bool = True
+    face_backend: Literal["mediapipe", "insightface"] = Field(
+        default="mediapipe",
+        description=(
+            "Face analyzer backend: 'mediapipe' (default, Apache-2.0, commercially permissive; "
+            "checks face_present and face_framing while vision_character checks identity) or "
+            "'insightface' (requires the 'insightface' extra; adds buffalo_l face-embedding "
+            "identity checks, whose pretrained weights are non-commercial research only)."
+        ),
+    )
+    on_missing_dependency: Literal["skip", "fail"] = Field(
+        default="fail",
+        description=(
+            "'fail' stops the run when required QC extras are missing; "
+            "'skip' logs a warning and omits the check."
+        ),
+    )
+    weights: dict[str, float] = Field(
+        default_factory=lambda: {
+            "lipsync": 3.0,
+            "identity": 2.0,
+            "vision_artifacts": 2.0,
+            "vision_spec": 1.0,
+            "vision_character": 2.0,
+            "temporal": 1.0,
+            "sharpness": 0.5,
+            "face_framing": 1.0,
+        }
+    )
+    image: ImageQCConfig = Field(default_factory=ImageQCConfig)
+    video: VideoQCConfig = Field(default_factory=VideoQCConfig)
+
+
+class RetryConfig(_Section):
+    max_attempts: int = Field(default=4, ge=1)
+    strategies: list[RetryStrategy] = Field(
+        default_factory=lambda: [
+            RetryStrategy.NEW_SEED,
+            RetryStrategy.REWRITE_PROMPT,
+            RetryStrategy.ADJUST_PARAMS,
+        ],
+        description="Applied in order from attempt 2 on; the last one repeats.",
+    )
+    max_generations_per_run: int = Field(default=300, ge=1)
+    # Workflow parameters applied by the adjust_params strategy.
+    adjust_params: dict[str, dict[str, Any]] = Field(
+        default_factory=lambda: {"still": {"steps": 40}, "video": {"steps": 40}}
+    )
+
+    @model_validator(mode="after")
+    def _no_initial(self) -> RetryConfig:
+        if RetryStrategy.INITIAL in self.strategies or not self.strategies:
+            raise ValueError("retry.strategies must be non-empty and must not contain 'initial'")
+        return self
+
+
+class ReviewMode(str, Enum):
+    LIGHT = "light"  # spot-check a sample of approved shots, plus every exhausted shot
+    STRICT = "strict"  # only exhausted shots reach the reviewer
+
+
+class ReviewConfig(_Section):
+    mode: ReviewMode = ReviewMode.LIGHT
+    closeup_rate: float = Field(default=1.0, ge=0.0, le=1.0)
+    other_rate: float = Field(default=0.25, ge=0.0, le=1.0)
+    include_retried: bool = True
+    include_near_threshold: bool = True
+    near_threshold_margin: float = 0.05
+
+
+class ProjectConfig(_Section):
+    title: str = "Untitled"
+    seed: int = 1234
+    inputs: InputsConfig = Field(default_factory=InputsConfig)
+    video: VideoConfig = Field(default_factory=VideoConfig)
+    comfy: ComfyConfig = Field(default_factory=ComfyConfig)
+    llm: LLMConfig = Field(default_factory=LLMConfig)
+    planning: PlanningConfig = Field(default_factory=PlanningConfig)
+    reference: ReferenceConfig = Field(default_factory=ReferenceConfig)
+    plates: PlatesConfig = Field(default_factory=PlatesConfig)
+    props: PropsConfig = Field(default_factory=PropsConfig)
+    qc: QCConfig = Field(default_factory=QCConfig)
+    retry: RetryConfig = Field(default_factory=RetryConfig)
+    review: ReviewConfig = Field(default_factory=ReviewConfig)
+
+
+def expand_env(value: Any) -> Any:
+    """Recursively replace ``${NAME}`` / ``${NAME:-default}`` in strings."""
+    if isinstance(value, str):
+
+        def replace(match: re.Match[str]) -> str:
+            name, default = match.group(1), match.group(2)
+            if not is_allowed_env_var(name):
+                raise ConfigError(
+                    f"Environment variable '{name}' is not allowed in {CONFIG_FILENAME}. "
+                    "Only MVD_*, COMFY_*, RUNPOD_TOKEN, or names listed in MVD_ALLOWED_ENV_VARS "
+                    "may be expanded."
+                )
+            resolved = os.environ.get(name, default)
+            if resolved is None:
+                raise ConfigError(f"Environment variable {name} is not set")
+            return resolved
+
+        return _ENV_PATTERN.sub(replace, value)
+    if isinstance(value, dict):
+        return {key: expand_env(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [expand_env(item) for item in value]
+    return value
+
+
+def load_config(path: Path) -> ProjectConfig:
+    if not path.is_file():
+        raise ConfigError(f"Config file not found: {path}")
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"{path} is not valid YAML: {exc}") from exc
+    try:
+        return ProjectConfig.model_validate(raw)
+    except ValidationError as exc:
+        raise ConfigError(f"Invalid configuration in {path}:\n{exc}") from exc

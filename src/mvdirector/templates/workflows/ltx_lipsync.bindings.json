@@ -1,0 +1,19 @@
+{
+  "description": "LTX image + audio to video, for lip-sync shots. 'audio' receives the uploaded vocal slice. Node ids below are examples: replace them with the ids from your exported workflow.",
+  "workflow": "ltx_lipsync.api.json",
+  "inputs": {
+    "positive_prompt": [{"node": "6", "field": "text"}],
+    "negative_prompt": [{"node": "7", "field": "text"}],
+    "image": [{"node": "20", "field": "image"}],
+    "audio": [{"node": "21", "field": "audio"}],
+    "seed": [{"node": "30", "field": "noise_seed"}],
+    "width": [{"node": "40", "field": "width"}],
+    "height": [{"node": "40", "field": "height"}],
+    "num_frames": [{"node": "40", "field": "length"}],
+    "fps": [{"node": "41", "field": "frame_rate"}, {"node": "50", "field": "fps"}],
+    "steps": [{"node": "31", "field": "steps"}]
+  },
+  "required": ["positive_prompt", "image", "audio", "seed", "num_frames"],
+  "defaults": {},
+  "output": {"node": "50", "extensions": [".mp4"]}
+}

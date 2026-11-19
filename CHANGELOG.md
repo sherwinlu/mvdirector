@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-18
+
 ### Added
 - `video.size_multiple`: snaps generation sizes to the grid the workflow renders on, keeping the aspect ratio within the 3% quality-check tolerance. LTX needs 64; its default 640x360 draft came back as 640x320 and failed every dimension check, and retries could not fix that.
 - The shipped `qwen_edit_still` bindings include `set_image` and `prop_image`.

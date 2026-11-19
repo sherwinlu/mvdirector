@@ -420,7 +420,10 @@ class Character(StrictModel):
     )
     invariants: str = Field(
         default="",
-        description="Signature accessories or details kept intact across wardrobe changes.",
+        description=(
+            "Details written into every still of this character and kept across wardrobe changes "
+            "(accessories, hair). Nothing a costume change would alter."
+        ),
     )
     parent_character: str | None = Field(
         default=None,

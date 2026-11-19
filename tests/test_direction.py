@@ -653,3 +653,18 @@ def test_pinned_details_reach_every_character_in_a_still_prompt():
     # A character with nothing pinned adds no empty "Always:" note.
     manifest.shots[1].character, manifest.shots[1].characters = "ned", ["ned"]
     assert "Always" not in prompts.compose_still_prompt(manifest, manifest.shots[1])
+
+
+def test_pinned_details_edge_cases():
+    from mvdirector.models import Character, WardrobeState
+
+    coat = [WardrobeState(id="coat", description="a long black coat")]
+    # A costume with no closing punctuation does not swallow the pinned details.
+    worn = Character(appearance="Fair.", invariants="blonde hair in a bun", wardrobe=coat)
+    assert prompts._look(worn, "coat") == (
+        "Fair. Wearing: a long black coat. Always: blonde hair in a bun."
+    )
+    # Pinned details alone still read as a sentence; punctuation-only ones say nothing.
+    assert prompts._look(Character(invariants="a scar"), None) == "Always: a scar."
+    assert prompts._look(Character(invariants=" . "), None) == ""
+    assert prompts._look(Character(), None) == ""

@@ -119,6 +119,7 @@ def test_planner_persists_props_and_parent_set_and_warns_unknown_prop(analysis, 
             )
 
     cfg = ProjectConfig()
+    cfg.planning.max_lipsync_share = None  # keep s001 on camera for this test
     cfg.video.max_clip_seconds = 8.0
     with caplog.at_level(logging.WARNING, logger="mvdirector.planning.planner"):
         manifest = build_manifest(cfg, analysis, "lyrics", "style", PropDirector())

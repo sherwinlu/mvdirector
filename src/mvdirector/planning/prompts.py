@@ -17,8 +17,8 @@ from mvdirector.models import Character, Framing, Manifest, Shot, ShotType
 if TYPE_CHECKING:
     from mvdirector.config import VideoConfig
 
-BIBLE_SYSTEM = """You are the director of a performance-driven music video. Performers are on
-camera for most of the song. Write the visual bible that every shot will follow.
+BIBLE_SYSTEM = """You are the director of a music video that balances performer shots with
+cutaways. Write the visual bible that every shot will follow.
 
 - concept: two to four sentences on the idea that ties the video together.
 - characters: every distinct singer, vocalist, or on-camera band/group member indicated by the
@@ -66,8 +66,8 @@ camera for most of the song. Write the visual bible that every shot will follow.
   rules that apply across the cast rather than locking every shot to a single character. Only
   rules a shot-by-shot director can act on."""
 
-SHOTS_SYSTEM = """You are the director of a performance-driven music video. Timing is already
-fixed. For each shot you are given, choose the creative details.
+SHOTS_SYSTEM = """You are the director of a music video. Timing is already fixed. For each shot
+you are given, choose the creative details.
 
 Rules:
 - Return exactly one entry per shot id you were given.
@@ -83,12 +83,16 @@ Rules:
 - wardrobe: use the id of one wardrobe state for the shot's primary character. It is what that
   character wears in the shot's FIRST frame. A costume change may happen during a shot; the next
   shot then uses the new state. Each character's wardrobe only moves forward through their list.
-  Never return to an earlier state.
+  Never return to an earlier state. Use null on 'broll'.
 - 'lipsync' shots show the active singer singing the given lyrics. Use framing close_up or
   medium_close (never medium or wide) so the singer's mouth is clearly visible and unobstructed
   (no hands, microphones, hair or foreground objects across the mouth).
 - Shots given as 'performance' have no vocals. Keep them as 'performance' (performer on camera,
-  not singing) or change them to 'broll' (no performer) where a cutaway serves the song.
+  not singing) or change them to 'broll' (no performer) where a cutaway serves the song, without
+  putting more than two 'broll' shots in a row.
+- Shots given as 'broll' are cutaways: the vocal plays over them and no performer is shown. Keep
+  them 'broll', with character and wardrobe null, and show what the lyric is about (an object, a
+  place, light, weather, or an architectural detail), never a face or performer.
 - Match detail to shot size. Small details (identifying marks, jewelry, cuffs, props, screen
   content) belong in close_up or medium_close shots only. In medium and wide shots, describe pose,
   silhouette and action, not fine detail.
@@ -101,6 +105,27 @@ Rules:
   choruses, release in them, hold still where the song is stripped back. Match energy to
   intensity (0 calm to 1 peak).
 - Vary framing between neighbouring shots, and stay consistent with the shots already directed.
+- Shape the video like the song. First verse: restrained, one look. First chorus: the first
+  escalation, so change the set, the framing or the light from the verse. Second verse: never a
+  repeat of the first; add a complication (a new angle, set, prop or costume beat). Bridge: break
+  the pattern of the shots before it (a different set, light or pace). Final chorus: the payoff,
+  bringing earlier looks back together. Close on an image that lingers.
+- Pace is built from four levers that stack: cut speed, movement in the frame, shot scale (the
+  closer the lens, the faster it feels) and camera movement. Each shot has a pace (calm, moderate
+  or high) and a note when it changes from the shot before. Raise the pace by tightening the
+  framing and adding movement in the frame, and lower it by doing the opposite. A change of pace
+  must follow the song (a section change or a rise or fall in intensity), never come from nowhere,
+  and the bridge should strip back so the next lift is felt. On 'lipsync' shots the camera stays
+  steady, so use scale and movement in the frame, not camera moves, to carry the pace.
+- Eye contact: in verses let the singer look slightly off the lens, in three-quarter view or at
+  something in the room while keeping their face and mouth clearly visible to the lens. Save a
+  look straight into the lens for the pre-chorus build and the chorus hook.
+- Use at least three distinct looks across the video (different sets or lighting), not one setup.
+- Something should visibly change every 2 to 4 seconds without a cut: light shifting, a flame or
+  curtain moving, a background element, the performer's posture. Do not use camera moves for this
+  on lipsync shots.
+- Aim for one striking, printable frame in every 30 seconds: strong symmetry, a silhouette, or a
+  single bright light against dark.
 - still_prompt: describes the first frame only: framing, physical camera placement in open space,
   who is in frame, pose, action, camera angle. It is sent to an image-edit model together with a
   reference portrait of the primary singer, and the set and character descriptions are added

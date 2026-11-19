@@ -76,6 +76,8 @@ llm:
 planning:
   wardrobe_monotonic: true       # a costume change is one-way (a cape taken off stays off)
   allow_multicut_shots: false    # allow the planner to emit multi-angle montage cuts (allow_cuts)
+  max_lipsync_share: 0.45        # cap on screen time the singer sings to camera: 0.7 performance,
+                                 #   0.45 hybrid, 0.2 narrative; the rest becomes cutaways (null = no cap)
 
 reference:
   layout: row                    # row (1x4) | grid (2x2) | columns (headshots + front/back body)

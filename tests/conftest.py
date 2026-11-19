@@ -173,6 +173,7 @@ def project(tmp_path: Path) -> Project:
     write_workflows(root / "workflows", names)
     config = ProjectConfig(title="Test Song")
     config.llm.enabled = False
+    config.planning.max_lipsync_share = None  # most tests expect every sung shot on camera
     config.comfy.base_url = "http://comfy.test"
     config.comfy.poll_interval = 0.0
     config.comfy.workflows = {name: f"{name}.bindings.json" for name in names}

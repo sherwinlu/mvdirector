@@ -27,6 +27,7 @@ def test_solo_singing_shots_stay_close_and_prompts_have_no_duet_text(project, an
 def test_solo_pinned_details_appear_once_and_only_when_set(project, analysis):
     manifest = _solo(project, analysis)
     shot = next(s for s in manifest.shots if s.type is ShotType.LIPSYNC)
+    manifest.character.appearance = "A singer with short dark hair."
     manifest.character.invariants = "a small scar on the left cheek"
     text = prompts.compose_still_prompt(manifest, shot)
     assert text.count("Always: a small scar on the left cheek.") == 1

@@ -166,10 +166,9 @@ class VisionJudge:
                 f"Detail level for a {shot.framing.value} shot: {DETAIL_BY_FRAMING[shot.framing]}"
             )
             lines.append(f"Singer (must match exactly): {character.appearance}")
-            if character.pinned():
+            if (pinned := character.pinned()) and not shot.allow_cuts:
                 lines.append(
-                    f"Pinned details (expected wherever the framing and angle show them): "
-                    f"{character.pinned()}"
+                    f"Pinned details (expected wherever the framing and angle show them): {pinned}"
                 )
             state = character.state(shot.wardrobe)
             if state is not None:
@@ -183,8 +182,8 @@ class VisionJudge:
                     lines.append(
                         f"Additional character in shot ({label}): {sec_char.appearance}{w_text}"
                     )
-                    if sec_char.pinned():
-                        lines.append(f"Pinned details for {label}: {sec_char.pinned()}")
+                    if (sec_pinned := sec_char.pinned()) and not shot.allow_cuts:
+                        lines.append(f"Pinned details for {label}: {sec_pinned}")
         else:
             lines.append("No singer should be visible in this shot.")
         if shot.allow_cuts:

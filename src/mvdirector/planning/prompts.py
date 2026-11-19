@@ -349,12 +349,14 @@ def _format_character_sheet(
     character_id: str | None = None,
     *,
     background: str = "white",
+    pin_details: bool = False,
 ) -> str:
     character = manifest.character_for(character_id)
-    description = _with_pinned(
-        character,
-        character.describe(state_id) if state_id is not None else character.portrait_text(),
+    description = (
+        character.describe(state_id) if state_id is not None else character.portrait_text()
     )
+    if pin_details:
+        description = _with_pinned(character, description)
     return template.format(
         layout=PANEL_LAYOUT[layout],
         panels=_sheet_panels(layout),
@@ -372,7 +374,13 @@ def sheet_prompt(
     background: str = "white",
 ) -> str:
     return _format_character_sheet(
-        manifest, SHEET_TEMPLATE, layout, state_id, character_id, background=background
+        manifest,
+        SHEET_TEMPLATE,
+        layout,
+        state_id,
+        character_id,
+        background=background,
+        pin_details=True,
     )
 
 
@@ -523,11 +531,12 @@ def _look(character: Character, state_id: str | None) -> str:
 
     The reference images carry identity, but a second character in a two-shot gets fewer of them
     and drifts (hair, sleeves, hair colour). Writing the pinned details into the prompt holds them.
-    Empty when there is nothing to say, so callers can skip the character. A costume on its own,
-    with no appearance, is not worth a line.
+    Empty for a character with no appearance, so callers skip them (pinned details need a look
+    to attach to, and a reference sheet is only made for a character with an appearance).
     """
-    text = character.describe(state_id) if character.appearance.strip() else ""
-    return _with_pinned(character, text)
+    if not character.appearance.strip():
+        return ""
+    return _with_pinned(character, character.describe(state_id))
 
 
 def compose_still_prompt(

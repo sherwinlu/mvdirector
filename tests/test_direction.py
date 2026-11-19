@@ -654,12 +654,13 @@ def test_pinned_details_edge_cases():
     assert prompts._look(worn, "coat") == (
         "Fair. Wearing: a long black coat. Always: blonde hair in a bun."
     )
-    # Pinned details alone still read as a sentence; punctuation-only ones say nothing.
-    assert prompts._look(Character(invariants="a scar"), None) == "Always: a scar."
-    assert prompts._look(Character(invariants=" . "), None) == ""
+    # Pinned details need a look to attach to, so they alone say nothing.
+    assert prompts._look(Character(invariants="a scar"), None) == ""
+    assert prompts._look(Character(appearance="Fair.", invariants=" . "), None) == "Fair."
     assert prompts._look(Character(), None) == ""
-    # Trailing punctuation of any kind is trimmed; a leading one is kept.
-    assert Character(invariants=".5mm nose stud!").pinned() == ".5mm nose stud"
+    # Trailing sentence punctuation is trimmed; a leading period or a question mark is kept.
+    assert Character(invariants=".5mm nose stud.").pinned() == ".5mm nose stud"
+    assert Character(invariants="tattoo reading 'Why?'").pinned() == "tattoo reading 'Why?'"
     # A costume with no appearance is not worth a prompt line on its own.
     assert prompts._look(Character(wardrobe=coat), "coat") == ""
     # The base sheet carries the pinned details too, so the locked identity includes them.
@@ -671,3 +672,5 @@ def test_pinned_details_edge_cases():
         characters={"a": Character(appearance="Fair.", invariants="a scar", wardrobe=coat)},
     )
     assert "Always: a scar." in prompts.sheet_prompt(sheet, "row")
+    # A derived (variant) sheet changes the look on purpose, so it is not pinned.
+    assert "Always" not in prompts.derived_sheet_prompt(sheet, "row")

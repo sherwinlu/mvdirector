@@ -710,6 +710,7 @@ def _ask_for_batch(
             char_lines.append(
                 f"- id={cid} ({char.name or cid}) | appearance: {char.appearance} "
                 f"| wardrobe: {w_summary}"
+                + (f" | always: {char.pinned()}" if char.pinned() else "")
             )
         lines.append("\n".join(char_lines))
     if character.wardrobe:

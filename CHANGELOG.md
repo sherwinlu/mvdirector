@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 - `planning.max_lipsync_share` (default `null`, off): caps the share of the song that is the singer singing to camera. Sung shots over the cap become cutaways with the vocal playing over them, quietest verse shots first; chorus, hook and final-line shots stay, and the singer is never off screen for more than two shots in a row. Fewer faces on screen means less identity drift and fewer lip-sync renders.
 - The shot-direction prompt now asks for a section arc, off-lens verse looks, at least three looks, a change every 2 to 4 seconds without a cut and a striking frame every 30 seconds. A planner-made cutaway stays a cutaway, and the rule-based planner writes a no-people cutaway for it.
+- Pace: each shot gets a `calm`, `moderate` or `high` label from the song's intensity, shown to the model with the change from the previous shot, and the direction prompt explains the four levers (cut speed, movement in frame, shot scale, camera movement). The rule-based planner frames performance shots and cutaways by pace. `mvd plan` warns when shot scale runs against intensity.
 - `mvd plan` logs the share of the song spent singing to camera and the number of distinct sets, and warns below three.
 
 ### Documentation

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
+import statistics
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -44,6 +45,14 @@ _LIPSYNC_FRAMINGS = [Framing.CLOSE_UP, Framing.MEDIUM_CLOSE]
 _HOOK_SECTIONS = ("chorus", "hook")
 # Most cutaways in a row before the singer has to come back.
 _MAX_CUTAWAY_RUN = 2
+# Shot scale for shots with no singing to frame, by pace: the closer the lens, the faster it feels.
+_PACE_FRAMING = {"calm": Framing.WIDE, "moderate": Framing.MEDIUM, "high": Framing.MEDIUM_CLOSE}
+_PACE_MOTION = {
+    "calm": "Slow, steady camera drift. Little movement in the frame.",
+    "moderate": "Steady camera with a gentle push-in. Natural movement in the frame.",
+    "high": "Brisk movement in the frame and a firm, smooth push-in. Camera stays stable.",
+}
+_SCALE = {Framing.WIDE: 0, Framing.MEDIUM: 1, Framing.MEDIUM_CLOSE: 2, Framing.CLOSE_UP: 3}
 _TIGHT_TO_WIDE = [Framing.CLOSE_UP, Framing.MEDIUM_CLOSE, Framing.MEDIUM, Framing.WIDE]
 _OTHER_FRAMINGS = [Framing.WIDE, Framing.MEDIUM]
 _FRAMING_PHRASE = {
@@ -531,6 +540,11 @@ def _thin_lipsync(shots: list[Shot], max_share: float) -> None:
         excess -= shot.end - shot.start
 
 
+def pace_label(intensity: float) -> str:
+    """How fast a shot should feel, from the song's intensity at that point."""
+    return "high" if intensity >= 0.66 else "calm" if intensity < 0.4 else "moderate"
+
+
 def singing_share(shots: list[Shot]) -> float:
     """Share of the song, by time, that is the singer singing to camera."""
     total = sum(s.end - s.start for s in shots)
@@ -548,11 +562,36 @@ def _report_mix(shots: list[Shot]) -> None:
         share * 100,
         len(looks),
     )
+    _report_pace(shots)
     if len(looks) < 3:
         log.warning(
             "Only %d distinct set(s) in the plan. Three or more looks keep a video from "
             "feeling like one setup; add sets to the visual bible.",
             len(looks),
+        )
+
+
+def _report_pace(shots: list[Shot]) -> None:
+    """Warn when shot scale does not follow the song's intensity.
+
+    Pace is built from cut speed, movement in frame, shot scale and camera movement together. Scale
+    is the one a plan can be checked on: it should tighten as the song builds and loosen as it
+    falls away. A plan that does the opposite works against the music.
+    """
+    if len(shots) < 8:
+        return
+    try:
+        fit = statistics.correlation(
+            [s.intensity for s in shots], [float(_SCALE[s.framing]) for s in shots]
+        )
+    except statistics.StatisticsError:  # every shot the same size, or the song never changes
+        log.warning("Every shot is the same size or the song never changes: the pace will be flat.")
+        return
+    if fit < -0.1:
+        log.warning(
+            "Shot scale runs against the song's intensity (r=%.2f): close-ups land on the quiet "
+            "parts and wide shots on the loud ones. Check the framing against the section arc.",
+            fit,
         )
 
 
@@ -825,7 +864,11 @@ def _ask_for_batch(
             lines.append(f"CURRENT WARDROBE BY CHARACTER: {active_states}")
     total = manifest.duration or 1.0
     shot_lines = []
+    last_pace = pace_label(batch[0].intensity)
     for s in batch:
+        pace = pace_label(s.intensity)
+        pace_note = f"pace={pace}" + (f" (was {last_pace})" if pace != last_pace else "")
+        last_pace = pace
         singer_hint = ""
         if len(manifest.characters) > 1:
             sec_chars = _characters_in_text(s.section, manifest.characters)
@@ -834,7 +877,7 @@ def _ask_for_batch(
         shot_lines.append(
             f"- id={s.id} section={s.section or '(instrumental lead-in)'!r} {singer_hint}"
             f"at={_clock(s.start)} ({s.start / total:.0%} through the song) type={s.type.value} "
-            f"duration={s.duration:.1f}s intensity={s.intensity:.2f} "
+            f"duration={s.duration:.1f}s intensity={s.intensity:.2f} {pace_note} "
             f"lyrics={s.lyrics or '(instrumental)'!r}"
         )
     lines.append("SHOTS\n" + "\n".join(shot_lines))
@@ -917,7 +960,7 @@ def _apply_rule_based(shot: Shot) -> None:
         action = "singing directly to camera"
         motion = "The singer performs the line to camera with natural head movement. Slow push-in."
     elif shot.type is ShotType.BROLL:
-        shot.framing = _OTHER_FRAMINGS[shot.index % len(_OTHER_FRAMINGS)]
+        shot.framing = _PACE_FRAMING[pace_label(shot.intensity)]
         shot.setting = shot.setting or "performance stage"
         energy = "high-energy" if shot.intensity >= 0.66 else "restrained"
         shot.still_prompt = (
@@ -929,9 +972,10 @@ def _apply_rule_based(shot: Shot) -> None:
         )
         return
     else:
-        shot.framing = _OTHER_FRAMINGS[shot.index % len(_OTHER_FRAMINGS)]
+        pace = pace_label(shot.intensity)
+        shot.framing = _PACE_FRAMING[pace]
         action = "moving to the music, not singing"
-        motion = prompts.PERFORMANCE_MOTION
+        motion = f"The singer moves with the music, mouth closed, not singing. {_PACE_MOTION[pace]}"
     energy = "high-energy" if shot.intensity >= 0.66 else "restrained"
     shot.setting = shot.setting or "performance stage"
     shot.still_prompt = (

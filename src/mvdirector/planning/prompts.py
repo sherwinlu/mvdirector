@@ -109,6 +109,13 @@ Rules:
   repeat of the first; add a complication (a new angle, set, prop or costume beat). Bridge: break
   the pattern of the shots before it (a different set, light or pace). Final chorus: the payoff,
   bringing earlier looks back together. Close on an image that lingers.
+- Pace is built from four levers that stack: cut speed, movement in the frame, shot scale (the
+  closer the lens, the faster it feels) and camera movement. Each shot has a pace (calm, moderate
+  or high) and a note when it changes from the shot before. Raise the pace by tightening the
+  framing and adding movement in the frame, and lower it by doing the opposite. A change of pace
+  must follow the song (a section change or a rise or fall in intensity), never come from nowhere,
+  and the bridge should strip back so the next lift is felt. On 'lipsync' shots the camera stays
+  steady, so use scale and movement in the frame, not camera moves, to carry the pace.
 - Eye contact: in verses let the singer look slightly off the lens, in three-quarter view or at
   something in the room. Save a look straight into the lens for the pre-chorus build and the
   chorus hook.

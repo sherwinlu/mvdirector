@@ -89,3 +89,29 @@ def test_the_direction_prompt_carries_the_section_arc_and_cutaway_rules():
     assert "'broll' are cutaways" in text
     assert "Second verse: never a" in text and "Bridge: break" in text
     assert "three distinct looks" in text
+
+
+def test_pace_follows_intensity_and_a_shift_is_flagged_in_the_model_context():
+    assert [planner.pace_label(v) for v in (0.1, 0.5, 0.9)] == ["calm", "moderate", "high"]
+    quiet, loud = _shot(0, "Verse 1", 0.2, ShotType.PERFORMANCE), _shot(1, "Chorus", 0.9)
+    for shot in (quiet, loud):
+        shot.type = ShotType.PERFORMANCE
+        planner._apply_rule_based(shot)
+    # Scale tightens and the motion note changes as the song builds, with no camera lurch.
+    assert quiet.framing.value == "wide" and loud.framing.value == "medium_close"
+    assert "Little movement" in quiet.motion_prompt and "stable" in loud.motion_prompt
+
+
+def test_a_plan_whose_framing_runs_against_the_music_is_reported(caplog):
+    shots = []
+    for i in range(10):
+        shot = _shot(i, "Verse", i / 10)
+        shot.framing = "wide" if i >= 5 else "close_up"  # loudest parts are the widest
+        shots.append(shot)
+    with caplog.at_level("WARNING"):
+        planner._report_pace(shots)
+    assert "runs against the song's intensity" in caplog.text
+
+
+def test_the_direction_prompt_names_the_four_pace_levers():
+    assert "four levers" in prompts.SHOTS_SYSTEM and "cut speed" in prompts.SHOTS_SYSTEM

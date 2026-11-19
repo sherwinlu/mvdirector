@@ -92,7 +92,8 @@ Rules:
   putting more than two 'broll' shots in a row.
 - Shots given as 'broll' are cutaways: the vocal plays over them and no performer is shown. Keep
   them 'broll', with character and wardrobe null, and show what the lyric is about (an object, a
-  place, light, weather, or an architectural detail), never a face or performer.
+  place, light, weather, or an architectural detail), never a face or performer. Still give
+  every shot a framing (close_up, medium_close, medium or wide): never null, even on a cutaway.
 - Match detail to shot size. Small details (identifying marks, jewelry, cuffs, props, screen
   content) belong in close_up or medium_close shots only. In medium and wide shots, describe pose,
   silhouette and action, not fine detail.

@@ -11,6 +11,7 @@ run can be interrupted and resumed at any point.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -38,6 +39,7 @@ from mvdirector.project import Project
 from mvdirector.qc.faces import IdentityReference
 from mvdirector.qc.factory import QualityGates
 from mvdirector.retry import AttemptPlan, RetryPolicy
+from mvdirector.store import atomic_write
 
 log = logging.getLogger(__name__)
 
@@ -48,9 +50,9 @@ class RunEvent:
 
     ``kind`` is one of ``warning`` (preflight problems, in ``message``), ``qc_summary`` (the
     active and skipped checks, before any GPU time is spent), ``phase_started``,
-    ``attempt_started``, ``attempt_finished``, ``asset_passed``, ``asset_exhausted`` and
-    ``run_finished``. Anything building a UI or persisting progress subscribes to these instead
-    of parsing log lines.
+    ``attempt_started``, ``attempt_finished``, ``asset_passed``, ``shot_converted``,
+    ``asset_exhausted`` and ``run_finished``. Anything building a UI or persisting progress
+    subscribes to these instead of parsing log lines.
     """
 
     kind: str
@@ -96,6 +98,15 @@ def load_templates(project: Project, names: Iterable[str]) -> dict[str, Workflow
         bindings_path = project.path(Path(comfy.workflows_dir) / comfy.workflows[name])
         templates[name] = WorkflowTemplate.load(name, bindings_path, root=project.root)
     return templates
+
+
+def _read_stamp(marker: Path) -> dict[str, Any] | None:
+    """What an audio slice was cut from, or None when it is missing or unreadable."""
+    try:
+        stamp = json.loads(marker.read_text("utf-8"))
+    except (OSError, ValueError):
+        return None
+    return stamp if isinstance(stamp, dict) else None
 
 
 class ShotRunner:
@@ -222,6 +233,8 @@ class ShotRunner:
             return
         while state.status is AssetStatus.PENDING:
             if len(state.attempts) >= state.attempts_allowed:
+                if kind is AssetKind.VIDEO and self._fall_back_to_performance(shot, state):
+                    continue
                 self._mark_exhausted(shot, kind, state)
                 break
             self._budget.consume()
@@ -263,6 +276,21 @@ class ShotRunner:
                     )
                 )
             self._project.save_manifest(self._manifest)
+            if (
+                attempt.error is not None
+                and len(state.attempts) > 1
+                and state.attempts[-2].error == attempt.error
+            ):
+                # A different seed or prompt cannot fix a missing model or a dead network,
+                # so stop here and leave the shot pending for the next run.
+                log.error(
+                    "%s %s: the same error twice in a row, so more attempts would not help. "
+                    "Fix it and run again: %s",
+                    shot.id,
+                    kind.value,
+                    attempt.error,
+                )
+                break
 
     def _attempt(self, shot: Shot, kind: AssetKind, plan: AttemptPlan) -> Attempt:
         state = shot.asset(kind)
@@ -483,6 +511,30 @@ class ShotRunner:
             expected_size=expected_size,
         )
 
+    def _fall_back_to_performance(self, shot: Shot, state: AssetState) -> bool:
+        """Turn a singing shot that could not be made into one where the singer is not singing.
+
+        The still stays; the video is rendered again as a performance shot, which needs no
+        lip-sync and so does not depend on the face being tracked. Earlier attempts stay in
+        the history.
+        """
+        if not self._project.config.retry.lipsync_fallback or shot.type is not ShotType.LIPSYNC:
+            return False
+        shot.fallback_from, shot.type = shot.type, ShotType.PERFORMANCE
+        shot.motion_prompt = prompts.PERFORMANCE_MOTION
+        state.reset(self._project.config.retry.max_attempts)
+        state.prompt_override = None
+        state.param_overrides = {}
+        shot.review = Review()
+        log.warning(
+            "%s: no usable lip-sync video, so it is now a performance shot (the singer on "
+            "camera, not singing)",
+            shot.id,
+        )
+        self._emit(RunEvent("shot_converted", shot_id=shot.id, asset=AssetKind.VIDEO.value))
+        self._project.save_manifest(self._manifest)
+        return True
+
     def _mark_exhausted(self, shot: Shot, kind: AssetKind, state: AssetState) -> None:
         best = state.best_attempt()
         state.status = AssetStatus.EXHAUSTED
@@ -506,16 +558,37 @@ class ShotRunner:
         self._project.save_manifest(self._manifest)
 
     def _ensure_audio_slice(self, shot: Shot) -> Path:
+        """The shot's audio slice, cut again whenever its timing or its source audio changed.
+
+        A sidecar next to the slice records what it was cut from. A slice left over from an
+        earlier plan (other start and end), or from another mix, is not reused: it would feed
+        the lip-sync workflow and the lip-sync check audio from the wrong part of the song.
+        """
         path = self._project.path(shot.audio_slice.path)
-        if not path.is_file():
-            inputs, source = (
-                self._project.config.inputs,
-                self._project.config.video.lipsync_audio_source,
-            )
+        inputs, source = (
+            self._project.config.inputs,
+            self._project.config.video.lipsync_audio_source,
+        )
+        try:
             source_path = self._project.input_path(
                 inputs.vocals if source == "vocals" else inputs.mix, source
             )
+        except ConfigError:
+            if path.is_file():
+                return path  # the source audio is gone; keep the slice that was already cut
+            raise
+        source_stat = source_path.stat()
+        stamp = {
+            "source": source_path.name,
+            "source_size": source_stat.st_size,
+            "source_mtime_ns": source_stat.st_mtime_ns,
+            "start": round(shot.audio_slice.start, 4),
+            "end": round(shot.audio_slice.end, 4),
+        }
+        marker = path.with_name(f"{path.name}.json")
+        if not path.is_file() or _read_stamp(marker) != stamp:
             media.slice_audio(source_path, path, shot.audio_slice.start, shot.audio_slice.end)
+            atomic_write(marker, json.dumps(stamp))
         return path
 
     def _ensure_audio_video_slice(self, shot: Shot) -> Path:

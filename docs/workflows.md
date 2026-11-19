@@ -47,9 +47,11 @@ For lip-sync models that ingest an audio-bearing video clip rather than a raw `.
 
 ## Model-Family Settings Reference
 
+`video.size_multiple` is the grid your model renders on. LTX halves the size, snaps it to 32 and upscales 2x, so a 640x360 draft comes back as 640x320 and fails the dimension check. With `size_multiple: 64` the default draft becomes 576x320 and the full size 1280x704, both within the 3% aspect tolerance. Sizes you set in `draft_width` and `draft_height` are used as written.
+
 | Model family (in ComfyUI) | `video:` settings in `project.yaml` | Workflow & binding notes |
 |---|---|---|
-| **LTX-2 / LTX-2.3 / LTX-2.5** (open-weight default) | `frame_multiple: 8`, `frame_offset: 1`, `cut_mode: bars`, `max_clip_seconds: 8.0` | Bind `num_frames` ($8n + 1$) or `duration` (`i2v` works cleanly; for tight singing `lipsync`, pair with a LatentSync pass or use InfiniteTalk below). |
+| **LTX-2 / LTX-2.3 / LTX-2.5** (open-weight default) | `frame_multiple: 8`, `frame_offset: 1`, `size_multiple: 64`, `cut_mode: bars`, `max_clip_seconds: 8.0` | Bind `num_frames` ($8n + 1$) or `duration` (`i2v` works cleanly; for tight singing `lipsync`, pair with a LatentSync pass or use InfiniteTalk below). |
 | **Wan 2.1 + InfiniteTalk** (Apache-2.0 singing lip-sync) | `frame_multiple: 4`, `frame_offset: 1`, `cut_mode: bars`, `max_clip_seconds: 8.0` | Point `comfy.workflows.lipsync` at `infinitetalk_lipsync.bindings.json` (start from ComfyUI's `wan2_1_infinitetalk_music` template and bind `fps` to 24). |
 | **I2V + LatentSync 1.6** (two-stage mouth dub) | Match your base I2V model (`8n+1` for LTX, `4n+1` for Wan) | Point `comfy.workflows.lipsync` at `latentsync_lipsync.bindings.json` to keep base I2V motion while re-dubbing the mouth from `audio` (weights are OpenRAIL++ — review its use-case restrictions before commercial use). |
 | **Wan 2.1 / 2.2, HunyuanVideo** (open-weight I2V) | `frame_multiple: 4`, `frame_offset: 1`, `cut_mode: bars`, `max_clip_seconds: 5.0` | Bind `num_frames` ($4n + 1$). In `lipsync`, chain I2V into an audio lip-sync node (InfiniteTalk / Sonic / LatentSync / FantasyTalking). |

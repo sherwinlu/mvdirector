@@ -132,6 +132,9 @@ def test_rule_based_manifest_is_complete_without_llm(analysis):
 class ScriptedLLM:
     """Returns canned replies; tries to break the rules the planner must enforce."""
 
+    def __init__(self, framing=Framing.WIDE):
+        self._framing = framing
+
     def complete_json(self, *, system, content, schema):
         if schema is BibleReply:
             return BibleReply(
@@ -149,7 +152,7 @@ class ScriptedLLM:
                 ShotCreative(
                     id="s002",
                     type=ShotType.BROLL,
-                    framing=Framing.WIDE,
+                    framing=self._framing,
                     setting="rooftop",
                     still_prompt="still two",
                     motion_prompt="motion two",
@@ -172,8 +175,8 @@ def test_llm_direction_is_applied_within_rules(analysis):
     manifest = build_manifest(config, analysis, "lyrics", "style", llm=ScriptedLLM())
     assert manifest.character.appearance == "A singer"
     sung, cutaway, omitted = manifest.shot("s002"), manifest.shot("s005"), manifest.shot("s001")
-    # A lip-sync shot stays lip-sync and is never wide.
-    assert sung.type is ShotType.LIPSYNC and sung.framing is Framing.MEDIUM
+    # A lip-sync shot stays lip-sync and is tightened to medium close-up at the widest.
+    assert sung.type is ShotType.LIPSYNC and sung.framing is Framing.MEDIUM_CLOSE
     assert sung.still_prompt == "still two"
     # A shot with no vocals may become a wide b-roll cutaway.
     assert cutaway.type is ShotType.BROLL and cutaway.framing is Framing.WIDE
@@ -227,3 +230,19 @@ def test_phrase_cut_mode_and_exact_frame_rules_for_other_video_models(analysis):
     # Wan (4n+1) and MiniMax/exact (1n+0) frame rules.
     assert frames_for(4.0, fps=24, multiple=4, offset=1) == 97
     assert frames_for(4.0, fps=24, multiple=1, offset=0) == 96
+
+
+def test_rule_based_singing_shots_are_never_wider_than_medium_close(analysis):
+    config = ProjectConfig()
+    config.video.max_clip_seconds = 4.0
+    manifest = build_manifest(config, analysis, "lyrics", "style", llm=None)
+    sung = [s for s in manifest.shots if s.type is ShotType.LIPSYNC]
+    assert sung and all(s.framing in (Framing.CLOSE_UP, Framing.MEDIUM_CLOSE) for s in sung)
+
+
+def test_the_widest_singing_framing_is_configurable(analysis):
+    config = ProjectConfig()
+    config.video.max_clip_seconds = 4.0
+    config.planning.lipsync_widest_framing = Framing.MEDIUM
+    manifest = build_manifest(config, analysis, "lyrics", "style", llm=ScriptedLLM(Framing.MEDIUM))
+    assert manifest.shot("s002").framing is Framing.MEDIUM

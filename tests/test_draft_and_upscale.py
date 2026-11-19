@@ -47,6 +47,26 @@ def test_video_config_draft_size_validation_and_defaults() -> None:
         VideoConfig(draft_width=640)
 
 
+def test_size_multiple_moves_sizes_onto_the_workflow_grid_keeping_aspect() -> None:
+    # LTX halves the size and snaps it to 32, so 640x360 comes back as 640x320.
+    ltx = VideoConfig(width=1280, height=720, size_multiple=64)
+    assert ltx.generation_size(draft=True) == (576, 320)
+    assert ltx.generation_size(draft=False) == (1280, 704)
+    for width, height in (ltx.generation_size(draft=True), ltx.generation_size(draft=False)):
+        assert width % 64 == 0 and height % 64 == 0
+        assert abs(width / height / (1280 / 720) - 1) <= 0.03
+
+    # Sizes written out in the config are used as written; the default leaves sizes alone.
+    pinned = VideoConfig(size_multiple=64, draft_width=480, draft_height=270)
+    assert pinned.generation_size(draft=True) == (480, 270)
+    assert VideoConfig().generation_size(draft=True) == (640, 360)
+
+    portrait = VideoConfig(width=1080, height=1920, size_multiple=64)
+    assert portrait.generation_size(draft=False) == (1088, 1920)
+    with pytest.raises(ValidationError):
+        VideoConfig(size_multiple=0)
+
+
 def test_draft_runner_uses_draft_resolution_and_passes_dimension_qc(
     project, analysis, tmp_path, sample_png
 ) -> None:

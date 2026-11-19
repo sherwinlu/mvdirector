@@ -120,6 +120,38 @@ class InputsConfig(_Section):
     )
 
 
+_SNAP_ASPECT_TOLERANCE = 0.03  # the default qc aspect_tolerance
+
+
+def _snap_size(
+    width: int, height: int, multiple: int, tolerance: float = _SNAP_ASPECT_TOLERANCE
+) -> tuple[int, int]:
+    """The (width, height) on the ``multiple`` grid closest to the request.
+
+    Candidates must keep the aspect ratio within ``tolerance``; when none does, each side is
+    rounded to the grid on its own.
+    """
+    if multiple <= 1:
+        return (width, height)
+    ratio = width / height
+    best: tuple[int, tuple[int, int]] | None = None
+    first = max(multiple, (width // multiple - 4) * multiple)
+    for w in range(first, width + 4 * multiple + 1, multiple):
+        centre = round(w / ratio / multiple)
+        for h in (max(multiple, (centre + k) * multiple) for k in (-1, 0, 1)):
+            if abs(w / h / ratio - 1) > tolerance:
+                continue
+            distance = abs(w - width) + abs(h - height)
+            if best is None or distance < best[0]:
+                best = (distance, (w, h))
+    if best is not None:
+        return best[1]
+    return (
+        max(multiple, round(width / multiple) * multiple),
+        max(multiple, round(height / multiple) * multiple),
+    )
+
+
 class VideoConfig(_Section):
     width: int = 1280
     height: int = 720
@@ -128,6 +160,17 @@ class VideoConfig(_Section):
     )
     draft_height: int | None = Field(
         default=None, ge=64, description="Optional height used when running with --draft."
+    )
+    size_multiple: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "Grid your workflow renders on (for example 64 for LTX, which halves the size, "
+            "snaps it to 32 and upscales 2x). Above 1, generation sizes move to the nearest "
+            "width and height on that grid that keep the aspect ratio within 3%, so the "
+            "clip comes back at the size the quality check expects. Sizes set in "
+            "draft_width and draft_height are used as written."
+        ),
     )
     fps: int = 24
     max_clip_seconds: float = 8.0
@@ -193,12 +236,12 @@ class VideoConfig(_Section):
     def generation_size(self, draft: bool = False) -> tuple[int, int]:
         """Target (width, height) for still/video generation."""
         if not draft:
-            return (self.width, self.height)
+            return _snap_size(self.width, self.height, self.size_multiple)
         if self.draft_width is not None and self.draft_height is not None:
             return (self.draft_width, self.draft_height)
         dw = max(64, (self.width // 2) - ((self.width // 2) % 2))
         dh = max(64, (self.height // 2) - ((self.height // 2) % 2))
-        return (dw, dh)
+        return _snap_size(dw, dh, self.size_multiple)
 
 
 class ComfyConfig(_Section):
@@ -310,6 +353,14 @@ class PlanningConfig(_Section):
         default=False,
         description="Allow the planner to flag high-energy shots as multi-angle montage cuts.",
     )
+    lipsync_widest_framing: Framing = Field(
+        default=Framing.MEDIUM_CLOSE,
+        description=(
+            "The widest framing a singing shot may have; wider ones are tightened to it. "
+            "On a medium shot the mouth is too small for the lip-sync workflow to drive "
+            "or the face tracker to find, and clips came back static."
+        ),
+    )
 
 
 class ReferenceConfig(_Section):
@@ -388,6 +439,10 @@ class VideoQCConfig(_Section):
     lipsync_good: float = 0.65
     lipsync_min: float = 0.40
     lipsync_max_lag_seconds: float = 0.25
+    # Advisory by default: on sung vocals the mouth-vs-loudness correlation did not separate
+    # clips a person judged in sync from ones out of sync, so a low score sends the shot to
+    # review (with the score shown) instead of failing it. Set true to reject and retry.
+    lipsync_blocking: bool = False
     lipsync_framings: list[Framing] = Field(
         default_factory=lambda: [Framing.CLOSE_UP, Framing.MEDIUM_CLOSE, Framing.MEDIUM],
         description="Mouths are too small to measure in wider shots.",
@@ -452,6 +507,14 @@ class RetryConfig(_Section):
         description="Applied in order from attempt 2 on; the last one repeats.",
     )
     max_generations_per_run: int = Field(default=300, ge=1)
+    lipsync_fallback: bool = Field(
+        default=True,
+        description=(
+            "When a singing shot's video uses up its attempts, turn it into a performance shot "
+            "(the singer on camera, not singing) and render that instead of leaving the shot "
+            "stuck. The conversion is flagged for review."
+        ),
+    )
     # Workflow parameters applied by the adjust_params strategy.
     adjust_params: dict[str, dict[str, Any]] = Field(
         default_factory=lambda: {"still": {"steps": 40}, "video": {"steps": 40}}

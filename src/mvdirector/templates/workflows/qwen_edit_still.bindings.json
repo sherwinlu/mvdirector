@@ -1,10 +1,12 @@
 {
-  "description": "Qwen-Image-Edit: places the singer from the reference portrait into each shot's first frame. Node ids below are examples: replace them with the ids from your exported workflow.",
+  "description": "Qwen-Image-Edit: places the singer from the reference portrait into each shot's first frame. Node ids below are examples: replace them with the ids from your exported workflow. 'set_image' and 'prop_image' are the second and third reference images (each a LoadImage feeding one slot of a multi-image edit node); a shot that has no plate or prop does not receive them, and their LoadImage nodes are left out of the job. Delete both lines to keep sets and props in text only.",
   "workflow": "qwen_edit_still.api.json",
   "inputs": {
     "positive_prompt": [{"node": "76", "field": "prompt"}],
     "negative_prompt": [{"node": "77", "field": "prompt"}],
     "reference_image": [{"node": "78", "field": "image"}],
+    "set_image": [{"node": "79", "field": "image"}],
+    "prop_image": [{"node": "80", "field": "image"}],
     "seed": [{"node": "3", "field": "seed"}],
     "width": [{"node": "93", "field": "width"}],
     "height": [{"node": "93", "field": "height"}],

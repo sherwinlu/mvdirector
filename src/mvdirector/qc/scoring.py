@@ -36,7 +36,9 @@ def aggregate(checks: list[CheckResult], weights: dict[str, float], pass_score: 
     if total_weight > 0:
         score = sum((c.score or 0.0) * c.weight for c in scored) / total_weight
     else:
-        score = 0.0 if any(c.status is CheckStatus.FAILED for c in active) else 1.0
+        # Nothing is scored, so only a hard failure sinks the asset; an advisory failure is
+        # reported without affecting it.
+        score = 0.0 if any(c.hard and c.status is CheckStatus.FAILED for c in active) else 1.0
     hard_failure = any(c.hard and c.status is CheckStatus.FAILED for c in active)
     return QCReport(
         passed=not hard_failure and score >= pass_score, score=round(score, 4), checks=checks

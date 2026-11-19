@@ -775,3 +775,49 @@ def test_build_quality_gates_closes_faces_if_mouth_tracker_fails(monkeypatch):
         factory.build_quality_gates(ProjectConfig(), llm=None)
 
     assert closed is True
+
+
+def _unsynced_video_report(tmp_path, monkeypatch, *, blocking):
+    import soundfile as sf
+
+    from mvdirector import media
+    from mvdirector.qc.video import VideoQC
+
+    envelope, _ = _singing(n_frames=96, fps=24.0, seed=2)
+    audio_path = tmp_path / "slice.wav"
+    sf.write(str(audio_path), np.repeat(envelope, 1000).astype(np.float32), 24000)
+
+    class FlatMouthTracker:
+        def track(self, frames):
+            return np.full(len(frames), 0.02)
+
+    monkeypatch.setattr(
+        media,
+        "probe",
+        lambda p: media.MediaInfo(width=1280, height=720, fps=24.0, duration=4.25, has_audio=True),
+    )
+    rng = np.random.default_rng(3)
+    frames = [rng.integers(0, 255, (64, 64, 3), dtype=np.uint8) for _ in range(96)]
+    monkeypatch.setattr(media, "extract_frames", lambda p, width: frames)
+
+    config = ProjectConfig()
+    config.qc.video.lipsync_blocking = blocking
+    gate = VideoQC(config.qc, config.video, None, FlatMouthTracker(), None)
+    shot = _shot(ShotType.LIPSYNC, Framing.MEDIUM_CLOSE)
+    manifest = Manifest(title="Solo", duration=4.0, fps=24, shots=[shot])
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"fake")
+    return gate.evaluate(video_path, shot, manifest, audio_path, None)
+
+
+def test_weak_lipsync_is_advisory_by_default(tmp_path, monkeypatch):
+    report = _unsynced_video_report(tmp_path, monkeypatch, blocking=False)
+    sync = next(c for c in report.checks if c.name == "lipsync")
+    assert sync.status is CheckStatus.FAILED and not sync.hard and sync.score is None
+    assert not report.has_hard_failure
+
+
+def test_weak_lipsync_blocks_when_configured(tmp_path, monkeypatch):
+    report = _unsynced_video_report(tmp_path, monkeypatch, blocking=True)
+    sync = next(c for c in report.checks if c.name == "lipsync")
+    assert sync.hard and report.has_hard_failure and not report.passed

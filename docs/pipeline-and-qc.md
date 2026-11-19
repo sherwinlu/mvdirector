@@ -145,7 +145,7 @@ A failed **hard** check rejects the attempt outright. Otherwise the attempt pass
 | `dimensions`, `duration` | yes | Usable file, long enough for the shot plus its handle |
 | `temporal` | static or cut: yes | Frozen clips, abrupt scene changes (relaxed for `allow_cuts` montage shots), flicker |
 | `face_presence` | yes | Face tracked through the clip (lip-sync shots) |
-| `lipsync` | yes | Correlation between mouth opening and vocal loudness, within `qc.video.lipsync_max_lag_seconds` |
+| `lipsync` | advisory | Correlation between mouth opening and vocal loudness, within `qc.video.lipsync_max_lag_seconds`; a weak score sends the shot to review (`lipsync` reason) unless `qc.video.lipsync_blocking: true` |
 | `identity` | yes | Median similarity to the portrait across sampled frames |
 | `vision_spec`, `vision_artifacts`, `vision_character` | as above | Vision LLM on frames sampled across the clip, including morphing |
 
@@ -169,7 +169,7 @@ When attempts run out, the best-scoring attempt is kept and the shot is queued f
 
 By hand, compare your labels with the `metrics` recorded on each check in `manifest.json` and tune thresholds under `qc.image` and `qc.video` in `project.yaml` (all fields and defaults are in [`src/mvdirector/config.py`](../src/mvdirector/config.py)).
 
-The lip-sync score assumes the mouth opens when the voice is loud. It is reliable on close and medium shots of clearly sung lines and weaker on mumbled, heavily processed, or very fast vocals. By default `qc.video.lipsync_max_lag_seconds` is `0.25` (±6 frames at 24 fps) so small workflow AV offsets do not trigger a cliff of failures; tighten it (e.g. `0.125`) if your workflow is tightly aligned, or widen it (e.g. `0.35`) if your encoder adds constant latency.
+The lip-sync score assumes the mouth opens when the voice is loud. It is reliable on close and medium shots of clearly sung lines and weaker on mumbled, heavily processed, or very fast vocals. In a manual comparison on sung vocals (9 clips judged by eye), it did not separate in-sync from out-of-sync clips, so it is advisory by default: a weak score queues the shot for review with the score shown instead of failing and retrying it. Set `qc.video.lipsync_blocking: true` to make it a hard check. By default `qc.video.lipsync_max_lag_seconds` is `0.25` (±6 frames at 24 fps) so small workflow AV offsets do not trigger a cliff of failures; tighten it (e.g. `0.125`) if your workflow is tightly aligned, or widen it (e.g. `0.35`) if your encoder adds constant latency.
 
 ---
 

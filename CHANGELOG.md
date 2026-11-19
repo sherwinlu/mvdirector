@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+- `video.size_multiple`: snaps generation sizes to the grid the workflow renders on, keeping the aspect ratio within the 3% quality-check tolerance. LTX needs 64; its default 640x360 draft came back as 640x320 and failed every dimension check, and retries could not fix that.
+- The shipped `qwen_edit_still` bindings include `set_image` and `prop_image`.
+- `mvd clean`: lists, and with `--yes` deletes, the takes that lost to a selected attempt and generations the manifest never mentions. Pending and exhausted assets keep every take; references, plates, props, audio and your inputs are never touched. Cleared attempts keep their QC record with no file path.
+- `retry.lipsync_fallback` (default true): a singing shot whose video uses up its attempts becomes a performance shot (the singer on camera, not singing) and is rendered again, instead of staying stuck. The shot records `fallback_from` and is queued for review with the new `fallback` reason.
+- `planning.lipsync_widest_framing` (default `medium_close`): singing shots are never planned wider than this. On `medium` shots the mouth was too small to drive, and 5 of 7 came back static with no face tracked.
+- `review` reason `lipsync`: a clip that passes but scored below `qc.video.lipsync_min` goes to the review queue with its score instead of being retried.
+
+### Changed
+- Lip-sync is advisory by default (`qc.video.lipsync_blocking: false`). On sung vocals the mouth-versus-loudness correlation did not separate clips a person judged in sync from ones out of sync: 6 of 8 acceptable clips scored below the old 0.40 floor, and a clip judged slightly off scored higher than one judged fine. Set `lipsync_blocking: true` for the old reject-and-retry behaviour.
+
+### Fixed
+- A job that fails with the same error twice in a row (a missing model, no network) now stops that shot, leaving it pending, instead of spending every remaining attempt on an error a new seed cannot fix.
+- A shot's audio slice (`assets/audio_slices/<shot>.wav`) was reused whenever the file existed, so a re-plan, a change to `handle_seconds`, or a replaced mix silently fed the lip-sync workflow and the lip-sync check audio from the wrong part of the song. Each slice now has a record of the start, end and source audio it was cut from (`<shot>.wav.json`) and is cut again when any of them changes. Slices from earlier versions have no record and are cut again once.
+- An optional reference image a shot does not have (`set_image`, `prop_image`, `reference_video`, ...) is now cut out of the ComfyUI job. Before, its `LoadImage` kept whatever file the export named, so shots without a plate or prop sent a stale image or failed validation.
+
 ## [0.1.0] - 2026-11-17
 
 First release.

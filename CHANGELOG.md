@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+- `Character.invariants` is now written into every still prompt, for each character in the shot. It was documented as carried across every prompt but was only used for reference sheets and the reference video. In a two-shot the second character gets only one reference image, and without the pinned details their hair, sleeves and hair colour drifted between stills. Each character's details are added as `Always: ...`, and nothing is added when `invariants` is empty.
+
 ## [0.2.0] - 2026-11-18
 
 ### Added

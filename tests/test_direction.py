@@ -590,3 +590,66 @@ def test_cut_points_are_deterministic_before_bible_call():
     # Duet section tags deterministically enable section snapping regardless of LLM output.
     duet_none = build_manifest(cfg, duet_analysis, "lyrics", "style", llm=None)
     assert any(s.start == 10.0 for s in duet_none.shots)
+
+
+def test_pinned_details_reach_every_character_in_a_still_prompt():
+    from mvdirector.models import (
+        AudioSlice,
+        Character,
+        Manifest,
+        Shot,
+        ShotType,
+        VisualBible,
+        WardrobeState,
+    )
+
+    def shot(shot_id, character, characters):
+        return Shot(
+            id=shot_id,
+            index=0,
+            start=0.0,
+            end=4.0,
+            type=ShotType.LIPSYNC,
+            framing="medium_close",
+            setting="Hall",
+            character=character,
+            characters=characters,
+            still_prompt="A two-shot.",
+            motion_prompt="They sing.",
+            audio_slice=AudioSlice(path="a.wav", start=0.0, end=4.0, head_handle=0.0),
+            num_frames=97,
+        )
+
+    coat = [WardrobeState(id="coat", description="A coat.")]
+    manifest = Manifest(
+        title="Duet",
+        duration=4.0,
+        fps=24,
+        visual_bible=VisualBible(),
+        characters={
+            "odalie": Character(
+                name="Odalie",
+                appearance="Odalie, fair.",
+                invariants="blonde hair in a low loose bun",
+                wardrobe=coat,
+            ),
+            "elias": Character(
+                name="Elias",
+                appearance="Elias, lean.",
+                invariants="very dark, tight curly hair.",
+                wardrobe=coat,
+            ),
+            "ned": Character(name="Ned", appearance="Ned, small.", wardrobe=coat),
+        },
+        shots=[shot("s1", "odalie", ["odalie", "elias"]), shot("s2", "elias", ["elias"])],
+    )
+    # The lead and the second character both get their pinned details, trailing period normalized.
+    duet = prompts.compose_still_prompt(manifest, manifest.shots[0])
+    assert "Always: blonde hair in a low loose bun." in duet
+    assert "Always: very dark, tight curly hair." in duet
+    # A solo shot pins only its own character.
+    solo = prompts.compose_still_prompt(manifest, manifest.shots[1])
+    assert "very dark, tight curly hair" in solo and "blonde hair" not in solo
+    # A character with nothing pinned adds no empty "Always:" note.
+    manifest.shots[1].character, manifest.shots[1].characters = "ned", ["ned"]
+    assert "Always" not in prompts.compose_still_prompt(manifest, manifest.shots[1])

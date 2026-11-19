@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mvdirector.models import Framing, Manifest, Shot, ShotType
+from mvdirector.models import Character, Framing, Manifest, Shot, ShotType
 
 if TYPE_CHECKING:
     from mvdirector.config import VideoConfig
@@ -505,6 +505,17 @@ def prop_prompt(manifest: Manifest, prop_query: str) -> str:
     ).replace("  ", " ")
 
 
+def _look(character: Character, state_id: str | None) -> str:
+    """Appearance and costume, plus the details pinned for every still of this character.
+
+    The reference images carry identity, but a second character in a two-shot gets fewer of them
+    and drifts (hair, sleeves, hair colour). Writing the pinned details into the prompt holds them.
+    """
+    text = character.describe(state_id)
+    pinned = character.invariants.strip().rstrip(".")
+    return f"{text} Always: {pinned}." if pinned else text
+
+
 def compose_still_prompt(
     manifest: Manifest,
     shot: Shot,
@@ -547,22 +558,22 @@ def compose_still_prompt(
             char_id, character, state_id = visible[0]
             if character.appearance:
                 if len(manifest.characters) <= 1 or char_id is None:
-                    parts.append(f"The singer: {character.describe(state_id)}")
+                    parts.append(f"The singer: {_look(character, state_id)}")
                 else:
                     label = character.name or char_id
-                    parts.append(f"The singer ({label}): {character.describe(state_id)}")
+                    parts.append(f"The singer ({label}): {_look(character, state_id)}")
         elif len(visible) > 1:
             primary_id, primary_char, primary_state = visible[0]
             if primary_char.appearance:
                 label = primary_char.name or primary_id or "lead"
                 parts.append(
                     f"The singer ({label}, matches reference portrait): "
-                    f"{primary_char.describe(primary_state)}"
+                    f"{_look(primary_char, primary_state)}"
                 )
             for sec_id, sec_char, sec_state in visible[1:]:
                 if sec_char.appearance:
                     sec_label = sec_char.name or sec_id or "performer"
-                    parts.append(f"Also in frame ({sec_label}): {sec_char.describe(sec_state)}")
+                    parts.append(f"Also in frame ({sec_label}): {_look(sec_char, sec_state)}")
     parts.append(_style_line(bible.style, bible.palette, bible.lighting))
     return " ".join(part.strip() for part in parts if part.strip())
 

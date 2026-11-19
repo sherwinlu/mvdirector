@@ -513,7 +513,7 @@ def _look(character: Character, state_id: str | None) -> str:
     """
     text = character.describe(state_id)
     pinned = character.invariants.strip().rstrip(".")
-    return f"{text} Always: {pinned}." if pinned else text
+    return f"{text} Always: {pinned}.".strip() if pinned else text
 
 
 def compose_still_prompt(
@@ -556,7 +556,7 @@ def compose_still_prompt(
         visible = manifest.visible_characters(shot)
         if len(visible) == 1:
             char_id, character, state_id = visible[0]
-            if character.appearance:
+            if character.appearance or character.invariants.strip():
                 if len(manifest.characters) <= 1 or char_id is None:
                     parts.append(f"The singer: {_look(character, state_id)}")
                 else:
@@ -564,14 +564,14 @@ def compose_still_prompt(
                     parts.append(f"The singer ({label}): {_look(character, state_id)}")
         elif len(visible) > 1:
             primary_id, primary_char, primary_state = visible[0]
-            if primary_char.appearance:
+            if primary_char.appearance or primary_char.invariants.strip():
                 label = primary_char.name or primary_id or "lead"
                 parts.append(
                     f"The singer ({label}, matches reference portrait): "
                     f"{_look(primary_char, primary_state)}"
                 )
             for sec_id, sec_char, sec_state in visible[1:]:
-                if sec_char.appearance:
+                if sec_char.appearance or sec_char.invariants.strip():
                     sec_label = sec_char.name or sec_id or "performer"
                     parts.append(f"Also in frame ({sec_label}): {_look(sec_char, sec_state)}")
     parts.append(_style_line(bible.style, bible.palette, bible.lighting))

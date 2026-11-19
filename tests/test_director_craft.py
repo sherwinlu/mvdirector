@@ -417,25 +417,39 @@ def test_capping_the_singing_share_is_on_by_default_and_validates_bounds():
     assert singing_share(shots) <= 0.55
 
 
-def test_a_reply_with_no_framing_gets_the_rule_based_one():
-    reply = planner.ShotBatchReply.model_validate(
+@pytest.mark.parametrize("raw_framing", [None, "", "none", "null", "N/A"])
+def test_a_reply_with_no_framing_gets_the_rule_based_one(raw_framing):
+    reply = ShotBatchReply.model_validate(
         {
             "shots": [
                 {
                     "id": "s001",
                     "type": "broll",
-                    "framing": None,
+                    "framing": raw_framing,
                     "setting": "Hall",
                     "still_prompt": "a",
                     "motion_prompt": "b",
-                }
+                },
+                {
+                    "id": "s002",
+                    "type": "lipsync",
+                    "framing": raw_framing,
+                    "setting": "Hall",
+                    "still_prompt": "a",
+                    "motion_prompt": "b",
+                },
             ]
         }
     )
-    assert reply.shots[0].framing is None
-    shot = _shot(0, "Verse 1", 0.2, ShotType.BROLL)
-    planner._apply_creative(shot, reply.shots[0], planner.VisualBible())
-    assert shot.framing.value == "wide"  # calm pace
+    assert reply.shots[0].framing is None and reply.shots[1].framing is None
+    cutaway = _shot(0, "Verse 1", 0.2, ShotType.BROLL)
+    planner._apply_creative(cutaway, reply.shots[0], planner.VisualBible())
+    assert cutaway.framing is Framing.WIDE  # calm pace
+
+    # Singing shot with no framing matches _apply_rule_based (high pace -> close_up).
+    loud_sung = _shot(1, "Chorus", 0.9, ShotType.LIPSYNC)
+    planner._apply_creative(loud_sung, reply.shots[1], planner.VisualBible())
+    assert loud_sung.framing is Framing.CLOSE_UP
 
 
 def test_in_a_duet_each_singer_keeps_half_of_their_sung_shots_on_camera():
@@ -445,7 +459,82 @@ def test_in_a_duet_each_singer_keeps_half_of_their_sung_shots_on_camera():
     for who in ("elias", "odalie"):
         kept = [s for s in shots if singer[s.id] == who and s.type is ShotType.LIPSYNC]
         assert len(kept) >= 2
-    # With one singer there is no such floor.
-    solo = [_shot(i, "Verse", 0.2 + i / 100) for i in range(4)]
+    # With one singer there is no floor: 6 shots thin to 2 (under half, limited by the run cap).
+    solo = [_shot(i, "Verse", 0.2 + i / 100) for i in range(6)]
     _thin_lipsync(solo, 0.0, lambda s: "elias")
-    assert sum(s.type is ShotType.LIPSYNC for s in solo) <= 2
+    assert sum(s.type is ShotType.LIPSYNC for s in solo) == 2
+
+
+def test_untagged_sections_in_a_duet_are_not_floored_as_a_third_singer():
+    # 4 Elias, 6 untagged Bridge shots (quietest), 4 Odalie: Bridge should thin past half (to 2/6).
+    specs = (
+        [("Verse 1: Elias", 0.4 + i / 100) for i in range(4)]
+        + [("Bridge", 0.1 + i / 100) for i in range(6)]
+        + [("Verse 2: Odalie", 0.5 + i / 100) for i in range(4)]
+    )
+    shots = [_shot(i, sec, v) for i, (sec, v) in enumerate(specs)]
+    characters = {
+        "elias": planner.Character(name="Elias", appearance="singer A"),
+        "odalie": planner.Character(name="Odalie", appearance="singer B"),
+    }
+    _thin_lipsync(shots, 0.0, lambda s: planner._section_singer(s, characters))
+    assert sum(s.section == "Verse 1: Elias" and s.type is ShotType.LIPSYNC for s in shots) == 2
+    assert sum(s.section == "Verse 2: Odalie" and s.type is ShotType.LIPSYNC for s in shots) >= 2
+    assert sum(s.section == "Bridge" and s.type is ShotType.LIPSYNC for s in shots) == 2
+
+
+def test_build_manifest_thins_duet_after_bible_using_section_singers():
+    sections = ["Verse 1: Elias"] * 4 + ["Verse 2: Odalie"] * 4
+    n = len(sections)
+    duration = n * 4.0
+    analysis = Analysis(
+        duration=duration,
+        tempo_bpm=120.0,
+        beats=[i * 0.5 for i in range(int(duration * 2))],
+        bars=[i * 2.0 for i in range(int(duration // 2))],
+        bar_intensity=[0.2 + i / 50 for i in range(int(duration // 2))],
+        vocal_windows=[TimeSpan(start=0.0, end=duration)],
+        lyric_lines=[
+            LyricLine(start=i * 4.0, end=(i + 1) * 4.0, text=f"line {i}", section=sec)
+            for i, sec in enumerate(sections)
+        ],
+    )
+
+    class DuetLLM:
+        def complete_json(self, *, system, content, schema):
+            if schema is BibleReply:
+                return BibleReply(
+                    concept="duet",
+                    style="film",
+                    palette="warm",
+                    lighting="soft",
+                    negative_prompt="blurry",
+                    characters=[
+                        planner.CharacterReply(id="elias", name="Elias", appearance="A"),
+                        planner.CharacterReply(id="odalie", name="Odalie", appearance="B"),
+                    ],
+                    settings=[SetReply(name="Hall", description="wide hall")],
+                )
+            assert schema is ShotBatchReply
+            return ShotBatchReply(
+                shots=[
+                    ShotCreative(
+                        id=f"s{i + 1:03d}",
+                        type=ShotType.BROLL,
+                        framing=None,
+                        setting="Hall",
+                        still_prompt="still",
+                        motion_prompt="motion",
+                    )
+                    for i in range(n)
+                ]
+            )
+
+    config = ProjectConfig()
+    config.video.max_clip_seconds = 4.0
+    config.planning.max_lipsync_share = 0.0
+    manifest = build_manifest(config, analysis, "", "style", DuetLLM())
+    for label in ("Verse 1: Elias", "Verse 2: Odalie"):
+        kept = [s for s in manifest.shots if s.section == label and s.type is ShotType.LIPSYNC]
+        assert len(kept) >= 2
+    assert all(s.still_prompt == "still" for s in manifest.shots)

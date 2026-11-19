@@ -189,10 +189,16 @@ class ShotCreative(_Reply):
     def _check_id(cls, value: str) -> str:
         return validate_safe_id(value, "shot id")
 
-    @field_validator("type", "framing", mode="before")
+    @field_validator("type", mode="before")
     @classmethod
-    def _tolerate_spelling(cls, value: object) -> object:
+    def _tolerate_type_spelling(cls, value: object) -> object:
         return _normalize_choice(value)
+
+    @field_validator("framing", mode="before")
+    @classmethod
+    def _tolerate_framing_spelling(cls, value: object) -> object:
+        normalized = _normalize_choice(value)
+        return None if normalized in ("", "none", "null", "n/a") else normalized
 
 
 class ShotBatchReply(_Reply):
@@ -561,12 +567,13 @@ def _thin_lipsync(
 
     last_sung = indexed_sung[-1][1]
     # In a duet every singer keeps at least half of their sung shots on camera, so one singer's
-    # verse is never turned into cutaways wholesale. A solo song has no such floor.
+    # verse is never turned into cutaways wholesale. A solo song has no such floor, and untagged
+    # or shared sections (singer is None) are never treated as a singer.
     singers = {i: singer_of(s) if singer_of else None for i, s in indexed_sung}
-    on_camera = Counter(singers.values())
+    on_camera = Counter(s for s in singers.values() if s is not None)
     floor = (
         {singer: -(-count // 2) for singer, count in on_camera.items()}
-        if len({s for s in singers.values() if s is not None}) > 1
+        if len(on_camera) > 1
         else {}
     )
     candidates = [
@@ -578,19 +585,21 @@ def _thin_lipsync(
         if _cutaway_run(shots, position) > _MAX_CUTAWAY_RUN:
             continue
         singer = singers[position]
-        if singer in floor and on_camera[singer] - 1 < floor[singer]:
-            continue
-        on_camera[singer] -= 1
+        if singer is not None and singer in floor:
+            if on_camera[singer] - 1 < floor[singer]:
+                continue
+            on_camera[singer] -= 1
         shot.type = ShotType.BROLL
         excess -= shot.duration
 
     if excess > _SHARE_EPS:
+        floor_note = ", the half of each singer's shots that stays on camera," if floor else ""
         log.info(
             "Singing share stayed at %.0f%% (cap %.0f%%): remaining sung shots are protected "
-            "chorus/hook/final shots, the half of each singer's shots that stays on camera, or hit "
-            "the %d-cutaway run limit.",
+            "chorus/hook/final shots%s or hit the %d-cutaway run limit.",
             singing_share(shots) * 100,
             max_share * 100,
+            floor_note,
             _MAX_CUTAWAY_RUN,
         )
 
@@ -1048,23 +1057,23 @@ def _resolve_set(bible: VisualBible, name: str, shot_id: str) -> str:
 
 
 def _default_framing(shot: Shot) -> Framing:
-    """The framing the rule-based planner would give this shot, for a reply that left it out."""
+    """The framing the rule-based planner gives this shot."""
+    pace = pace_label(shot.intensity)
     if shot.type is ShotType.LIPSYNC:
+        if pace == "high":
+            return Framing.CLOSE_UP
+        if pace == "calm":
+            return Framing.MEDIUM_CLOSE
         return _LIPSYNC_FRAMINGS[shot.index % len(_LIPSYNC_FRAMINGS)]
-    return _PACE_FRAMING[pace_label(shot.intensity)]
+    return _PACE_FRAMING[pace]
 
 
 def _apply_rule_based(shot: Shot) -> None:
     pace = pace_label(shot.intensity)
     energy = "high-energy" if pace == "high" else "restrained"
     shot.setting = shot.setting or "performance stage"
+    shot.framing = _default_framing(shot)
     if shot.type is ShotType.LIPSYNC:
-        if pace == "high":
-            shot.framing = Framing.CLOSE_UP
-        elif pace == "calm":
-            shot.framing = Framing.MEDIUM_CLOSE
-        else:
-            shot.framing = _LIPSYNC_FRAMINGS[shot.index % len(_LIPSYNC_FRAMINGS)]
         shot.still_prompt = (
             f"{_FRAMING_PHRASE[shot.framing]} of the singer singing directly to camera, "
             f"{energy} mood, {shot.setting}."
@@ -1073,7 +1082,6 @@ def _apply_rule_based(shot: Shot) -> None:
             "The singer performs the line to camera with natural head movement. Slow push-in."
         )
         return
-    shot.framing = _PACE_FRAMING[pace]
     if shot.type is ShotType.BROLL:
         shot.still_prompt = (
             f"{_FRAMING_PHRASE[shot.framing]} of an object or corner of the {shot.setting} that "

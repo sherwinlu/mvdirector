@@ -370,9 +370,10 @@ class PlanningConfig(_Section):
             "The most screen time, as a share of the song, that may be the singer singing to "
             "camera. Sung shots over the budget become cutaways (no singer, the vocal plays over "
             "them), starting with the quietest non-chorus/non-hook shots; chorus, hook and "
-            "final-line shots stay. Rough guide: 0.7 for a performance video, 0.45 for a hybrid, "
-            "0.2 for a narrative one. The default is the hybrid mix. None leaves every sung shot "
-            "on camera."
+            "final-line shots stay, and in a duet each singer keeps at least half of their sung "
+            "shots on camera. Rough guide: 0.7 for a performance video, 0.45 for a hybrid, 0.2 "
+            "for a narrative one. The default is the hybrid mix. None leaves every sung shot on "
+            "camera."
         ),
     )
 

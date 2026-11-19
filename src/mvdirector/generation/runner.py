@@ -50,9 +50,9 @@ class RunEvent:
 
     ``kind`` is one of ``warning`` (preflight problems, in ``message``), ``qc_summary`` (the
     active and skipped checks, before any GPU time is spent), ``phase_started``,
-    ``attempt_started``, ``attempt_finished``, ``asset_passed``, ``asset_exhausted`` and
-    ``run_finished``. Anything building a UI or persisting progress subscribes to these instead
-    of parsing log lines.
+    ``attempt_started``, ``attempt_finished``, ``asset_passed``, ``shot_converted``,
+    ``asset_exhausted`` and ``run_finished``. Anything building a UI or persisting progress
+    subscribes to these instead of parsing log lines.
     """
 
     kind: str
@@ -233,9 +233,9 @@ class ShotRunner:
             return
         while state.status is AssetStatus.PENDING:
             if len(state.attempts) >= state.attempts_allowed:
-                self._mark_exhausted(shot, kind, state)
                 if kind is AssetKind.VIDEO and self._fall_back_to_performance(shot, state):
                     continue
+                self._mark_exhausted(shot, kind, state)
                 break
             self._budget.consume()
             plan = self._policy.prepare(shot, kind)

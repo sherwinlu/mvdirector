@@ -304,3 +304,38 @@ def test_blocking_lipsync_failure_is_not_also_queued_for_review(config, manifest
     )
     review.refresh_reviews(manifest, config)
     assert ReviewReason.LIPSYNC not in shot.review.reasons
+
+
+def test_fallback_reset_restarts_the_strategy_ladder_and_scopes_best_attempt(config, manifest):
+    policy = RetryPolicy(config.retry, config.seed, llm=None)
+    shot = manifest.shots[1]
+    for _ in range(4):
+        plan = policy.prepare(shot, AssetKind.VIDEO)
+        _record(shot.video, False, 0.7, hint="Sing more clearly.", strategy=plan.strategy)
+    assert shot.video.param_overrides == {"steps": 40}
+
+    # Convert to performance and reset for a fresh pass.
+    shot.fallback_from, shot.type = shot.type, ShotType.PERFORMANCE
+    shot.motion_prompt = "The singer moves with the music, mouth closed, not singing."
+    shot.video.reset(config.retry.max_attempts)
+    shot.video.prompt_override = None
+    shot.video.param_overrides = {}
+
+    seen = []
+    for i in range(4):
+        plan = policy.prepare(shot, AssetKind.VIDEO)
+        seen.append(plan.strategy)
+        if i == 0:
+            assert shot.video.param_overrides == {}
+        _record(shot.video, False, 0.4 + i * 0.05, hint="Steady camera.", strategy=plan.strategy)
+
+    assert seen == [
+        RetryStrategy.INITIAL,
+        RetryStrategy.NEW_SEED,
+        RetryStrategy.REWRITE_PROMPT,
+        RetryStrategy.ADJUST_PARAMS,
+    ]
+    assert "Steady camera." in shot.video.prompt_override
+    assert "Sing more clearly." not in shot.video.prompt_override
+    # best_attempt picks from the performance pass (5..8), never the earlier lipsync pass (1..4).
+    assert shot.video.best_attempt().number == 8

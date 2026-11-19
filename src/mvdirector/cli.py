@@ -577,6 +577,11 @@ def _progress(event: RunEvent) -> None:
             f"[{event.generations_used:>3}] {event.shot_id} {event.asset} attempt "
             f"{event.attempt} ({event.strategy}) {outcome}"
         )
+    elif event.kind == "shot_converted":
+        typer.secho(
+            f"      {event.shot_id} {event.asset} converted from lipsync to performance; retrying",
+            fg=typer.colors.YELLOW,
+        )
     elif event.kind == "asset_exhausted":
         typer.secho(
             f"      {event.shot_id} {event.asset} exhausted; queued for review",

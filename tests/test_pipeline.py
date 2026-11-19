@@ -432,16 +432,29 @@ def _fallback_run(planned, sample_png, *, fallback):
     shot.type = ShotType.LIPSYNC
     fake = FakeComfy(png=sample_png, mp4=b"video")
     video_gate = ScriptedGate([False] * 4 + [True])
-    runner = _runner(project, manifest, fake, ScriptedGate([True]), video_gate)
+    events = []
+    runner = _runner(
+        project, manifest, fake, ScriptedGate([True]), video_gate, observer=events.append
+    )
     runner.run([AssetKind.STILL, AssetKind.VIDEO], shot_ids=["s002"])
-    return project, manifest, shot
+    return project, manifest, shot, events
 
 
 def test_a_singing_shot_that_cannot_be_made_becomes_a_performance_shot(planned, sample_png):
-    project, manifest, shot = _fallback_run(planned, sample_png, fallback=True)
+    project, manifest, shot, events = _fallback_run(planned, sample_png, fallback=True)
     assert shot.type is ShotType.PERFORMANCE and shot.fallback_from is ShotType.LIPSYNC
     assert "not singing" in shot.motion_prompt
     assert shot.video.status is AssetStatus.PASSED and len(shot.video.attempts) == 5
+    assert [a.strategy for a in shot.video.attempts] == [
+        RetryStrategy.INITIAL,
+        RetryStrategy.NEW_SEED,
+        RetryStrategy.REWRITE_PROMPT,
+        RetryStrategy.ADJUST_PARAMS,
+        RetryStrategy.INITIAL,
+    ]
+    assert shot.video.param_overrides == {}
+    kinds = [e.kind for e in events]
+    assert "shot_converted" in kinds and "asset_exhausted" not in kinds
     assert shot.still.status is AssetStatus.PASSED  # the still is kept
     review.refresh_reviews(manifest, project.config)
     assert review.ReviewReason.FALLBACK in shot.review.reasons
@@ -449,6 +462,8 @@ def test_a_singing_shot_that_cannot_be_made_becomes_a_performance_shot(planned, 
 
 
 def test_the_fallback_can_be_turned_off(planned, sample_png):
-    _, _, shot = _fallback_run(planned, sample_png, fallback=False)
+    _, _, shot, events = _fallback_run(planned, sample_png, fallback=False)
     assert shot.type is ShotType.LIPSYNC and shot.fallback_from is None
     assert shot.video.status is AssetStatus.EXHAUSTED
+    kinds = [e.kind for e in events]
+    assert "asset_exhausted" in kinds and "shot_converted" not in kinds

@@ -98,13 +98,16 @@ does not receive it:
 | `set_image` | The set's locked plate | You want the still placed in an approved location |
 | `prop_image` | Primary hero prop sheet for the shot (`prop_image_2` for a second) | Shots feature recurring hero props (`mvd props`) |
 
-A reference image a shot does not have (no plate for its set, no props) is not sent, and the
-`Load...` node bound to it is removed from that job together with the input it fed. Feed each
-one into an optional slot, such as one image of a multi-image edit node, so the graph still
-validates without it. A value set under `defaults` is used instead of removing the node.
+A reference image a shot does not have (for example `prop_image` on a shot without props,
+`reference_image_2` on a solo shot, or `set_image` when running with `--skip-preflight`) is not
+sent, and the `Load...` node bound to it is removed from that job together with the input it
+fed. Feed each one into an optional slot, such as one image of a multi-image edit node, so the
+graph still validates without it. A value set under `defaults` is used instead of removing the
+node.
 
-Binding `set_image` makes plates **required**: `mvd stills` stops until every set used by the
-selected singer shots has a locked plate (`mvd plates generate`, then `mvd plates lock`). Use
+Binding `set_image` makes plates **required** in preflight: `mvd stills` stops until every set
+used by the selected singer shots has a locked plate (`mvd plates generate`, then
+`mvd plates lock`), unless `--skip-preflight` is passed. Use
 `mvd plates generate --set "Empty Room" --from-set "Room"` (or `parent_set` in the bible) to
 derive a variant plate by editing an existing locked plate. Leave `set_image` unbound to keep
 describing sets in text only. Binding `prop_image` similarly requires locked prop sheets

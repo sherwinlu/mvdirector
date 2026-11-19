@@ -53,6 +53,7 @@ from mvdirector.review import policy as review_policy
 __all__ = [
     # types
     "BriefResult",
+    "CleanupPlan",
     "GenerateResult",
     "LLMCheckOutcome",
     "Observer",
@@ -65,6 +66,7 @@ __all__ = [
     "brief",
     "calibrate",
     "check_llm",
+    "clean",
     "export_schemas",
     "generate",
     "generate_plates",
@@ -634,12 +636,15 @@ def clean(project_dir: ProjectRef, *, delete: bool = False) -> CleanupPlan:
 
     Deleting takes the run lock, so it cannot overlap a run that is still writing.
     """
-    project = open_project(project_dir, pull=False)
+    project = open_project(project_dir)
     if not delete:
         return plan_cleanup(project, project.load_manifest())
-    with project.edit_manifest() as manifest:
+    with project.run_lock():
+        manifest = project.load_manifest()
         plan = plan_cleanup(project, manifest)
-        apply_cleanup(project, manifest, plan)
+        if plan.files:
+            apply_cleanup(project, manifest, plan)
+            project.save_manifest(manifest)
     return plan
 
 

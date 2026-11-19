@@ -98,3 +98,14 @@ def test_the_cli_lists_by_default_and_deletes_with_yes(project, manifest):
     assert "Would delete 1 superseded" in listed.output and bad.is_file()
     done = runner.invoke(app, ["clean", "--yes", "-p", str(project.root)])
     assert "Deleted 1 superseded" in done.output and not bad.exists()
+
+
+def test_clean_is_exported_and_pulls_workspace_storage(project, manifest):
+    from mvdirector.project import Project
+    from tests.test_store import RecordingStorage
+
+    assert "clean" in api.__all__ and "CleanupPlan" in api.__all__
+    storage = RecordingStorage()
+    custom = Project(project.root, project.config, storage=storage)
+    api.clean(custom, delete=True)
+    assert storage.events == ["pull"]  # nothing to delete: no unnecessary manifest save/push

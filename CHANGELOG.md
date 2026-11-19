@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Documentation
+- README and docs describe the verified local setup (Ollama `gemma3:12b`, Wan 2.1 + InfiniteTalk on RunPod), advisory lip-sync and the performance fallback, duet reference limits and the InfiniteTalk and RunPod gotchas. Claude remains the built-in default LLM.
+
 ## [0.2.1] - 2026-11-18
 
 ### Fixed

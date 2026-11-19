@@ -218,9 +218,15 @@ class EnvelopeMouth:
 
 
 @needs_ffmpeg
-@pytest.mark.parametrize(("follow", "expected"), [(True, True), (False, False)])
-def test_video_gate_lipsync_check_end_to_end(planned, tmp_path, sample_mp4, follow, expected):
+@pytest.mark.parametrize(
+    ("follow", "blocking", "expected"),
+    [(True, True, True), (False, True, False), (True, False, True), (False, False, True)],
+)
+def test_video_gate_lipsync_check_end_to_end(
+    planned, tmp_path, sample_mp4, follow, blocking, expected
+):
     project, manifest = planned
+    project.config.qc.video.lipsync_blocking = blocking
     shot = manifest.shot("s002")
     shot.framing = Framing.CLOSE_UP
     clip = tmp_path / "clip.mp4"
@@ -233,7 +239,7 @@ def test_video_gate_lipsync_check_end_to_end(planned, tmp_path, sample_mp4, foll
     )
     report = gate.evaluate(clip, shot, manifest, audio, reference=None)
     sync = next(c for c in report.checks if c.name == "lipsync")
-    assert (sync.status is CheckStatus.PASSED) is expected
+    assert (sync.status is CheckStatus.PASSED) is follow
     assert report.passed is expected
 
 
@@ -406,3 +412,43 @@ def test_qc_report_and_calibrate_commands_read_the_manifest(planned, sample_png,
         app, ["calibrate", "--labels", str(labels), "-p", str(project.root)]
     )
     assert result.exit_code == 1 and "unknown shot 's009'" in result.output
+
+
+def test_the_same_job_error_twice_stops_the_shot_without_exhausting_it(planned, sample_png):
+    project, manifest = planned
+    fake = FakeComfy(png=sample_png)
+    fake.fail_next_jobs = 10
+    runner = _runner(project, manifest, fake, ScriptedGate([True]), ScriptedGate([True]))
+    runner.run([AssetKind.STILL], shot_ids=["s002"])
+    state = manifest.shot("s002").still
+    assert len(state.attempts) == 2 and all("out of memory" in a.error for a in state.attempts)
+    assert state.status is AssetStatus.PENDING
+
+
+def _fallback_run(planned, sample_png, *, fallback):
+    project, manifest = planned
+    project.config.retry.lipsync_fallback = fallback
+    shot = manifest.shot("s002")
+    shot.type = ShotType.LIPSYNC
+    fake = FakeComfy(png=sample_png, mp4=b"video")
+    video_gate = ScriptedGate([False] * 4 + [True])
+    runner = _runner(project, manifest, fake, ScriptedGate([True]), video_gate)
+    runner.run([AssetKind.STILL, AssetKind.VIDEO], shot_ids=["s002"])
+    return project, manifest, shot
+
+
+def test_a_singing_shot_that_cannot_be_made_becomes_a_performance_shot(planned, sample_png):
+    project, manifest, shot = _fallback_run(planned, sample_png, fallback=True)
+    assert shot.type is ShotType.PERFORMANCE and shot.fallback_from is ShotType.LIPSYNC
+    assert "not singing" in shot.motion_prompt
+    assert shot.video.status is AssetStatus.PASSED and len(shot.video.attempts) == 5
+    assert shot.still.status is AssetStatus.PASSED  # the still is kept
+    review.refresh_reviews(manifest, project.config)
+    assert review.ReviewReason.FALLBACK in shot.review.reasons
+    assert project.load_manifest().shot("s002").fallback_from is ShotType.LIPSYNC
+
+
+def test_the_fallback_can_be_turned_off(planned, sample_png):
+    _, _, shot = _fallback_run(planned, sample_png, fallback=False)
+    assert shot.type is ShotType.LIPSYNC and shot.fallback_from is None
+    assert shot.video.status is AssetStatus.EXHAUSTED

@@ -20,6 +20,7 @@ video:
   height: 720
   draft_width: null              # optional width for --draft runs (defaults to half-res)
   draft_height: null             # optional height for --draft runs
+  size_multiple: 1               # grid your workflow renders on (LTX: 64); sizes snap to it, keeping the aspect
   fps: 24
   max_clip_seconds: 8.0          # longest clip your LTX workflow handles well
   min_clip_seconds: 1.5

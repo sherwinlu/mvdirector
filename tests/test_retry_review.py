@@ -280,3 +280,27 @@ def test_best_attempt_prefers_no_hard_failure_then_score(manifest):
         Attempt(number=3, strategy=RetryStrategy.NEW_SEED, seed=3, prompt="p", error="failed")
     )
     assert state.best_attempt().number == 2
+
+
+def test_advisory_lipsync_failure_queues_a_passed_shot_for_review(config, manifest):
+    config.review.other_rate = 0.0
+    shot = manifest.shots[0]
+    shot.framing = Framing.MEDIUM
+    _finish(shot)
+    shot.video.selected.qc.checks.append(
+        CheckResult(name="lipsync", status=CheckStatus.FAILED, detail="correlation 0.29")
+    )
+    review.refresh_reviews(manifest, config)
+    assert shot.review.reasons == [ReviewReason.LIPSYNC] and not review.is_ready(shot)
+
+
+def test_blocking_lipsync_failure_is_not_also_queued_for_review(config, manifest):
+    config.review.other_rate = 0.0
+    shot = manifest.shots[0]
+    shot.framing = Framing.MEDIUM
+    _finish(shot)
+    shot.video.selected.qc.checks.append(
+        CheckResult(name="lipsync", status=CheckStatus.FAILED, hard=True)
+    )
+    review.refresh_reviews(manifest, config)
+    assert ReviewReason.LIPSYNC not in shot.review.reasons

@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from mvdirector.comfy.client import ComfyClient
-from mvdirector.comfy.workflow import OutputSpec, WorkflowTemplate
+from mvdirector.comfy.workflow import OutputSpec, WorkflowBindings, WorkflowTemplate
 from mvdirector.config import ComfyConfig
 from mvdirector.errors import ComfyConnectionError, ComfyJobError, WorkflowBindingError
 from tests.conftest import WORKFLOW_GRAPH, FakeComfy, write_workflows
@@ -235,3 +235,69 @@ def test_upload_uses_project_specific_subfolder(tmp_path):
         returned = c1.upload(ref)
     assert seen_subfolders == [p1.comfy_subfolder]
     assert returned == f"{p1.comfy_subfolder}/ref.png"
+
+
+def _multi_image_template(**binding_overrides):
+    graph = {
+        "10": {"class_type": "LoadImage", "inputs": {"image": "portrait.png"}},
+        "11": {"class_type": "LoadImage", "inputs": {"image": "plate.png"}},
+        "12": {"class_type": "LoadImage", "inputs": {"image": "prop.png"}},
+        "20": {
+            "class_type": "TextEncodeQwenImage21",
+            "inputs": {
+                "prompt": "",
+                "images.image_1": ["10", 0],
+                "images.image_2": ["11", 0],
+                "images.image_3": ["12", 0],
+            },
+        },
+    }
+    bindings = WorkflowBindings(
+        workflow="x.api.json",
+        inputs={
+            "positive_prompt": [{"node": "20", "field": "prompt"}],
+            "reference_image": [{"node": "10", "field": "image"}],
+            "set_image": [{"node": "11", "field": "image"}],
+            "prop_image": [{"node": "12", "field": "image"}],
+        },
+        required=["positive_prompt", "reference_image"],
+        **binding_overrides,
+    )
+    return WorkflowTemplate("still", bindings, graph)
+
+
+def test_render_keeps_optional_reference_images_that_are_supplied():
+    graph = _multi_image_template().render(
+        {
+            "positive_prompt": "x",
+            "reference_image": "a.png",
+            "set_image": "set.png",
+            "prop_image": "box.png",
+        }
+    )
+    encoder = graph["20"]["inputs"]
+    assert graph["11"]["inputs"]["image"] == "set.png"
+    assert graph["12"]["inputs"]["image"] == "box.png"
+    assert encoder["images.image_2"] == ["11", 0] and encoder["images.image_3"] == ["12", 0]
+
+
+def test_render_cuts_out_optional_reference_images_a_shot_does_not_have():
+    template = _multi_image_template()
+    graph = template.render(
+        {"positive_prompt": "x", "reference_image": "a.png", "set_image": "set.png"}
+    )
+    assert "12" not in graph
+    assert "images.image_3" not in graph["20"]["inputs"]
+    assert graph["11"]["inputs"]["image"] == "set.png" and "images.image_2" in graph["20"]["inputs"]
+    # The template itself is not changed for the next shot.
+    assert "12" in template.render(
+        {"positive_prompt": "x", "reference_image": "a.png", "prop_image": "box.png"}
+    )
+
+
+def test_render_never_cuts_out_the_required_reference_or_a_defaulted_image():
+    template = _multi_image_template(defaults={"set_image": "blank.png"})
+    graph = template.render({"positive_prompt": "x", "reference_image": "a.png"})
+    assert "10" in graph and "images.image_1" in graph["20"]["inputs"]
+    assert graph["11"]["inputs"]["image"] == "blank.png"
+    assert "12" not in graph

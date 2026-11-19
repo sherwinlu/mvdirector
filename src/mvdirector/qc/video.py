@@ -264,11 +264,15 @@ class VideoQC:
             metrics={"face_presence": round(result.face_presence, 3)},
         )
         in_sync = result.correlation >= self._cfg.lipsync_min
+        blocking = self._cfg.lipsync_blocking
         sync = CheckResult(
             name="lipsync",
             status=CheckStatus.PASSED if in_sync else CheckStatus.FAILED,
-            hard=True,
-            score=linear_score(result.correlation, self._cfg.lipsync_bad, self._cfg.lipsync_good),
+            hard=blocking,
+            # A weak advisory result carries no score, so it cannot pull a clip below the pass mark.
+            score=linear_score(result.correlation, self._cfg.lipsync_bad, self._cfg.lipsync_good)
+            if blocking or in_sync
+            else None,
             detail=""
             if in_sync
             else f"mouth movement does not follow the vocal (correlation {result.correlation:.2f})",

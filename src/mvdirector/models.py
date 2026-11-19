@@ -247,6 +247,8 @@ class ReviewReason(str, Enum):
     NEAR_THRESHOLD = "near_threshold"
     SAMPLED = "sampled"
     ESCALATED = "escalated"
+    LIPSYNC = "lipsync"
+    FALLBACK = "fallback"
 
 
 class ReviewDecision(str, Enum):
@@ -297,6 +299,10 @@ class Shot(StrictModel):
         description="Wardrobe state id per visible character in multi-character shots.",
     )
     lyrics: str = ""
+    fallback_from: ShotType | None = Field(
+        default=None,
+        description="Set when the shot was converted from this type after it could not be made.",
+    )
     intensity: float = 0.5
     still_prompt: str = ""
     motion_prompt: str = ""

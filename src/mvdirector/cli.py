@@ -668,6 +668,29 @@ def approve(
 
 
 @app.command()
+def clean(
+    yes: bool = typer.Option(
+        False, "--yes", help="Delete the files. Without it, only list what would go."
+    ),
+    project_dir: Path = ProjectDir,
+) -> None:
+    """Delete takes that lost to a selected attempt, and generations the manifest never used.
+
+    Assets that are pending or exhausted keep all their takes, and references, plates, props,
+    audio and your inputs are never touched.
+    """
+    try:
+        plan = api.clean(project_dir, delete=yes)
+    except MVDError as exc:
+        raise _fail(exc) from exc
+    verb = "Deleted" if yes else "Would delete"
+    typer.echo(
+        f"{verb} {len(plan.superseded)} superseded and {len(plan.orphaned)} orphaned files "
+        f"({plan.size_bytes / 1e6:.0f} MB)." + ("" if yes else " Run again with --yes to delete.")
+    )
+
+
+@app.command()
 def reject(
     shot_id: str = typer.Argument(...),
     note: str = typer.Option(..., "--note", "-n", help="What to change; guides the next attempt."),

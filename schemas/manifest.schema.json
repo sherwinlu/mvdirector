@@ -542,7 +542,9 @@
         "retried",
         "near_threshold",
         "sampled",
-        "escalated"
+        "escalated",
+        "lipsync",
+        "fallback"
       ],
       "title": "ReviewReason",
       "type": "string"
@@ -698,6 +700,18 @@
           "default": "",
           "title": "Lyrics",
           "type": "string"
+        },
+        "fallback_from": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ShotType"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Set when the shot was converted from this type after it could not be made."
         },
         "intensity": {
           "default": 0.5,

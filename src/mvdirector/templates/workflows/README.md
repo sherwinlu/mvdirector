@@ -52,6 +52,9 @@ Rules:
   `defaults` support `${ENV_VAR}` expansion for `COMFY_*`, `MVD_*`, and `RUNPOD_TOKEN`
   (for example `{"api_key": "${COMFY_SEEDANCE_API_KEY}"}`), so you never have to hard-code paid
   API keys in `.api.json` or `.bindings.json`.
+- An optional reference image a shot does not have (`set_image`, `prop_image`, and the others
+  in the table below) is left out of that job: the `Load...` node
+  bound to it is removed. Connect each one to an optional input of the model node.
 - Extra parameters from `retry.adjust_params` in `project.yaml` (such as `steps`) are sent
   on later attempts and need a binding to have any effect.
 - `image`, `reference_image` and `audio` receive the name of a file the pipeline has
@@ -94,6 +97,11 @@ does not receive it:
 | `reference_image_2` | Second character's front panel on two-shots | Your edit model supports two subject images |
 | `set_image` | The set's locked plate | You want the still placed in an approved location |
 | `prop_image` | Primary hero prop sheet for the shot (`prop_image_2` for a second) | Shots feature recurring hero props (`mvd props`) |
+
+A reference image a shot does not have (no plate for its set, no props) is not sent, and the
+`Load...` node bound to it is removed from that job together with the input it fed. Feed each
+one into an optional slot, such as one image of a multi-image edit node, so the graph still
+validates without it. A value set under `defaults` is used instead of removing the node.
 
 Binding `set_image` makes plates **required**: `mvd stills` stops until every set used by the
 selected singer shots has a locked plate (`mvd plates generate`, then `mvd plates lock`). Use

@@ -351,8 +351,9 @@ def _format_character_sheet(
     background: str = "white",
 ) -> str:
     character = manifest.character_for(character_id)
-    description = (
-        character.describe(state_id) if state_id is not None else character.portrait_text()
+    description = _with_pinned(
+        character,
+        character.describe(state_id) if state_id is not None else character.portrait_text(),
     )
     return template.format(
         layout=PANEL_LAYOUT[layout],
@@ -403,7 +404,7 @@ def state_sheet_prompt(
 ) -> str:
     character = manifest.character_for(character_id)
     state = character.state(state_id)
-    invariants = _pinned(character)
+    invariants = character.pinned()
     invariants_note = f" Keep {invariants}." if invariants else ""
     return STATE_SHEET_TEMPLATE.format(
         invariants_note=invariants_note,
@@ -452,7 +453,7 @@ def reference_video_prompt(
             "costume and hair read cleanly; close-up face panel cycles smoothly through subtle "
             "natural expressions (neutral, slight smirk, focused gaze) without exaggerating."
         )
-    if pinned := _pinned(character):
+    if pinned := character.pinned():
         parts.append(f"Locked details: {pinned}.")
     state = (
         character.state(state_id)
@@ -507,9 +508,14 @@ def prop_prompt(manifest: Manifest, prop_query: str) -> str:
     ).replace("  ", " ")
 
 
-def _pinned(character: Character) -> str:
-    """The character's pinned details, trimmed so callers can add their own punctuation."""
-    return character.invariants.strip().strip(".; ").strip()
+def _with_pinned(character: Character, text: str) -> str:
+    """``text`` followed by the character's pinned details, as one more sentence."""
+    text, pinned = text.strip(), character.pinned()
+    if not pinned:
+        return text
+    if text and text[-1] not in ".!?":
+        text += "."
+    return f"{text} Always: {pinned}.".strip()
 
 
 def _look(character: Character, state_id: str | None) -> str:
@@ -517,15 +523,11 @@ def _look(character: Character, state_id: str | None) -> str:
 
     The reference images carry identity, but a second character in a two-shot gets fewer of them
     and drifts (hair, sleeves, hair colour). Writing the pinned details into the prompt holds them.
-    Empty when there is nothing to say, so callers can skip the character.
+    Empty when there is nothing to say, so callers can skip the character. A costume on its own,
+    with no appearance, is not worth a line.
     """
-    text = character.describe(state_id).strip()
-    pinned = _pinned(character)
-    if not pinned:
-        return text
-    if text and text[-1] not in ".!?":
-        text += "."
-    return f"{text} Always: {pinned}.".strip()
+    text = character.describe(state_id) if character.appearance.strip() else ""
+    return _with_pinned(character, text)
 
 
 def compose_still_prompt(

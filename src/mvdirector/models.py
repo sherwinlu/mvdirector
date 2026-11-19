@@ -463,6 +463,10 @@ class Character(StrictModel):
             return self.appearance
         return f"{self.appearance} Wearing: {state.description}".strip()
 
+    def pinned(self) -> str:
+        """``invariants`` trimmed of surrounding space and trailing punctuation."""
+        return self.invariants.strip().rstrip(".;:,!? ").strip()
+
     def portrait_text(self) -> str:
         """Description for the base reference sheet: appearance in the first costume."""
         return self.describe(self.wardrobe[0].id if self.wardrobe else None)

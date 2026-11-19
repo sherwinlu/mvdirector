@@ -15,10 +15,12 @@ from mvdirector.generation import reference
 from mvdirector.generation.runner import load_templates
 from mvdirector.models import (
     Analysis,
+    AudioSlice,
     Character,
     LyricLine,
     Manifest,
     SetDesign,
+    Shot,
     ShotType,
     TimeSpan,
     VisualBible,
@@ -593,16 +595,6 @@ def test_cut_points_are_deterministic_before_bible_call():
 
 
 def test_pinned_details_reach_every_character_in_a_still_prompt():
-    from mvdirector.models import (
-        AudioSlice,
-        Character,
-        Manifest,
-        Shot,
-        ShotType,
-        VisualBible,
-        WardrobeState,
-    )
-
     def shot(shot_id, character, characters):
         return Shot(
             id=shot_id,
@@ -656,8 +648,6 @@ def test_pinned_details_reach_every_character_in_a_still_prompt():
 
 
 def test_pinned_details_edge_cases():
-    from mvdirector.models import Character, WardrobeState
-
     coat = [WardrobeState(id="coat", description="a long black coat")]
     # A costume with no closing punctuation does not swallow the pinned details.
     worn = Character(appearance="Fair.", invariants="blonde hair in a bun", wardrobe=coat)
@@ -668,3 +658,16 @@ def test_pinned_details_edge_cases():
     assert prompts._look(Character(invariants="a scar"), None) == "Always: a scar."
     assert prompts._look(Character(invariants=" . "), None) == ""
     assert prompts._look(Character(), None) == ""
+    # Trailing punctuation of any kind is trimmed; a leading one is kept.
+    assert Character(invariants=".5mm nose stud!").pinned() == ".5mm nose stud"
+    # A costume with no appearance is not worth a prompt line on its own.
+    assert prompts._look(Character(wardrobe=coat), "coat") == ""
+    # The base sheet carries the pinned details too, so the locked identity includes them.
+    sheet = Manifest(
+        title="t",
+        duration=1.0,
+        fps=24,
+        visual_bible=VisualBible(),
+        characters={"a": Character(appearance="Fair.", invariants="a scar", wardrobe=coat)},
+    )
+    assert "Always: a scar." in prompts.sheet_prompt(sheet, "row")

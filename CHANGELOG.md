@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+- `planning.max_lipsync_share` (default `null`, off): caps the share of the song that is the singer singing to camera. Sung shots over the cap become cutaways with the vocal playing over them, quietest verse shots first; chorus, hook and final-line shots stay, and the singer is never off screen for more than two shots in a row. Fewer faces on screen means less identity drift and fewer lip-sync renders.
+- The shot-direction prompt now asks for a section arc, off-lens verse looks, at least three looks, a change every 2 to 4 seconds without a cut and a striking frame every 30 seconds. A planner-made cutaway stays a cutaway, and the rule-based planner writes a no-people cutaway for it.
+- `mvd plan` logs the share of the song spent singing to camera and the number of distinct sets, and warns below three.
+
 ### Documentation
 - README and docs describe the verified local setup (Ollama `gemma3:12b`, Wan 2.1 + InfiniteTalk on RunPod), advisory lip-sync and the performance fallback, duet reference limits and the InfiniteTalk and RunPod gotchas. Claude remains the built-in default LLM.
 

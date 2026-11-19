@@ -40,6 +40,10 @@ from mvdirector.planning.segmenter import frames_for, segment
 log = logging.getLogger(__name__)
 
 _LIPSYNC_FRAMINGS = [Framing.CLOSE_UP, Framing.MEDIUM_CLOSE]
+# Sections whose sung shots stay on camera when the singing share is capped.
+_HOOK_SECTIONS = ("chorus", "hook")
+# Most cutaways in a row before the singer has to come back.
+_MAX_CUTAWAY_RUN = 2
 _TIGHT_TO_WIDE = [Framing.CLOSE_UP, Framing.MEDIUM_CLOSE, Framing.MEDIUM, Framing.WIDE]
 _OTHER_FRAMINGS = [Framing.WIDE, Framing.MEDIUM]
 _FRAMING_PHRASE = {
@@ -190,12 +194,15 @@ def build_manifest(
     else:
         snap_sections = config.video.snap_sections == "always"
     manifest.shots = _timed_shots(config, analysis, snap_sections=snap_sections)
+    if config.planning.max_lipsync_share is not None:
+        _thin_lipsync(manifest.shots, config.planning.max_lipsync_share)
     if llm is None:
         log.warning("LLM disabled: using rule-based direction. Edit manifest.json to refine it.")
         manifest.visual_bible = VisualBible(style=" ".join(style_text.split()))
     else:
         _write_bible(manifest, lyrics_text, style_text, llm)
     _direct_shots(manifest, config, llm)
+    _report_mix(manifest.shots)
     return manifest
 
 
@@ -486,6 +493,67 @@ def _timed_shots(
             )
         )
     return shots
+
+
+def _thin_lipsync(shots: list[Shot], max_share: float) -> None:
+    """Turn sung shots into cutaways until singing to camera fits ``max_share`` of the song.
+
+    A cutaway keeps the vocal and drops the singer, so there is no face to keep consistent and
+    nothing to lip-sync. The quietest shots go first. Chorus and hook shots and the last sung shot
+    stay on camera, and the singer is never off screen for more than ``_MAX_CUTAWAY_RUN`` shots.
+    """
+    total = sum(s.end - s.start for s in shots)
+    sung = [s for s in shots if s.type is ShotType.LIPSYNC]
+    excess = sum(s.end - s.start for s in sung) - max_share * total
+    if excess <= 0:
+        return
+
+    def protected(shot: Shot) -> bool:
+        label = (shot.section or "").lower()
+        return shot is sung[-1] or any(word in label for word in _HOOK_SECTIONS)
+
+    def cutaway_run(position: int) -> int:
+        """Length of the cutaway run that converting ``shots[position]`` would make."""
+        run = 1
+        for step in (-1, 1):
+            at = position + step
+            while 0 <= at < len(shots) and shots[at].type is ShotType.BROLL:
+                run += 1
+                at += step
+        return run
+
+    for shot in sorted(sung, key=lambda s: (protected(s), s.intensity)):
+        if excess <= 0:
+            break
+        if protected(shot) or cutaway_run(shots.index(shot)) > _MAX_CUTAWAY_RUN:
+            continue
+        shot.type = ShotType.BROLL
+        excess -= shot.end - shot.start
+
+
+def singing_share(shots: list[Shot]) -> float:
+    """Share of the song, by time, that is the singer singing to camera."""
+    total = sum(s.end - s.start for s in shots)
+    sung = sum(s.end - s.start for s in shots if s.type is ShotType.LIPSYNC)
+    return sung / total if total else 0.0
+
+
+def _report_mix(shots: list[Shot]) -> None:
+    """Log how the plan splits screen time, and warn when it is all one look."""
+    share = singing_share(shots)
+    looks = {s.setting for s in shots if s.setting}
+    log.info(
+        "Plan: %d shots, %.0f%% of the song is the singer singing to camera, %d distinct set(s).",
+        len(shots),
+        share * 100,
+        len(looks),
+    )
+    if len(looks) < 3:
+        log.warning(
+            "Only %d distinct set(s) in the plan. Three or more looks keep a video from "
+            "feeling like one setup; add sets to the visual bible.",
+            len(looks),
+        )
 
 
 # ------------------------------------------------------------------- direction
@@ -796,8 +864,10 @@ def _apply_creative(
     if creative is None:
         _apply_rule_based(shot)
         return
-    if shot.type is not ShotType.LIPSYNC and creative.type is not ShotType.LIPSYNC:
-        shot.type = creative.type
+    if shot.type is ShotType.PERFORMANCE and creative.type is not ShotType.LIPSYNC:
+        shot.type = (
+            creative.type
+        )  # a cutaway stays a cutaway: the model may not bring the singer back
     shot.framing = creative.framing
     if shot.type is ShotType.LIPSYNC and _TIGHT_TO_WIDE.index(shot.framing) > _TIGHT_TO_WIDE.index(
         lipsync_widest
@@ -846,6 +916,18 @@ def _apply_rule_based(shot: Shot) -> None:
         shot.framing = _LIPSYNC_FRAMINGS[shot.index % len(_LIPSYNC_FRAMINGS)]
         action = "singing directly to camera"
         motion = "The singer performs the line to camera with natural head movement. Slow push-in."
+    elif shot.type is ShotType.BROLL:
+        shot.framing = _OTHER_FRAMINGS[shot.index % len(_OTHER_FRAMINGS)]
+        shot.setting = shot.setting or "performance stage"
+        energy = "high-energy" if shot.intensity >= 0.66 else "restrained"
+        shot.still_prompt = (
+            f"{_FRAMING_PHRASE[shot.framing]} of an object or corner of the {shot.setting} that "
+            f"echoes the song, no people, {energy} mood."
+        )
+        shot.motion_prompt = (
+            "Light, dust and shadow drift slowly through the frame. No people. Steady camera."
+        )
+        return
     else:
         shot.framing = _OTHER_FRAMINGS[shot.index % len(_OTHER_FRAMINGS)]
         action = "moving to the music, not singing"

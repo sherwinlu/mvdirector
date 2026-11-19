@@ -361,6 +361,18 @@ class PlanningConfig(_Section):
             "or the face tracker to find, and clips came back static."
         ),
     )
+    max_lipsync_share: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "The most screen time, as a share of the song, that may be the singer singing to "
+            "camera. Sung shots over the budget become cutaways (no singer, the vocal plays over "
+            "them), starting with the quietest verse shots; chorus, hook and final-line shots "
+            "stay. Rough guide: 0.7 for a performance video, 0.45 for a hybrid, 0.2 for a "
+            "narrative one. None leaves every sung shot on camera."
+        ),
+    )
 
 
 class ReferenceConfig(_Section):

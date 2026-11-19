@@ -89,6 +89,9 @@ Rules:
   (no hands, microphones, hair or foreground objects across the mouth).
 - Shots given as 'performance' have no vocals. Keep them as 'performance' (performer on camera,
   not singing) or change them to 'broll' (no performer) where a cutaway serves the song.
+- Shots given as 'broll' are cutaways: the vocal plays over them and no performer is shown. Keep
+  them 'broll', with character null, and show what the lyric is about (an object, a place, hands,
+  light, weather), never a face.
 - Match detail to shot size. Small details (identifying marks, jewelry, cuffs, props, screen
   content) belong in close_up or medium_close shots only. In medium and wide shots, describe pose,
   silhouette and action, not fine detail.
@@ -101,6 +104,20 @@ Rules:
   choruses, release in them, hold still where the song is stripped back. Match energy to
   intensity (0 calm to 1 peak).
 - Vary framing between neighbouring shots, and stay consistent with the shots already directed.
+- Shape the video like the song. First verse: restrained, one look. First chorus: the first
+  escalation, so change the set, the framing or the light from the verse. Second verse: never a
+  repeat of the first; add a complication (a new angle, set, prop or costume beat). Bridge: break
+  the pattern of the shots before it (a different set, light or pace). Final chorus: the payoff,
+  bringing earlier looks back together. Close on an image that lingers.
+- Eye contact: in verses let the singer look slightly off the lens, in three-quarter view or at
+  something in the room. Save a look straight into the lens for the pre-chorus build and the
+  chorus hook.
+- Use at least three distinct looks across the video (different sets or lighting), not one setup.
+- Something should visibly change every 2 to 4 seconds without a cut: light shifting, a flame or
+  curtain moving, a background element, the performer's posture. Do not use camera moves for this
+  on lipsync shots.
+- Aim for one striking, printable frame in every 30 seconds: strong symmetry, a silhouette, or a
+  single bright light against dark.
 - still_prompt: describes the first frame only: framing, physical camera placement in open space,
   who is in frame, pose, action, camera angle. It is sent to an image-edit model together with a
   reference portrait of the primary singer, and the set and character descriptions are added

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mvdirector.models import Framing, Manifest, Shot, ShotType
+from mvdirector.models import Character, Framing, Manifest, Shot, ShotType
 
 if TYPE_CHECKING:
     from mvdirector.config import VideoConfig
@@ -43,7 +43,9 @@ camera for most of the song. Write the visual bible that every shot will follow.
     clothing actually changes—never for poses, props, or rooms. Use one state if their costume
     never changes.
   - invariants: optional short phrase listing signature accessories or visual details that must
-    survive across every costume change (e.g. 'glowing cyan hoop earrings in both ears').
+    survive across every costume change (e.g. 'glowing cyan hoop earrings in both ears'). It is
+    added to every still of this character, so never put anything here that a costume change
+    would alter (sleeves, jacket, shoes).
 - appearance: copy the primary/lead singer's permanent appearance paragraph here as well.
 - invariants: copy the primary/lead singer's invariants here as well.
 - wardrobe: copy the primary/lead singer's wardrobe states here as well.
@@ -347,11 +349,14 @@ def _format_character_sheet(
     character_id: str | None = None,
     *,
     background: str = "white",
+    pin_details: bool,
 ) -> str:
     character = manifest.character_for(character_id)
     description = (
         character.describe(state_id) if state_id is not None else character.portrait_text()
     )
+    if pin_details:
+        description = _with_pinned(character, description)
     return template.format(
         layout=PANEL_LAYOUT[layout],
         panels=_sheet_panels(layout),
@@ -369,7 +374,13 @@ def sheet_prompt(
     background: str = "white",
 ) -> str:
     return _format_character_sheet(
-        manifest, SHEET_TEMPLATE, layout, state_id, character_id, background=background
+        manifest,
+        SHEET_TEMPLATE,
+        layout,
+        state_id,
+        character_id,
+        background=background,
+        pin_details=True,
     )
 
 
@@ -388,6 +399,7 @@ def derived_sheet_prompt(
         state_id,
         character_id,
         background=background,
+        pin_details=False,
     )
 
 
@@ -401,8 +413,8 @@ def state_sheet_prompt(
 ) -> str:
     character = manifest.character_for(character_id)
     state = character.state(state_id)
-    invariants = character.invariants.strip().rstrip(".")
-    invariants_note = f" Keep {invariants}." if invariants else ""
+    invariants = character.pinned()
+    invariants_note = f" Keep {_sentence(invariants)}" if invariants else ""
     return STATE_SHEET_TEMPLATE.format(
         invariants_note=invariants_note,
         layout=PANEL_LAYOUT[layout],
@@ -450,8 +462,8 @@ def reference_video_prompt(
             "costume and hair read cleanly; close-up face panel cycles smoothly through subtle "
             "natural expressions (neutral, slight smirk, focused gaze) without exaggerating."
         )
-    if character.invariants.strip():
-        parts.append(f"Locked details: {character.invariants.strip()}.")
+    if pinned := character.pinned():
+        parts.append(f"Locked details: {_sentence(pinned)}")
     state = (
         character.state(state_id)
         if state_id
@@ -505,6 +517,33 @@ def prop_prompt(manifest: Manifest, prop_query: str) -> str:
     ).replace("  ", " ")
 
 
+def _sentence(text: str) -> str:
+    """``text`` ended with a full stop, unless it already ends a sentence."""
+    text = text.strip()
+    return text if not text or text[-1] in ".!?" else f"{text}."
+
+
+def _with_pinned(character: Character, text: str) -> str:
+    """``text`` followed by the character's pinned details, as one more sentence."""
+    text, pinned = text.strip(), character.pinned()
+    if not pinned:
+        return text
+    return f"{_sentence(text)} Always: {_sentence(pinned)}".strip()
+
+
+def _look(character: Character, state_id: str | None) -> str:
+    """Appearance and costume, plus the details pinned for every still of this character.
+
+    The reference images carry identity, but a second character in a two-shot gets fewer of them
+    and drifts (hair, sleeves, hair colour). Writing the pinned details into the prompt holds them.
+    Empty for a character with no appearance, so callers skip them (pinned details need a look
+    to attach to, and a reference sheet is only made for a character with an appearance).
+    """
+    if not character.appearance.strip():
+        return ""
+    return _with_pinned(character, character.describe(state_id))
+
+
 def compose_still_prompt(
     manifest: Manifest,
     shot: Shot,
@@ -545,24 +584,21 @@ def compose_still_prompt(
         visible = manifest.visible_characters(shot)
         if len(visible) == 1:
             char_id, character, state_id = visible[0]
-            if character.appearance:
+            if look := _look(character, state_id):
                 if len(manifest.characters) <= 1 or char_id is None:
-                    parts.append(f"The singer: {character.describe(state_id)}")
+                    parts.append(f"The singer: {look}")
                 else:
                     label = character.name or char_id
-                    parts.append(f"The singer ({label}): {character.describe(state_id)}")
+                    parts.append(f"The singer ({label}): {look}")
         elif len(visible) > 1:
             primary_id, primary_char, primary_state = visible[0]
-            if primary_char.appearance:
+            if look := _look(primary_char, primary_state):
                 label = primary_char.name or primary_id or "lead"
-                parts.append(
-                    f"The singer ({label}, matches reference portrait): "
-                    f"{primary_char.describe(primary_state)}"
-                )
+                parts.append(f"The singer ({label}, matches reference portrait): {look}")
             for sec_id, sec_char, sec_state in visible[1:]:
-                if sec_char.appearance:
+                if look := _look(sec_char, sec_state):
                     sec_label = sec_char.name or sec_id or "performer"
-                    parts.append(f"Also in frame ({sec_label}): {sec_char.describe(sec_state)}")
+                    parts.append(f"Also in frame ({sec_label}): {look}")
     parts.append(_style_line(bible.style, bible.palette, bible.lighting))
     return " ".join(part.strip() for part in parts if part.strip())
 

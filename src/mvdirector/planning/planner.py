@@ -707,9 +707,10 @@ def _ask_for_batch(
         char_lines = ["CHARACTERS (use these exact character ids):"]
         for cid, char in manifest.characters.items():
             w_summary = "; ".join(f"{w.id}: {w.description}" for w in char.wardrobe) or "base"
+            always = f" | always: {pinned}" if (pinned := char.pinned()) else ""
             char_lines.append(
                 f"- id={cid} ({char.name or cid}) | appearance: {char.appearance} "
-                f"| wardrobe: {w_summary}"
+                f"| wardrobe: {w_summary}{always}"
             )
         lines.append("\n".join(char_lines))
     if character.wardrobe:

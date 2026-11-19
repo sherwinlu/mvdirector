@@ -243,7 +243,9 @@ def test_rule_based_singing_shots_are_never_wider_than_medium_close(analysis):
 
 def test_the_widest_singing_framing_is_configurable(analysis):
     config = ProjectConfig()
+    config.planning.max_lipsync_share = None  # keep s002 as a lipsync shot
     config.video.max_clip_seconds = 4.0
     config.planning.lipsync_widest_framing = Framing.MEDIUM
     manifest = build_manifest(config, analysis, "lyrics", "style", llm=ScriptedLLM(Framing.MEDIUM))
-    assert manifest.shot("s002").framing is Framing.MEDIUM
+    sung = manifest.shot("s002")
+    assert sung.type is ShotType.LIPSYNC and sung.framing is Framing.MEDIUM

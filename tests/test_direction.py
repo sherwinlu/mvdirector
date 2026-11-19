@@ -133,6 +133,7 @@ def _build(sectioned, plan=PLAN, **planning):
     config = ProjectConfig()
     config.video.max_clip_seconds = 4.0
     config.llm.shots_per_request = 2
+    config.planning.max_lipsync_share = None  # these scenarios keep sung shots on camera
     for key, value in planning.items():
         setattr(config.planning, key, value)
     director = Director(plan)

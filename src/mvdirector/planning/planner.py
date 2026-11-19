@@ -42,9 +42,12 @@ log = logging.getLogger(__name__)
 
 _LIPSYNC_FRAMINGS = [Framing.CLOSE_UP, Framing.MEDIUM_CLOSE]
 # Sections whose sung shots stay on camera when the singing share is capped.
-_HOOK_SECTIONS = ("chorus", "hook")
+# Pre-chorus and post-chorus are excluded so only actual chorus/hook sections stay protected.
+_NON_HOOK_CHORUS_RE = re.compile(r"\b(?:pre|post)[\s-]?chorus\b", re.IGNORECASE)
+_HOOK_SECTION_RE = re.compile(r"\b(?:chorus|hook)\b", re.IGNORECASE)
 # Most cutaways in a row before the singer has to come back.
 _MAX_CUTAWAY_RUN = 2
+_SHARE_EPS = 1e-9
 # Shot scale for shots with no singing to frame, by pace: the closer the lens, the faster it feels.
 _PACE_FRAMING = {"calm": Framing.WIDE, "moderate": Framing.MEDIUM, "high": Framing.MEDIUM_CLOSE}
 _PACE_MOTION = {
@@ -52,9 +55,19 @@ _PACE_MOTION = {
     "moderate": "Steady camera with a gentle push-in. Natural movement in the frame.",
     "high": "Brisk movement in the frame and a firm, smooth push-in. Camera stays stable.",
 }
+_BROLL_PACE_MOTION = {
+    "calm": "Light, dust and shadow drift slowly through the frame. No people. Steady camera.",
+    "moderate": (
+        "Light and shadow shift steadily across the frame with natural movement. "
+        "No people. Gentle push-in."
+    ),
+    "high": (
+        "Brisk movement of light and environmental elements across the frame. "
+        "No people. Firm, smooth push-in. Camera stays stable."
+    ),
+}
 _SCALE = {Framing.WIDE: 0, Framing.MEDIUM: 1, Framing.MEDIUM_CLOSE: 2, Framing.CLOSE_UP: 3}
 _TIGHT_TO_WIDE = [Framing.CLOSE_UP, Framing.MEDIUM_CLOSE, Framing.MEDIUM, Framing.WIDE]
-_OTHER_FRAMINGS = [Framing.WIDE, Framing.MEDIUM]
 _FRAMING_PHRASE = {
     Framing.CLOSE_UP: "Close-up",
     Framing.MEDIUM_CLOSE: "Medium close-up",
@@ -211,7 +224,7 @@ def build_manifest(
     else:
         _write_bible(manifest, lyrics_text, style_text, llm)
     _direct_shots(manifest, config, llm)
-    _report_mix(manifest.shots)
+    _report_mix(manifest.shots, has_bible=llm is not None)
     return manifest
 
 
@@ -504,40 +517,57 @@ def _timed_shots(
     return shots
 
 
+def _is_hook_section(section: str | None) -> bool:
+    """True for chorus/hook sections, excluding pre-chorus and post-chorus."""
+    cleaned = _NON_HOOK_CHORUS_RE.sub("", section or "")
+    return bool(_HOOK_SECTION_RE.search(cleaned))
+
+
+def _cutaway_run(shots: list[Shot], position: int) -> int:
+    """Length of the cutaway run that making ``shots[position]`` a cutaway would create."""
+    run = 1
+    for step in (-1, 1):
+        at = position + step
+        while 0 <= at < len(shots) and shots[at].type is ShotType.BROLL:
+            run += 1
+            at += step
+    return run
+
+
 def _thin_lipsync(shots: list[Shot], max_share: float) -> None:
     """Turn sung shots into cutaways until singing to camera fits ``max_share`` of the song.
 
     A cutaway keeps the vocal and drops the singer, so there is no face to keep consistent and
-    nothing to lip-sync. The quietest shots go first. Chorus and hook shots and the last sung shot
-    stay on camera, and the singer is never off screen for more than ``_MAX_CUTAWAY_RUN`` shots.
+    nothing to lip-sync. The quietest non-hook shots go first. Chorus and hook shots and the last
+    sung shot stay on camera, and the singer is never off screen for more than
+    ``_MAX_CUTAWAY_RUN`` shots.
     """
-    total = sum(s.end - s.start for s in shots)
-    sung = [s for s in shots if s.type is ShotType.LIPSYNC]
-    excess = sum(s.end - s.start for s in sung) - max_share * total
-    if excess <= 0:
+    total = sum(s.duration for s in shots)
+    indexed_sung = [(i, s) for i, s in enumerate(shots) if s.type is ShotType.LIPSYNC]
+    excess = sum(s.duration for _, s in indexed_sung) - max_share * total
+    if not indexed_sung or excess <= _SHARE_EPS:
         return
 
-    def protected(shot: Shot) -> bool:
-        label = (shot.section or "").lower()
-        return shot is sung[-1] or any(word in label for word in _HOOK_SECTIONS)
-
-    def cutaway_run(position: int) -> int:
-        """Length of the cutaway run that converting ``shots[position]`` would make."""
-        run = 1
-        for step in (-1, 1):
-            at = position + step
-            while 0 <= at < len(shots) and shots[at].type is ShotType.BROLL:
-                run += 1
-                at += step
-        return run
-
-    for shot in sorted(sung, key=lambda s: (protected(s), s.intensity)):
-        if excess <= 0:
+    last_sung = indexed_sung[-1][1]
+    candidates = [
+        (i, s) for i, s in indexed_sung if s is not last_sung and not _is_hook_section(s.section)
+    ]
+    for position, shot in sorted(candidates, key=lambda item: item[1].intensity):
+        if excess <= _SHARE_EPS:
             break
-        if protected(shot) or cutaway_run(shots.index(shot)) > _MAX_CUTAWAY_RUN:
+        if _cutaway_run(shots, position) > _MAX_CUTAWAY_RUN:
             continue
         shot.type = ShotType.BROLL
-        excess -= shot.end - shot.start
+        excess -= shot.duration
+
+    if excess > _SHARE_EPS:
+        log.info(
+            "Singing share stayed at %.0f%% (cap %.0f%%): remaining sung shots are protected "
+            "chorus/hook/final shots or hit the %d-cutaway run limit.",
+            singing_share(shots) * 100,
+            max_share * 100,
+            _MAX_CUTAWAY_RUN,
+        )
 
 
 def pace_label(intensity: float) -> str:
@@ -547,15 +577,15 @@ def pace_label(intensity: float) -> str:
 
 def singing_share(shots: list[Shot]) -> float:
     """Share of the song, by time, that is the singer singing to camera."""
-    total = sum(s.end - s.start for s in shots)
-    sung = sum(s.end - s.start for s in shots if s.type is ShotType.LIPSYNC)
+    total = sum(s.duration for s in shots)
+    sung = sum(s.duration for s in shots if s.type is ShotType.LIPSYNC)
     return sung / total if total else 0.0
 
 
-def _report_mix(shots: list[Shot]) -> None:
+def _report_mix(shots: list[Shot], *, has_bible: bool = True) -> None:
     """Log how the plan splits screen time, and warn when it is all one look."""
     share = singing_share(shots)
-    looks = {s.setting for s in shots if s.setting}
+    looks = {s.setting.strip().lower() for s in shots if s.setting.strip()}
     log.info(
         "Plan: %d shots, %.0f%% of the song is the singer singing to camera, %d distinct set(s).",
         len(shots),
@@ -563,7 +593,7 @@ def _report_mix(shots: list[Shot]) -> None:
         len(looks),
     )
     _report_pace(shots)
-    if len(looks) < 3:
+    if has_bible and len(shots) >= 3 and len(looks) < 3:
         log.warning(
             "Only %d distinct set(s) in the plan. Three or more looks keep a video from "
             "feeling like one setup; add sets to the visual bible.",
@@ -580,14 +610,18 @@ def _report_pace(shots: list[Shot]) -> None:
     """
     if len(shots) < 8:
         return
-    try:
-        fit = statistics.correlation(
-            [s.intensity for s in shots], [float(_SCALE[s.framing]) for s in shots]
+    if len({s.framing for s in shots}) < 2:
+        log.warning(
+            "Every shot has the same framing (%s): the pace will feel flat.",
+            shots[0].framing.value,
         )
-    except statistics.StatisticsError:  # every shot the same size, or the song never changes
-        log.warning("Every shot is the same size or the song never changes: the pace will be flat.")
         return
-    if fit < -0.1:
+    if len({s.intensity for s in shots}) < 2:
+        return
+    fit = statistics.correlation(
+        [s.intensity for s in shots], [float(_SCALE[s.framing]) for s in shots]
+    )
+    if fit < -0.25:
         log.warning(
             "Shot scale runs against the song's intensity (r=%.2f): close-ups land on the quiet "
             "parts and wide shots on the loud ones. Check the framing against the section arc.",
@@ -711,23 +745,25 @@ def _direct_shots(manifest: Manifest, config: ProjectConfig, llm: LLMClient | No
                     batch[-1].id,
                     exc,
                 )
-        for shot in batch:
+        for shot_pos, shot in enumerate(batch, start=offset):
             item = creative.get(shot.id)
+            can_cutaway = _cutaway_run(manifest.shots, shot_pos) <= _MAX_CUTAWAY_RUN
             _apply_creative(
                 shot,
                 item,
                 manifest.visual_bible,
                 allow_multicut=config.planning.allow_multicut_shots,
                 lipsync_widest=config.planning.lipsync_widest_framing,
+                allow_broll_conversion=can_cutaway,
             )
-            if not manifest.characters:
-                shot.wardrobe = wardrobe.assign(item.wardrobe if item else None, shot.id)
-                continue
             if not shot.type.shows_singer:
                 shot.character = None
                 shot.characters = []
                 shot.wardrobe = None
                 shot.character_wardrobes = {}
+                continue
+            if not manifest.characters:
+                shot.wardrobe = wardrobe.assign(item.wardrobe if item else None, shot.id)
                 continue
 
             section_chars = _characters_in_text(shot.section, manifest.characters)
@@ -864,10 +900,12 @@ def _ask_for_batch(
             lines.append(f"CURRENT WARDROBE BY CHARACTER: {active_states}")
     total = manifest.duration or 1.0
     shot_lines = []
-    last_pace = pace_label(batch[0].intensity)
+    last_pace = pace_label(previous[-1].intensity) if previous else None
     for s in batch:
         pace = pace_label(s.intensity)
-        pace_note = f"pace={pace}" + (f" (was {last_pace})" if pace != last_pace else "")
+        pace_note = f"pace={pace}" + (
+            f" (was {last_pace})" if last_pace is not None and pace != last_pace else ""
+        )
         last_pace = pace
         singer_hint = ""
         if len(manifest.characters) > 1:
@@ -895,6 +933,14 @@ def _ask_for_batch(
     return {item.id: item for item in reply.shots}
 
 
+def _apply_rule_based_with_set(shot: Shot, bible: VisualBible, raw_setting: str) -> None:
+    """Apply rule-based direction while keeping a valid set from the visual bible."""
+    shot.setting = _resolve_set(bible, raw_setting, shot.id)
+    shot.allow_cuts = False
+    shot.props = []
+    _apply_rule_based(shot)
+
+
 def _apply_creative(
     shot: Shot,
     creative: ShotCreative | None,
@@ -902,15 +948,31 @@ def _apply_creative(
     *,
     allow_multicut: bool = False,
     lipsync_widest: Framing = Framing.MEDIUM_CLOSE,
+    allow_broll_conversion: bool = True,
 ) -> None:
     """Copy the model's choices onto a shot, enforcing the rules it must not break."""
     if creative is None:
         _apply_rule_based(shot)
         return
+    if shot.type is ShotType.BROLL and creative.type is not ShotType.BROLL:
+        log.warning(
+            "%s: model tried to put the singer back in a cutaway (%s); using rule-based cutaway",
+            shot.id,
+            creative.type.value,
+        )
+        _apply_rule_based_with_set(shot, bible, creative.setting)
+        return
     if shot.type is ShotType.PERFORMANCE and creative.type is not ShotType.LIPSYNC:
-        shot.type = (
-            creative.type
-        )  # a cutaway stays a cutaway: the model may not bring the singer back
+        if creative.type is ShotType.BROLL and not allow_broll_conversion:
+            log.warning(
+                "%s: keeping performance shot with rule-based direction so the singer is not off "
+                "screen for more than %d shots in a row",
+                shot.id,
+                _MAX_CUTAWAY_RUN,
+            )
+            _apply_rule_based_with_set(shot, bible, creative.setting)
+            return
+        shot.type = creative.type
     shot.framing = creative.framing
     if shot.type is ShotType.LIPSYNC and _TIGHT_TO_WIDE.index(shot.framing) > _TIGHT_TO_WIDE.index(
         lipsync_widest
@@ -955,30 +1017,36 @@ def _resolve_set(bible: VisualBible, name: str, shot_id: str) -> str:
 
 
 def _apply_rule_based(shot: Shot) -> None:
+    pace = pace_label(shot.intensity)
+    energy = "high-energy" if pace == "high" else "restrained"
+    shot.setting = shot.setting or "performance stage"
     if shot.type is ShotType.LIPSYNC:
-        shot.framing = _LIPSYNC_FRAMINGS[shot.index % len(_LIPSYNC_FRAMINGS)]
-        action = "singing directly to camera"
-        motion = "The singer performs the line to camera with natural head movement. Slow push-in."
-    elif shot.type is ShotType.BROLL:
-        shot.framing = _PACE_FRAMING[pace_label(shot.intensity)]
-        shot.setting = shot.setting or "performance stage"
-        energy = "high-energy" if shot.intensity >= 0.66 else "restrained"
+        if pace == "high":
+            shot.framing = Framing.CLOSE_UP
+        elif pace == "calm":
+            shot.framing = Framing.MEDIUM_CLOSE
+        else:
+            shot.framing = _LIPSYNC_FRAMINGS[shot.index % len(_LIPSYNC_FRAMINGS)]
+        shot.still_prompt = (
+            f"{_FRAMING_PHRASE[shot.framing]} of the singer singing directly to camera, "
+            f"{energy} mood, {shot.setting}."
+        )
+        shot.motion_prompt = (
+            "The singer performs the line to camera with natural head movement. Slow push-in."
+        )
+        return
+    shot.framing = _PACE_FRAMING[pace]
+    if shot.type is ShotType.BROLL:
         shot.still_prompt = (
             f"{_FRAMING_PHRASE[shot.framing]} of an object or corner of the {shot.setting} that "
             f"echoes the song, no people, {energy} mood."
         )
-        shot.motion_prompt = (
-            "Light, dust and shadow drift slowly through the frame. No people. Steady camera."
-        )
+        shot.motion_prompt = _BROLL_PACE_MOTION[pace]
         return
-    else:
-        pace = pace_label(shot.intensity)
-        shot.framing = _PACE_FRAMING[pace]
-        action = "moving to the music, not singing"
-        motion = f"The singer moves with the music, mouth closed, not singing. {_PACE_MOTION[pace]}"
-    energy = "high-energy" if shot.intensity >= 0.66 else "restrained"
-    shot.setting = shot.setting or "performance stage"
     shot.still_prompt = (
-        f"{_FRAMING_PHRASE[shot.framing]} of the singer {action}, {energy} mood, {shot.setting}."
+        f"{_FRAMING_PHRASE[shot.framing]} of the singer moving to the music, not singing, "
+        f"{energy} mood, {shot.setting}."
     )
-    shot.motion_prompt = motion
+    shot.motion_prompt = (
+        f"The singer moves with the music, mouth closed, not singing. {_PACE_MOTION[pace]}"
+    )

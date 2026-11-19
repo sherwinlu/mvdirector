@@ -61,10 +61,12 @@ def test_planner_guards_allow_cuts_behind_config_flag(analysis) -> None:
             )
 
     default_cfg = ProjectConfig()
+    default_cfg.planning.max_lipsync_share = None  # keep s001 on camera for this test
     default_manifest = build_manifest(default_cfg, analysis, "lyrics", "style", MontageDirector())
     assert default_manifest.shot("s001").allow_cuts is False
 
     enabled_cfg = ProjectConfig()
+    enabled_cfg.planning.max_lipsync_share = None  # keep s001 on camera for this test
     enabled_cfg.planning.allow_multicut_shots = True
     montage_manifest = build_manifest(enabled_cfg, analysis, "lyrics", "style", MontageDirector())
     s1 = montage_manifest.shot("s001")

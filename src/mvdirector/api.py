@@ -28,6 +28,7 @@ from mvdirector import calibrate as calibrate_mod
 from mvdirector import media
 from mvdirector import report as report_mod
 from mvdirector.audio.analysis import analyze_project
+from mvdirector.cleanup import CleanupPlan, apply_cleanup, plan_cleanup
 from mvdirector.comfy.client import ComfyClient
 from mvdirector.comfy.provider import ComfyEndpointProvider, StaticComfyProvider
 from mvdirector.config import CONFIG_FILENAME, ReviewMode
@@ -52,6 +53,7 @@ from mvdirector.review import policy as review_policy
 __all__ = [
     # types
     "BriefResult",
+    "CleanupPlan",
     "GenerateResult",
     "LLMCheckOutcome",
     "Observer",
@@ -64,6 +66,7 @@ __all__ = [
     "brief",
     "calibrate",
     "check_llm",
+    "clean",
     "export_schemas",
     "generate",
     "generate_plates",
@@ -626,6 +629,23 @@ def reject(
             manifest, shot_id, note, target, project.config
         ),
     )
+
+
+def clean(project_dir: ProjectRef, *, delete: bool = False) -> CleanupPlan:
+    """Plan, and with ``delete=True`` carry out, the removal of generations no longer needed.
+
+    Deleting takes the run lock, so it cannot overlap a run that is still writing.
+    """
+    project = open_project(project_dir)
+    if not delete:
+        return plan_cleanup(project, project.load_manifest())
+    with project.run_lock():
+        manifest = project.load_manifest()
+        plan = plan_cleanup(project, manifest)
+        if plan.files:
+            apply_cleanup(project, manifest, plan)
+            project.save_manifest(manifest)
+    return plan
 
 
 def _decide(project_dir: ProjectRef, action: Callable[[Manifest, Project], object]) -> None:

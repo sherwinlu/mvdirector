@@ -19,6 +19,7 @@ from mvdirector.config import ProjectConfig, ReviewMode
 from mvdirector.models import (
     AssetKind,
     AssetStatus,
+    CheckStatus,
     Framing,
     Manifest,
     Review,
@@ -53,6 +54,17 @@ def review_reasons(shot: Shot, manifest: Manifest, config: ProjectConfig) -> lis
         and selected.qc.score < config.qc.pass_score + review.near_threshold_margin
     ):
         reasons.append(ReviewReason.NEAR_THRESHOLD)
+    if (
+        selected is not None
+        and selected.qc is not None
+        and any(
+            c.name == "lipsync" and c.status is CheckStatus.FAILED and not c.hard
+            for c in selected.qc.checks
+        )
+    ):
+        reasons.append(ReviewReason.LIPSYNC)
+    if shot.fallback_from is not None:
+        reasons.append(ReviewReason.FALLBACK)
     if shot.type in manifest.escalated_types:
         reasons.append(ReviewReason.ESCALATED)
     rate = review.closeup_rate if shot.framing is Framing.CLOSE_UP else review.other_rate

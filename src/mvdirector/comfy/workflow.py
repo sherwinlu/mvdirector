@@ -24,6 +24,24 @@ from mvdirector.errors import ConfigError, WorkflowBindingError
 
 log = logging.getLogger(__name__)
 
+# Per-shot reference files. A shot often has none (no plate, no prop), so a binding for one of
+# these that receives no value is cut out of the graph instead of keeping whatever file the
+# export happened to name.
+OPTIONAL_FILE_PARAMS = frozenset(
+    {
+        "reference_profile",
+        "reference_three_quarter",
+        "reference_face",
+        "reference_image_2",
+        "set_image",
+        "prop_image",
+        "prop_image_2",
+        "audio_video",
+        "reference_video",
+        "previz_video",
+    }
+)
+
 
 class Binding(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -144,4 +162,24 @@ class WorkflowTemplate:
                 continue
             for target in targets:
                 graph[target.node]["inputs"][target.field] = value
+        for param in OPTIONAL_FILE_PARAMS - values.keys():
+            if param in self.bindings.inputs and param not in self.bindings.required:
+                for target in self.bindings.inputs[param]:
+                    _drop_loader(graph, target.node)
         return graph
+
+
+def _drop_loader(graph: dict[str, Any], node_id: str) -> None:
+    """Remove a ``Load...`` node and the inputs that read from it.
+
+    The consuming input has to be optional in ComfyUI (for example one slot of a multi-image
+    input); a fixed input left without a link is reported by ComfyUI when the job is queued.
+    """
+    node = graph.get(node_id)
+    if node is None or "Load" not in str(node.get("class_type", "")):
+        return
+    del graph[node_id]
+    for other in graph.values():
+        inputs = other.get("inputs", {})
+        for name in [n for n, v in inputs.items() if isinstance(v, list) and v[:1] == [node_id]]:
+            del inputs[name]

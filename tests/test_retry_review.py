@@ -280,3 +280,62 @@ def test_best_attempt_prefers_no_hard_failure_then_score(manifest):
         Attempt(number=3, strategy=RetryStrategy.NEW_SEED, seed=3, prompt="p", error="failed")
     )
     assert state.best_attempt().number == 2
+
+
+def test_advisory_lipsync_failure_queues_a_passed_shot_for_review(config, manifest):
+    config.review.other_rate = 0.0
+    shot = manifest.shots[0]
+    shot.framing = Framing.MEDIUM
+    _finish(shot)
+    shot.video.selected.qc.checks.append(
+        CheckResult(name="lipsync", status=CheckStatus.FAILED, detail="correlation 0.29")
+    )
+    review.refresh_reviews(manifest, config)
+    assert shot.review.reasons == [ReviewReason.LIPSYNC] and not review.is_ready(shot)
+
+
+def test_blocking_lipsync_failure_is_not_also_queued_for_review(config, manifest):
+    config.review.other_rate = 0.0
+    shot = manifest.shots[0]
+    shot.framing = Framing.MEDIUM
+    _finish(shot)
+    shot.video.selected.qc.checks.append(
+        CheckResult(name="lipsync", status=CheckStatus.FAILED, hard=True)
+    )
+    review.refresh_reviews(manifest, config)
+    assert ReviewReason.LIPSYNC not in shot.review.reasons
+
+
+def test_fallback_reset_restarts_the_strategy_ladder_and_scopes_best_attempt(config, manifest):
+    policy = RetryPolicy(config.retry, config.seed, llm=None)
+    shot = manifest.shots[1]
+    for _ in range(4):
+        plan = policy.prepare(shot, AssetKind.VIDEO)
+        _record(shot.video, False, 0.7, hint="Sing more clearly.", strategy=plan.strategy)
+    assert shot.video.param_overrides == {"steps": 40}
+
+    # Convert to performance and reset for a fresh pass.
+    shot.fallback_from, shot.type = shot.type, ShotType.PERFORMANCE
+    shot.motion_prompt = "The singer moves with the music, mouth closed, not singing."
+    shot.video.reset(config.retry.max_attempts)
+    shot.video.prompt_override = None
+    shot.video.param_overrides = {}
+
+    seen = []
+    for i in range(4):
+        plan = policy.prepare(shot, AssetKind.VIDEO)
+        seen.append(plan.strategy)
+        if i == 0:
+            assert shot.video.param_overrides == {}
+        _record(shot.video, False, 0.4 + i * 0.05, hint="Steady camera.", strategy=plan.strategy)
+
+    assert seen == [
+        RetryStrategy.INITIAL,
+        RetryStrategy.NEW_SEED,
+        RetryStrategy.REWRITE_PROMPT,
+        RetryStrategy.ADJUST_PARAMS,
+    ]
+    assert "Steady camera." in shot.video.prompt_override
+    assert "Sing more clearly." not in shot.video.prompt_override
+    # best_attempt picks from the performance pass (5..8), never the earlier lipsync pass (1..4).
+    assert shot.video.best_attempt().number == 8

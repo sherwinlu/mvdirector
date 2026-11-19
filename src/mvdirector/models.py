@@ -223,9 +223,18 @@ class AssetState(StrictModel):
                 return attempt
         return None
 
+    def pass_attempts(self, *, after_fallback: bool = False) -> list[Attempt]:
+        """Attempts belonging to the active pass (after a fallback conversion, if any)."""
+        if not after_fallback:
+            return self.attempts
+        starts = [i for i, a in enumerate(self.attempts) if a.strategy is RetryStrategy.INITIAL]
+        return self.attempts[starts[-1] :] if len(starts) >= 2 else []
+
     def best_attempt(self) -> Attempt | None:
         """Highest-scoring attempt that produced a file; hard failures rank last."""
-        usable = [a for a in self.attempts if a.path and a.qc]
+        starts = [i for i, a in enumerate(self.attempts) if a.strategy is RetryStrategy.INITIAL]
+        current_pass = self.attempts[starts[-1] :] if starts else self.attempts
+        usable = [a for a in current_pass if a.path and a.qc]
         if not usable:
             return None
         return max(usable, key=lambda a: (not a.qc.has_hard_failure, a.qc.score))  # type: ignore[union-attr]
@@ -247,6 +256,8 @@ class ReviewReason(str, Enum):
     NEAR_THRESHOLD = "near_threshold"
     SAMPLED = "sampled"
     ESCALATED = "escalated"
+    LIPSYNC = "lipsync"
+    FALLBACK = "fallback"
 
 
 class ReviewDecision(str, Enum):
@@ -297,6 +308,10 @@ class Shot(StrictModel):
         description="Wardrobe state id per visible character in multi-character shots.",
     )
     lyrics: str = ""
+    fallback_from: ShotType | None = Field(
+        default=None,
+        description="Set when the shot was converted from this type after it could not be made.",
+    )
     intensity: float = 0.5
     still_prompt: str = ""
     motion_prompt: str = ""

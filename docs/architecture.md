@@ -24,6 +24,7 @@ src/mvdirector/
                       vision (judge + prompt), factory
   retry.py            retry policy
   report.py           per-check tallies for `mvd qc-report`
+  cleanup.py          superseded and orphaned generations for `mvd clean`
   calibrate.py        threshold suggestions from labels for `mvd calibrate`
   generation/         runner.py (generate -> QC -> retry loop), candidates.py,
                       reference.py, plates.py, props.py, previz.py, upscale.py, preflight.py

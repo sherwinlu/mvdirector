@@ -39,7 +39,8 @@ from mvdirector.planning.segmenter import frames_for, segment
 
 log = logging.getLogger(__name__)
 
-_LIPSYNC_FRAMINGS = [Framing.CLOSE_UP, Framing.MEDIUM_CLOSE, Framing.MEDIUM, Framing.MEDIUM_CLOSE]
+_LIPSYNC_FRAMINGS = [Framing.CLOSE_UP, Framing.MEDIUM_CLOSE]
+_TIGHT_TO_WIDE = [Framing.CLOSE_UP, Framing.MEDIUM_CLOSE, Framing.MEDIUM, Framing.WIDE]
 _OTHER_FRAMINGS = [Framing.WIDE, Framing.MEDIUM]
 _FRAMING_PHRASE = {
     Framing.CLOSE_UP: "Close-up",
@@ -610,6 +611,7 @@ def _direct_shots(manifest: Manifest, config: ProjectConfig, llm: LLMClient | No
                 item,
                 manifest.visual_bible,
                 allow_multicut=config.planning.allow_multicut_shots,
+                lipsync_widest=config.planning.lipsync_widest_framing,
             )
             if not manifest.characters:
                 shot.wardrobe = wardrobe.assign(item.wardrobe if item else None, shot.id)
@@ -787,6 +789,7 @@ def _apply_creative(
     bible: VisualBible,
     *,
     allow_multicut: bool = False,
+    lipsync_widest: Framing = Framing.MEDIUM_CLOSE,
 ) -> None:
     """Copy the model's choices onto a shot, enforcing the rules it must not break."""
     if creative is None:
@@ -795,8 +798,10 @@ def _apply_creative(
     if shot.type is not ShotType.LIPSYNC and creative.type is not ShotType.LIPSYNC:
         shot.type = creative.type
     shot.framing = creative.framing
-    if shot.type is ShotType.LIPSYNC and shot.framing is Framing.WIDE:
-        shot.framing = Framing.MEDIUM  # a wide shot hides the mouth
+    if shot.type is ShotType.LIPSYNC and _TIGHT_TO_WIDE.index(shot.framing) > _TIGHT_TO_WIDE.index(
+        lipsync_widest
+    ):
+        shot.framing = lipsync_widest  # a wider shot hides the mouth
     shot.setting = _resolve_set(bible, creative.setting, shot.id)
     shot.allow_cuts = bool(allow_multicut and creative.allow_cuts)
     shot.props = _resolve_props(bible, creative.props, shot.id)
@@ -843,7 +848,7 @@ def _apply_rule_based(shot: Shot) -> None:
     else:
         shot.framing = _OTHER_FRAMINGS[shot.index % len(_OTHER_FRAMINGS)]
         action = "moving to the music, not singing"
-        motion = "The singer moves with the music. Slow, steady camera drift."
+        motion = prompts.PERFORMANCE_MOTION
     energy = "high-energy" if shot.intensity >= 0.66 else "restrained"
     shot.setting = shot.setting or "performance stage"
     shot.still_prompt = (

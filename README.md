@@ -77,6 +77,7 @@ mvd run                                                   # full generation (saf
 mvd review                                                # approve or send back
 mvd upscale                                               # optional: upscale draft clips
 mvd qc-report                                             # per-check pass / fail / skip counts
+mvd clean [--yes]                                         # list (or delete) takes that lost to a selected attempt
 mvd calibrate                                             # threshold suggestions from review labels
 mvd assemble                                              # output/<title>.mp4
 ```

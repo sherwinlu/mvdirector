@@ -48,9 +48,10 @@ class RetryPolicy:
         """Choose the next attempt's strategy and apply it to the asset's overrides."""
         state = shot.asset(kind)
         number = len(state.attempts) + 1
-        strategy = self._strategy_for(state, number)
+        after_fallback = kind is AssetKind.VIDEO and shot.fallback_from is not None
+        strategy = self._strategy_for(state, after_fallback=after_fallback)
         if strategy is RetryStrategy.REWRITE_PROMPT:
-            state.prompt_override = self._rewrite(shot, kind, state)
+            state.prompt_override = self._rewrite(shot, kind, state, after_fallback=after_fallback)
             state.director_note = None
         elif strategy is RetryStrategy.ADJUST_PARAMS:
             state.param_overrides.update(self._config.adjust_params.get(kind.value, {}))
@@ -61,21 +62,25 @@ class RetryPolicy:
         key = f"{self._project_seed}:{shot.id}:{kind.value}:{number}"
         return random.Random(key).randrange(2**31)
 
-    def _strategy_for(self, state: AssetState, number: int) -> RetryStrategy:
+    def _strategy_for(self, state: AssetState, *, after_fallback: bool = False) -> RetryStrategy:
         if state.director_note:
             return RetryStrategy.REWRITE_PROMPT
-        if not state.attempts:
+        prior = state.pass_attempts(after_fallback=after_fallback)
+        if not prior:
             return RetryStrategy.INITIAL
         ladder = self._config.strategies
-        if all(a.error is not None for a in state.attempts):
+        if all(a.error is not None for a in prior):
             # Every earlier attempt was an infrastructure error; nothing to learn from yet.
             return RetryStrategy.NEW_SEED
-        return ladder[min(number - 2, len(ladder) - 1)]
+        return ladder[min(len(prior) - 1, len(ladder) - 1)]
 
-    def _rewrite(self, shot: Shot, kind: AssetKind, state: AssetState) -> str:
+    def _rewrite(
+        self, shot: Shot, kind: AssetKind, state: AssetState, *, after_fallback: bool = False
+    ) -> str:
         base = shot.still_prompt if kind is AssetKind.STILL else shot.motion_prompt
         current = state.prompt_override or base
-        last_report = next((a.qc for a in reversed(state.attempts) if a.qc is not None), None)
+        prior = state.pass_attempts(after_fallback=after_fallback)
+        last_report = next((a.qc for a in reversed(prior) if a.qc is not None), None)
         issues = last_report.issues if last_report else []
         hints = last_report.fix_hints if last_report else []
         if state.director_note:

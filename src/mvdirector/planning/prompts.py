@@ -82,9 +82,9 @@ Rules:
   character wears in the shot's FIRST frame. A costume change may happen during a shot; the next
   shot then uses the new state. Each character's wardrobe only moves forward through their list.
   Never return to an earlier state.
-- 'lipsync' shots show the active singer singing the given lyrics. Use framing close_up,
-  medium_close or medium so the singer's mouth is clearly visible and unobstructed (no hands,
-  microphones, hair or foreground objects across the mouth).
+- 'lipsync' shots show the active singer singing the given lyrics. Use framing close_up or
+  medium_close (never medium or wide) so the singer's mouth is clearly visible and unobstructed
+  (no hands, microphones, hair or foreground objects across the mouth).
 - Shots given as 'performance' have no vocals. Keep them as 'performance' (performer on camera,
   not singing) or change them to 'broll' (no performer) where a cutaway serves the song.
 - Match detail to shot size. Small details (identifying marks, jewelry, cuffs, props, screen
@@ -128,6 +128,10 @@ concept, optional target duration, and musical/visual vibe, write:
   phrasing, key instruments, BPM, rhythm feel, and stereo production polish.
 - visual_direction: a short creative brief covering the performer look, key costume states,
   locations, lighting, palette, and story beats for mvdirector's visual bible."""
+
+PERFORMANCE_MOTION = (
+    "The singer moves with the music, mouth closed, not singing. Slow, steady camera drift."
+)
 
 PANEL_LAYOUT = {
     "row": "Four equal panels in a single horizontal row, thin neutral grey dividers.",

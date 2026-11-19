@@ -4,6 +4,7 @@
 
 """Capping how much of the song is the singer singing to camera."""
 
+from mvdirector.config import ProjectConfig
 from mvdirector.models import AudioSlice, Shot, ShotType
 from mvdirector.planning import planner, prompts
 from mvdirector.planning.planner import _thin_lipsync, singing_share
@@ -115,3 +116,11 @@ def test_a_plan_whose_framing_runs_against_the_music_is_reported(caplog):
 
 def test_the_direction_prompt_names_the_four_pace_levers():
     assert "four levers" in prompts.SHOTS_SYSTEM and "cut speed" in prompts.SHOTS_SYSTEM
+
+
+def test_capping_the_singing_share_is_on_by_default():
+    assert ProjectConfig().planning.max_lipsync_share == 0.45
+    shots = _song()
+    _thin_lipsync(shots, ProjectConfig().planning.max_lipsync_share)
+    # Hook shots and the run limit stop this song short of the cap, but it still thins out.
+    assert singing_share(shots) <= 0.55

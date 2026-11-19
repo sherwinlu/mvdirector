@@ -362,7 +362,7 @@ class PlanningConfig(_Section):
         ),
     )
     max_lipsync_share: float | None = Field(
-        default=None,
+        default=0.45,
         ge=0.0,
         le=1.0,
         description=(
@@ -370,7 +370,7 @@ class PlanningConfig(_Section):
             "camera. Sung shots over the budget become cutaways (no singer, the vocal plays over "
             "them), starting with the quietest verse shots; chorus, hook and final-line shots "
             "stay. Rough guide: 0.7 for a performance video, 0.45 for a hybrid, 0.2 for a "
-            "narrative one. None leaves every sung shot on camera."
+            "narrative one. The default is the hybrid mix. None leaves every sung shot on camera."
         ),
     )
 

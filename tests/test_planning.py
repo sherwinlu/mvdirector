@@ -171,6 +171,7 @@ class ScriptedLLM:
 
 def test_llm_direction_is_applied_within_rules(analysis):
     config = ProjectConfig()
+    config.planning.max_lipsync_share = None  # this scenario needs every sung shot on camera
     config.video.max_clip_seconds = 4.0
     manifest = build_manifest(config, analysis, "lyrics", "style", llm=ScriptedLLM())
     assert manifest.character.appearance == "A singer"

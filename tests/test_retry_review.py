@@ -28,6 +28,7 @@ from mvdirector.review import policy as review
 def config():
     config = ProjectConfig()
     config.video.max_clip_seconds = 4.0
+    config.planning.max_lipsync_share = None  # these tests need every sung shot on camera
     return config
 
 

@@ -2,17 +2,18 @@
 
 Plan, generate, quality-check and assemble a lip-synced music video from a Suno song.
 
-You supply the mix, the vocal stem, the lyrics and a style brief (or generate lyrics and a brief with `mvd brief`). The pipeline analyzes the audio, has an LLM (Claude by default) direct a shot list, locks character sheets, turnaround videos, set plates, hero props and optional 3D camera-blocking previz, renders stills and video clips **through ComfyUI** (open-weight GPU models like Qwen, Z-Image, Krea, LTX, Wan, or MOSS, or paid cloud API nodes like Nano Banana, Seedream, Seedance, Grok, or P-H3 / MiniMax), rejects and regenerates anything that fails its quality checks, and cuts the result to the beat with the original mix on top.
+You supply the mix, the vocal stem, the lyrics and a style brief (or generate lyrics and a brief with `mvd brief`). The pipeline analyzes the audio, has an LLM direct a shot list (Claude by default; a local Ollama model works too and needs no API key), locks character sheets, turnaround videos, set plates, hero props and optional 3D camera-blocking previz, renders stills and video clips **through ComfyUI** (open-weight GPU models like Qwen, Z-Image, Krea, LTX, Wan, or MOSS, or paid cloud API nodes like Nano Banana, Seedream, Seedance, Grok, or P-H3 / MiniMax), rejects and regenerates anything that fails its quality checks, and cuts the result to the beat with the original mix on top.
 
 The orchestrator runs on your Mac (or Linux/Windows machine). ComfyUI is the single execution engine for all image and video generation and can run anywhere with an HTTP address: a RunPod GPU pod, a local install, or a lightweight CPU-only ComfyUI instance when your workflows use paid cloud API nodes.
 
 ## Status
 
 - **Alpha release — single-user local orchestrator:** `mvdirector` is designed for a single user running locally (talking to local or private ComfyUI/LLM endpoints). The Streamlit review UI, ComfyUI, and Ollama have no built-in authentication and bind to `127.0.0.1` by default.
-- **Orchestration verified on live ComfyUI + Ollama:** Executed a 29-shot duet project end-to-end through `mvd analyze`, `mvd plan` (Ollama `qwen2.5:14b`), `mvd validate`, `mvd reference generate` / `lock` (four-panel sheets across 3 characters), `mvd stills` (Qwen-Image T2I and Qwen-Image-Edit 2.1 on RunPod ComfyUI), `mvd videos` (LTX-2.5 on RunPod ComfyUI), and `mvd assemble --force`, producing an assembled 29-shot `.mp4` with soundtrack muxing. Note that that initial run omitted `[qc]` (`mediapipe`) and used a text-only LLM, so only technical/motion gates ran (`dimensions`, `sharpness`, `duration`, `temporal`) while face, lip-sync, identity, and vision checks were skipped; LTX-2.5's audio-conditioned workflow also showed lip-sync drift on individual singing clips (pair with InfiniteTalk, LatentSync, or Seedance for tight mouth sync).
+- **Orchestration verified on live ComfyUI + Ollama:** A three-character duet project has been taken end-to-end on a RunPod ComfyUI with a local Ollama model (`gemma3:12b`) doing the vision checks: `mvd analyze`, `mvd plan`, `mvd reference generate` / `lock` (four-panel sheets), `mvd stills` (Qwen-Image and Qwen-Image-Edit 2.1), `mvd videos` (Wan 2.1 + InfiniteTalk singing clips; LTX-2.5 in an earlier run), shot-by-shot review, and `mvd assemble`. Not yet verified: a complete solo-singer song on a real pod (solo paths are covered by unit tests only). LTX-2.5's audio-conditioned workflow showed lip-sync drift on singing clips, so pair it with InfiniteTalk, LatentSync or Seedance for tight mouth sync.
 - **Automated test suite:** Extensive unit and pipeline tests cover audio analysis, shot timing, single- and multi-character direction, workflow templating and bindings, `ComfyClient`, LLM backends, QC scoring and lip-sync maths, retry/review policies, path containment, safe identifier and env-var validation, schema migration, stale-lock recovery, and FFmpeg assembly (against fakes for ComfyUI and cloud LLM endpoints).
 - **You must supply the workflows.** Export your own ComfyUI API workflows and map their inputs in `<name>.bindings.json` (see [Workflows & Model Bindings](docs/workflows.md)).
-- **QC thresholds are starting points.** Calibrate thresholds on 20 to 30 of your own clips with `mvd calibrate`, and inspect `mvd qc-report` before trusting the gates.
+- **QC thresholds are starting points.** Calibrate thresholds on 20 to 30 of your own clips with `mvd calibrate`, and inspect `mvd qc-report` before trusting the gates. The lip-sync check is advisory by default: on sung vocals it did not predict what a person judged in sync, so a weak score sends the clip to review instead of rejecting it, and a singing shot that runs out of attempts falls back to a performance shot. See [Pipeline, Assets, Quality Checks & Review](docs/pipeline-and-qc.md).
+- **Duets:** the lead gets all four reference panels and the second singer gets only the front panel, so the second singer drifts more. Pin hair and signature details in `characters.<id>.invariants` for every character; they are written into every still prompt.
 
 ## How it works
 
@@ -49,7 +50,7 @@ Everything revolves around one file, `manifest.json`. Each stage reads it, does 
 brew install ffmpeg
 python -m venv .venv && source .venv/bin/activate
 pip install -c constraints.txt -e ".[qc,align,ui,anthropic,dev]"
-export ANTHROPIC_API_KEY=...
+export ANTHROPIC_API_KEY=...                                # not needed with a local Ollama model, see docs/setup.md
 export COMFY_URL=https://<pod-id>-8188.proxy.runpod.net     # or http://127.0.0.1:8188
 
 mvd init projects/my-song

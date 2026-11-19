@@ -8,7 +8,7 @@ Requires Python 3.11+ and `ffmpeg`. Installing the `mvdirector` package provides
 brew install ffmpeg
 python -m venv .venv && source .venv/bin/activate
 pip install -c constraints.txt -e ".[qc,align,ui,anthropic,dev]"
-export ANTHROPIC_API_KEY=...                                # or the key for your provider; see below
+export ANTHROPIC_API_KEY=...                                # or the key for your provider; none with Ollama (see below)
 export COMFY_URL=https://<pod-id>-8188.proxy.runpod.net     # or http://127.0.0.1:8188
 ```
 
@@ -59,6 +59,8 @@ docker compose run --rm mvd validate -p /workspace/projects/my-song
 
 **Apple Silicon (M1–M4) MacBooks:** Docker Desktop on macOS runs containers inside a Linux VM without Apple Metal/MPS GPU passthrough. To use your Mac's GPU for local open-weight models (`qwen2.5vl:7b`, `gemma3:12b`), run Ollama and ComfyUI natively on macOS and point the `mvd` container at `COMFY_URL=http://host.docker.internal:8188` and `MVD_LLM_URL=http://host.docker.internal:11434`.
 
+**RunPod proxy notes.** The pod's ComfyUI is started only if `COMFYUI_PASSWORD` is at least 12 characters. The proxy answers 403 to Python's default `User-Agent`; `mvd` is unaffected, but when you probe the server yourself with `urllib` or `requests`, send a `curl/...` user agent. A fresh container disk has none of your model symlinks or files, so check `mvd validate` before a long run.
+
 ---
 
 ## Choosing the Language Model
@@ -102,6 +104,17 @@ llm: {provider: openai_compatible, base_url: "http://localhost:1234/v1", model: 
 
 ### Local Models
 
+- **Verified local setup (Ollama).** Planning, vision checks and prompt rewrites ran on a local Ollama model with no API key. Claude stays the built-in default, so set the provider explicitly:
+
+  ```yaml
+  llm:
+    provider: ollama
+    model: gemma3:12b        # accepts images; use whatever your Ollama lists
+    timeout_seconds: 600     # a local model can be slow when the GPU is busy
+  ```
+
+  Run `mvd llm-check` first. Install with `pip install -e ".[qc,align,ui,dev]"`; the `anthropic` extra is not needed.
+- **One Ollama model at a time.** If another job holds a large model in Ollama, the vision checks queue behind it and time out, and a model that does not fit in memory alongside it makes things worse (a 21 GB model next to `gemma3:12b` did not fit in 39 GB). Pause the other job, or restart Ollama if requests hang.
 - Ollama's default context window is small, and a server may silently drop the start of a prompt that does not fit. The `ollama` provider sets the window per request (`16384` by default, `llm.context_tokens` to change it) and warns when the server reports that the prompt filled it. The `openai_compatible` provider cannot set it: configure the window in the server.
 - Use fewer shots per request (`5` to `10`) so each reply stays short and valid.
 - A model that writes `<think>` reasoning before its answer is handled: the reasoning is ignored.

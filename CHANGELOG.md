@@ -6,8 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-18
+
 ### Fixed
 - `Character.invariants` is now written into every still prompt, for each character in the shot. It was documented as carried across every prompt but was only used for reference sheets and the reference video. In a two-shot the second character gets only one reference image, and without the pinned details their hair, sleeves and hair colour drifted between stills. Each character's details are added as `Always: ...`, and nothing is added when `invariants` is empty. They are also added to the base reference sheet (regenerate it after editing `invariants`; derived variant sheets deliberately ignore them) and the vision judge now checks them. Keep `invariants` to details a costume change can't alter, since they apply in every wardrobe state: if an existing manifest pins clothing there, move it to the wardrobe states.
+
+### Behaviour changes
+- Stills and sheets you regenerate pick up `invariants`; stills and sheets already generated are untouched.
+- The vision judge also checks pinned details, so a shot that passed before can fail on a missing one and be retried.
+- No manifest, CLI or public API changes.
 
 ## [0.2.0] - 2026-11-18
 

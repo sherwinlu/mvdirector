@@ -921,7 +921,8 @@ def test_anthropic_accepts_a_custom_address_and_key():
     backend = AnthropicChat(
         model="claude-x", max_tokens=300, api_key="k-test", base_url="http://proxy.local:8080"
     )
-    assert str(backend._client.base_url).startswith("http://proxy.local:8080")
+    url = backend._client.base_url
+    assert (url.scheme, url.host, url.port) == ("http", "proxy.local", 8080)
     assert backend._client.api_key == "k-test"
 
 

@@ -415,3 +415,37 @@ def test_capping_the_singing_share_is_on_by_default_and_validates_bounds():
     _thin_lipsync(shots, default_cap)
     # Hook shots and the run limit stop this song short of the cap, but it still thins out.
     assert singing_share(shots) <= 0.55
+
+
+def test_a_reply_with_no_framing_gets_the_rule_based_one():
+    reply = planner.ShotBatchReply.model_validate(
+        {
+            "shots": [
+                {
+                    "id": "s001",
+                    "type": "broll",
+                    "framing": None,
+                    "setting": "Hall",
+                    "still_prompt": "a",
+                    "motion_prompt": "b",
+                }
+            ]
+        }
+    )
+    assert reply.shots[0].framing is None
+    shot = _shot(0, "Verse 1", 0.2, ShotType.BROLL)
+    planner._apply_creative(shot, reply.shots[0], planner.VisualBible())
+    assert shot.framing.value == "wide"  # calm pace
+
+
+def test_in_a_duet_each_singer_keeps_half_of_their_sung_shots_on_camera():
+    shots = [_shot(i, f"Verse: {who}", 0.2 + i / 100) for i, who in enumerate("EEEEOOOO")]
+    singer = {s.id: ("elias" if s.section.endswith("E") else "odalie") for s in shots}
+    _thin_lipsync(shots, 0.0, lambda s: singer[s.id])
+    for who in ("elias", "odalie"):
+        kept = [s for s in shots if singer[s.id] == who and s.type is ShotType.LIPSYNC]
+        assert len(kept) >= 2
+    # With one singer there is no such floor.
+    solo = [_shot(i, "Verse", 0.2 + i / 100) for i in range(4)]
+    _thin_lipsync(solo, 0.0, lambda s: "elias")
+    assert sum(s.type is ShotType.LIPSYNC for s in solo) <= 2

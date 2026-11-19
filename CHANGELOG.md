@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+- A model reply with `framing: null` for a cutaway no longer fails validation and sends the whole batch to rule-based direction. The shot gets the framing the rule-based planner would pick, and the direction prompt says framing is never null.
+- The singing-share cap keeps at least half of each singer's sung shots on camera in a duet, so one singer's verse is no longer turned into cutaways wholesale. A solo song is unaffected. The cap now runs after the visual bible, so each section can be matched to the singer it names.
+
 ## [0.3.0] - 2026-11-19
 
 ### Changed

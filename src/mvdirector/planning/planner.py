@@ -13,6 +13,8 @@ from __future__ import annotations
 import logging
 import re
 import statistics
+from collections import Counter
+from collections.abc import Callable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -172,7 +174,7 @@ def _normalize_choice(value: object) -> object:
 class ShotCreative(_Reply):
     id: str
     type: ShotType
-    framing: Framing
+    framing: Framing | None = None  # small models return null for a cutaway with nothing to frame
     setting: str
     still_prompt: str
     motion_prompt: str
@@ -216,13 +218,18 @@ def build_manifest(
     else:
         snap_sections = config.video.snap_sections == "always"
     manifest.shots = _timed_shots(config, analysis, snap_sections=snap_sections)
-    if config.planning.max_lipsync_share is not None:
-        _thin_lipsync(manifest.shots, config.planning.max_lipsync_share)
     if llm is None:
         log.warning("LLM disabled: using rule-based direction. Edit manifest.json to refine it.")
         manifest.visual_bible = VisualBible(style=" ".join(style_text.split()))
     else:
         _write_bible(manifest, lyrics_text, style_text, llm)
+    if config.planning.max_lipsync_share is not None:
+        # After the bible, so each shot's section can be matched to the singer it names.
+        _thin_lipsync(
+            manifest.shots,
+            config.planning.max_lipsync_share,
+            lambda shot: _section_singer(shot, manifest.characters),
+        )
     _direct_shots(manifest, config, llm)
     _report_mix(manifest.shots, has_bible=llm is not None)
     return manifest
@@ -534,7 +541,11 @@ def _cutaway_run(shots: list[Shot], position: int) -> int:
     return run
 
 
-def _thin_lipsync(shots: list[Shot], max_share: float) -> None:
+def _thin_lipsync(
+    shots: list[Shot],
+    max_share: float,
+    singer_of: Callable[[Shot], str | None] | None = None,
+) -> None:
     """Turn sung shots into cutaways until singing to camera fits ``max_share`` of the song.
 
     A cutaway keeps the vocal and drops the singer, so there is no face to keep consistent and
@@ -549,6 +560,15 @@ def _thin_lipsync(shots: list[Shot], max_share: float) -> None:
         return
 
     last_sung = indexed_sung[-1][1]
+    # In a duet every singer keeps at least half of their sung shots on camera, so one singer's
+    # verse is never turned into cutaways wholesale. A solo song has no such floor.
+    singers = {i: singer_of(s) if singer_of else None for i, s in indexed_sung}
+    on_camera = Counter(singers.values())
+    floor = (
+        {singer: -(-count // 2) for singer, count in on_camera.items()}
+        if len({s for s in singers.values() if s is not None}) > 1
+        else {}
+    )
     candidates = [
         (i, s) for i, s in indexed_sung if s is not last_sung and not _is_hook_section(s.section)
     ]
@@ -557,13 +577,18 @@ def _thin_lipsync(shots: list[Shot], max_share: float) -> None:
             break
         if _cutaway_run(shots, position) > _MAX_CUTAWAY_RUN:
             continue
+        singer = singers[position]
+        if singer in floor and on_camera[singer] - 1 < floor[singer]:
+            continue
+        on_camera[singer] -= 1
         shot.type = ShotType.BROLL
         excess -= shot.duration
 
     if excess > _SHARE_EPS:
         log.info(
             "Singing share stayed at %.0f%% (cap %.0f%%): remaining sung shots are protected "
-            "chorus/hook/final shots or hit the %d-cutaway run limit.",
+            "chorus/hook/final shots, the half of each singer's shots that stays on camera, or hit "
+            "the %d-cutaway run limit.",
             singing_share(shots) * 100,
             max_share * 100,
             _MAX_CUTAWAY_RUN,
@@ -667,6 +692,12 @@ def _character_tokens(cid: str, char: Character) -> list[str]:
     if char.name and char.name.strip():
         tokens.append(char.name.strip())
     return list(dict.fromkeys(t for t in tokens if len(t) >= 2 or not char.name))
+
+
+def _section_singer(shot: Shot, characters: dict[str, Character]) -> str | None:
+    """The one character a shot's section names, or None when it names none or several."""
+    named = _characters_in_text(shot.section, characters)
+    return named[0] if len(named) == 1 else None
 
 
 def _characters_in_text(
@@ -973,7 +1004,7 @@ def _apply_creative(
             _apply_rule_based_with_set(shot, bible, creative.setting)
             return
         shot.type = creative.type
-    shot.framing = creative.framing
+    shot.framing = creative.framing or _default_framing(shot)
     if shot.type is ShotType.LIPSYNC and _TIGHT_TO_WIDE.index(shot.framing) > _TIGHT_TO_WIDE.index(
         lipsync_widest
     ):
@@ -1014,6 +1045,13 @@ def _resolve_set(bible: VisualBible, name: str, shot_id: str) -> str:
         "%s: setting %r is not a set in the bible; using %r", shot_id, name, bible.settings[0].name
     )
     return bible.settings[0].name
+
+
+def _default_framing(shot: Shot) -> Framing:
+    """The framing the rule-based planner would give this shot, for a reply that left it out."""
+    if shot.type is ShotType.LIPSYNC:
+        return _LIPSYNC_FRAMINGS[shot.index % len(_LIPSYNC_FRAMINGS)]
+    return _PACE_FRAMING[pace_label(shot.intensity)]
 
 
 def _apply_rule_based(shot: Shot) -> None:

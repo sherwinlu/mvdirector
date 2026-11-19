@@ -349,7 +349,7 @@ def _format_character_sheet(
     character_id: str | None = None,
     *,
     background: str = "white",
-    pin_details: bool = False,
+    pin_details: bool,
 ) -> str:
     character = manifest.character_for(character_id)
     description = (
@@ -399,6 +399,7 @@ def derived_sheet_prompt(
         state_id,
         character_id,
         background=background,
+        pin_details=False,
     )
 
 
@@ -413,7 +414,7 @@ def state_sheet_prompt(
     character = manifest.character_for(character_id)
     state = character.state(state_id)
     invariants = character.pinned()
-    invariants_note = f" Keep {invariants}." if invariants else ""
+    invariants_note = f" Keep {_sentence(invariants)}" if invariants else ""
     return STATE_SHEET_TEMPLATE.format(
         invariants_note=invariants_note,
         layout=PANEL_LAYOUT[layout],
@@ -462,7 +463,7 @@ def reference_video_prompt(
             "natural expressions (neutral, slight smirk, focused gaze) without exaggerating."
         )
     if pinned := character.pinned():
-        parts.append(f"Locked details: {pinned}.")
+        parts.append(f"Locked details: {_sentence(pinned)}")
     state = (
         character.state(state_id)
         if state_id
@@ -516,14 +517,18 @@ def prop_prompt(manifest: Manifest, prop_query: str) -> str:
     ).replace("  ", " ")
 
 
+def _sentence(text: str) -> str:
+    """``text`` ended with a full stop, unless it already ends a sentence."""
+    text = text.strip()
+    return text if not text or text[-1] in ".!?" else f"{text}."
+
+
 def _with_pinned(character: Character, text: str) -> str:
     """``text`` followed by the character's pinned details, as one more sentence."""
     text, pinned = text.strip(), character.pinned()
     if not pinned:
         return text
-    if text and text[-1] not in ".!?":
-        text += "."
-    return f"{text} Always: {pinned}.".strip()
+    return f"{_sentence(text)} Always: {_sentence(pinned)}".strip()
 
 
 def _look(character: Character, state_id: str | None) -> str:

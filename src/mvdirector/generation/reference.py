@@ -173,7 +173,7 @@ def generate_candidates(
     """
     char_id, character, key, prefix = _target_state(manifest, state_id, character_id)
     config = project.config.reference
-    if not character.appearance:
+    if not character.appearance.strip():
         raise ConfigError(
             "The manifest has no character appearance. Add one under 'character' in "
             "manifest.json, or run `mvd plan` with the LLM enabled."

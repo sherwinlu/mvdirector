@@ -674,3 +674,33 @@ def test_pinned_details_edge_cases():
     assert "Always: a scar." in prompts.sheet_prompt(sheet, "row")
     # A derived (variant) sheet changes the look on purpose, so it is not pinned.
     assert "Always" not in prompts.derived_sheet_prompt(sheet, "row")
+    # Existing sentence punctuation is kept rather than doubled.
+    marked = Character(appearance="Fair.", invariants="tattoo that says WHY?")
+    assert prompts._look(marked, None) == "Fair. Always: tattoo that says WHY?"
+    # The vision judge hears the pinned details of every character, including in a montage.
+    pinned = Manifest(
+        title="t",
+        duration=1.0,
+        fps=24,
+        visual_bible=VisualBible(),
+        characters={"a": Character(appearance="Fair.", invariants="a scar", wardrobe=coat)},
+    )
+    shot = Shot(
+        id="s1",
+        index=0,
+        start=0.0,
+        end=1.0,
+        type=ShotType.LIPSYNC,
+        framing="close_up",
+        setting="Hall",
+        character="a",
+        characters=["a"],
+        still_prompt="x",
+        motion_prompt="y",
+        audio_slice=AudioSlice(path="a.wav", start=0.0, end=1.0, head_handle=0.0),
+        num_frames=25,
+        allow_cuts=True,
+    )
+    from mvdirector.qc import vision
+
+    assert "a scar" in vision.VisionJudge.specification(shot, pinned)

@@ -120,6 +120,42 @@ def init(directory: Path = typer.Argument(..., help="Folder to create the projec
 
 
 @app.command()
+def prepare(
+    audio: Path | None = typer.Argument(
+        None,
+        help="Path to an .mp3 or .wav file (defaults to inputs/mix.wav or inputs/mix.mp3).",
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Re-separate stems and replace existing mix, lyrics.txt, and style.md files.",
+    ),
+    project_dir: Path = ProjectDir,
+) -> None:
+    """Build mix, vocal stem, lyrics.txt, and style.md from a single .mp3 or .wav file."""
+    try:
+        result = api.prepare(project_dir, audio=audio, overwrite=overwrite)
+    except MVDError as exc:
+        raise _fail(exc) from exc
+    mode = "LLM" if result.inferred_with_llm else "fallback (llm disabled)"
+    typer.echo(
+        f"Prepared inputs from {result.mix_path} ({result.duration:.1f}s, "
+        f"{result.tempo_bpm:.0f} BPM, {result.vocal_windows} vocal windows, "
+        f"{result.transcribed_words} transcribed words, inferred via {mode}):"
+    )
+    written = [result.mix_path, result.vocals_path]
+    if result.drums_path is not None:
+        written.append(result.drums_path)
+    written.extend([result.lyrics_path, result.style_path])
+    if result.word_timestamps_path is not None:
+        written.append(result.word_timestamps_path)
+    typer.echo(_lines(written))
+    typer.echo(
+        "Review/edit lyrics.txt and style.md if desired, then run `mvd analyze` and `mvd plan`."
+    )
+
+
+@app.command()
 def analyze(project_dir: Path = ProjectDir) -> None:
     """Analyze the audio: beats, bars, vocal activity and lyric timing."""
     try:

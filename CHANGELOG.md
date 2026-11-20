@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+- `mvd prepare [AUDIO]` (and `api.prepare`): start from a single `.mp3` or `.wav` file. It writes `inputs/mix.wav`, separates `inputs/vocals.wav` (and `inputs/drums.wav` when `inputs.drums` is set) with Demucs, transcribes the vocals with faster-whisper, and infers `[Section]`-tagged `inputs/lyrics.txt` and a lip-sync-ready `inputs/style.md` from the lyrics and the audio's tempo and energy (an LLM when enabled, otherwise a rule-based fallback). It refuses to replace existing files without `--overwrite`.
+- `prepare:` config section (`stem_model`, `stem_device`, `whisper_model`, `whisper_language`) and the `stems` extra (`pip install -e ".[stems,align]"`).
+- `Transcriber` / `WhisperTranscriber` and `StemSeparator` / `DemucsSeparator` extension points.
+
+### Changed
+- The Whisper model size and language used by `mvd analyze` now follow `prepare.whisper_model` and `prepare.whisper_language` (defaults unchanged: `small`, auto-detect).
+
 ## [0.3.1] - 2026-11-19
 
 ### Fixed

@@ -28,6 +28,9 @@ from mvdirector import calibrate as calibrate_mod
 from mvdirector import media
 from mvdirector import report as report_mod
 from mvdirector.audio.analysis import analyze_project
+from mvdirector.audio.lyrics import Transcriber
+from mvdirector.audio.prepare import PrepareResult, prepare_project
+from mvdirector.audio.stems import StemSeparator
 from mvdirector.cleanup import CleanupPlan, apply_cleanup, plan_cleanup
 from mvdirector.comfy.client import ComfyClient
 from mvdirector.comfy.provider import ComfyEndpointProvider, StaticComfyProvider
@@ -40,7 +43,7 @@ from mvdirector.generation import reference as reference_mod
 from mvdirector.generation import upscale as upscale_mod
 from mvdirector.generation.preflight import check_assets
 from mvdirector.generation.runner import RunBudget, RunEvent, ShotRunner, load_templates
-from mvdirector.llm import build_llm
+from mvdirector.llm import LLMClient, build_llm
 from mvdirector.llm.check import LLMCheckResult, ping_llm, run_llm_check
 from mvdirector.models import Analysis, AssetKind, Manifest, ReferenceSet
 from mvdirector.planning.brief import ensure_writable, generate_brief, write_brief
@@ -57,6 +60,7 @@ __all__ = [
     "GenerateResult",
     "LLMCheckOutcome",
     "Observer",
+    "PrepareResult",
     "ProjectRef",
     "ValidationCheck",
     # stages
@@ -83,6 +87,7 @@ __all__ = [
     "lock_reference_video",
     "open_project",
     "plan",
+    "prepare",
     "qc_report",
     "refine_previz",
     "reject",
@@ -222,6 +227,32 @@ def check_llm(project_dir: ProjectRef, skip_image: bool = False) -> LLMCheckOutc
 
 
 # --- planning ---------------------------------------------------------------------------------
+
+_UNSET = object()
+
+
+def prepare(
+    project_dir: ProjectRef,
+    audio: Path | None = None,
+    *,
+    overwrite: bool = False,
+    separator: StemSeparator | None = None,
+    transcriber: Transcriber | None = None,
+    llm: LLMClient | None | object = _UNSET,
+) -> PrepareResult:
+    """Prepare a project from a single .mp3 or .wav file (stems, lyrics, and style brief)."""
+    project = open_project(project_dir)
+    resolved_llm: LLMClient | None = (
+        build_llm(project.config.llm) if llm is _UNSET else llm  # type: ignore[assignment]
+    )
+    return prepare_project(
+        project,
+        audio=audio,
+        overwrite=overwrite,
+        separator=separator,
+        transcriber=transcriber,
+        llm=resolved_llm,
+    )
 
 
 def analyze(project_dir: ProjectRef) -> tuple[Project, Analysis]:

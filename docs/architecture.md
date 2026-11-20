@@ -15,7 +15,8 @@ src/mvdirector/
   media.py            ffmpeg / ffprobe wrappers (including black-screen audio_video packaging)
   llm/                LLMClient protocol, request loop (base.py), shared HTTP/retry (http.py),
                       one backend per provider, factory.py (build_llm), check.py (mvd llm-check)
-  audio/              analysis.py (beats, vocals), lyrics.py (parsing, alignment)
+  audio/              analysis.py (beats, vocals), lyrics.py (parsing, transcription, alignment),
+                      stems.py (Demucs stem separation), prepare.py (`mvd prepare` audio-only ingest)
   planning/           segmenter.py (timing, dynamic pacing, sections), planner.py (direction),
                       prompts.py (prompt text), brief.py (`mvd brief`), previz.py (3D camera plans)
   comfy/              workflow.py (templates + bindings), client.py (HTTP),

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 import tempfile
@@ -78,6 +79,36 @@ def probe(path: Path) -> MediaInfo:
         fps=fps,
         has_audio=any(s.get("codec_type") == "audio" for s in streams),
     )
+
+
+def transcode_to_wav(src: Path, dst: Path) -> Path:
+    """Decode an audio file (.mp3, .wav, etc.) to a 16-bit PCM WAV atomically."""
+    if not src.is_file():
+        raise MediaToolError(f"Audio file not found: {src}")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".mvd_wav_", suffix=".wav", dir=dst.parent)
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        run(
+            [
+                "ffmpeg",
+                "-y",
+                "-v",
+                "error",
+                "-i",
+                str(src.resolve()),
+                "-vn",
+                "-c:a",
+                "pcm_s16le",
+                str(tmp_path.resolve()),
+            ]
+        )
+        os.replace(tmp_path, dst)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    return dst
 
 
 def slice_audio(src: Path, dst: Path, start: float, end: float) -> None:

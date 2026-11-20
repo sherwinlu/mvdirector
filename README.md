@@ -34,6 +34,7 @@ Everything revolves around one file, `manifest.json`. Each stage reads it, does 
 
 | Stage | Command | What it does |
 |---|---|---|
+| Prepare *(optional)* | `mvd prepare <audio>` | From a single `.mp3` or `.wav` file: transcodes `inputs/mix.wav`, separates `inputs/vocals.wav` (Demucs), transcribes lyrics, and infers `[Section]`-tagged `inputs/lyrics.txt` + lip-sync-ready `inputs/style.md`. |
 | Brief *(optional)* | `mvd brief` | Drafts `inputs/lyrics.txt` and `inputs/style.md` from an `--idea` prompt. |
 | Analyze | `mvd analyze` | Tempo, beats, bars, per-bar loudness, vocal activity, lyric timing (`analysis.json`). |
 | Plan | `mvd plan` | Deterministic bar/phrase cuts + LLM visual bible (characters, wardrobes, sets, props, rules) and shot direction (`manifest.json`). |
@@ -57,7 +58,7 @@ mvd init projects/my-song
 cd projects/my-song
 ```
 
-1. Put the Suno files in `inputs/`: `mix.wav`, `vocals.wav` (optionally a drum stem), `inputs/lyrics.txt` (`[Section]` tags and `(adlibs)`), and `inputs/style.md` — or run `mvd brief --idea "..."`.
+1. Put the Suno files in `inputs/`: `mix.wav`, `vocals.wav` (optionally a drum stem), `inputs/lyrics.txt` (`[Section]` tags and `(adlibs)`), and `inputs/style.md` — or run `mvd brief --idea "..."` before generating a song, or start from a single `.mp3`/`.wav` file with `mvd prepare /path/to/song.mp3` (requires the `stems` and `align` extras).
 2. Edit `project.yaml` (title, resolution, LLM provider/model, and `video:` timing settings matching your ComfyUI workflow).
 3. Export and bind your ComfyUI workflows under `workflows/` (see `workflows/README.md` and [Workflows & Model Bindings](docs/workflows.md)).
 

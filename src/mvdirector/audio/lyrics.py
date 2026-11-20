@@ -17,10 +17,13 @@ import json
 import logging
 import re
 from difflib import SequenceMatcher
+from pathlib import Path
+from typing import Protocol
 
 import librosa
 from pydantic import BaseModel
 
+from mvdirector.errors import ConfigError
 from mvdirector.models import LyricLine, TimeSpan
 from mvdirector.project import Project
 
@@ -36,6 +39,94 @@ class Word(BaseModel):
     word: str
     start: float
     end: float
+
+
+class TranscriptSegment(BaseModel):
+    text: str
+    start: float
+    end: float
+
+
+class Transcript(BaseModel):
+    segments: list[TranscriptSegment]
+    words: list[Word]
+    language: str | None = None
+
+
+class Transcriber(Protocol):
+    """Protocol for transcribing a vocal stem into timestamped segments and words."""
+
+    def transcribe(self, audio_path: Path) -> Transcript: ...
+
+
+class WhisperTranscriber:
+    """Local vocal transcription backed by faster-whisper."""
+
+    def __init__(self, model_size: str = "small", language: str | None = None) -> None:
+        self.model_size = model_size
+        self.language = language
+
+    def transcribe(self, audio_path: Path) -> Transcript:
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError as exc:
+            raise ConfigError(
+                "Transcribing lyrics requires 'faster-whisper'. "
+                "Install it with: pip install -e '.[align]'"
+            ) from exc
+
+        log.info(
+            "Transcribing vocals with faster-whisper (%s; first run downloads the model)",
+            self.model_size,
+        )
+        # Decode the audio ourselves and pass samples in: faster-whisper's own decoder
+        # depends on PyAV, whose version often disagrees with faster-whisper's.
+        samples, _ = librosa.load(str(audio_path), sr=WHISPER_SAMPLE_RATE, mono=True)
+        model = WhisperModel(self.model_size, compute_type="int8")
+        raw_segments, info = model.transcribe(samples, word_timestamps=True, language=self.language)
+        segments: list[TranscriptSegment] = []
+        words: list[Word] = []
+        for seg in raw_segments:
+            text = (getattr(seg, "text", None) or "").strip()
+            if text:
+                segments.append(
+                    TranscriptSegment(
+                        text=text, start=round(float(seg.start), 3), end=round(float(seg.end), 3)
+                    )
+                )
+            for w in seg.words or []:
+                words.append(
+                    Word(
+                        word=w.word,
+                        start=round(float(w.start), 3),
+                        end=round(float(w.end), 3),
+                    )
+                )
+        detected_lang = getattr(info, "language", None) or self.language
+        return Transcript(segments=segments, words=words, language=detected_lang)
+
+
+def format_transcript_as_lyrics(
+    segments: list[TranscriptSegment], pause_threshold: float = 3.0
+) -> str:
+    """Turn timestamped transcript segments into `[Section]`-tagged lyrics text."""
+    cleaned = [seg for seg in segments if seg.text.strip()]
+    if not cleaned:
+        return "[Instrumental]\n"
+
+    sections: list[list[str]] = [[cleaned[0].text.strip()]]
+    prev_end = cleaned[0].end
+    for seg in cleaned[1:]:
+        if seg.start - prev_end >= pause_threshold:
+            sections.append([seg.text.strip()])
+        else:
+            sections[-1].append(seg.text.strip())
+        prev_end = max(prev_end, seg.end)
+
+    blocks = [
+        f"[Section {idx}]\n" + "\n".join(lines) for idx, lines in enumerate(sections, start=1)
+    ]
+    return "\n\n".join(blocks) + "\n"
 
 
 def parse_lyrics(text: str) -> list[LyricLine]:
@@ -67,28 +158,19 @@ def load_or_transcribe_words(project: Project) -> list[Word]:
     if inputs.word_timestamps:
         raw = json.loads(project.input_path(inputs.word_timestamps, "word_timestamps").read_text())
         return [Word.model_validate(item) for item in raw]
+    prepare_cfg = project.config.prepare
+    vocals_path = project.input_path(inputs.vocals, "vocals")
+    transcriber = WhisperTranscriber(
+        model_size=prepare_cfg.whisper_model, language=prepare_cfg.whisper_language
+    )
     try:
-        from faster_whisper import WhisperModel
-    except ImportError:
+        return transcriber.transcribe(vocals_path).words
+    except ConfigError as exc:
         log.warning(
-            "faster-whisper is not installed; lyric timings will be estimated from vocal "
-            "activity. Install the 'align' extra for word-level alignment."
+            "%s Lyric timings will be estimated from vocal activity.",
+            exc,
         )
         return []
-    log.info("Transcribing vocals for word timestamps (first run downloads the model)")
-    try:
-        # Decode the audio ourselves and pass samples in: faster-whisper's own decoder
-        # depends on PyAV, whose version often disagrees with faster-whisper's.
-        samples, _ = librosa.load(
-            str(project.input_path(inputs.vocals, "vocals")), sr=WHISPER_SAMPLE_RATE, mono=True
-        )
-        model = WhisperModel("small", compute_type="int8")
-        segments, _ = model.transcribe(samples, word_timestamps=True)
-        return [
-            Word(word=w.word, start=w.start, end=w.end)
-            for seg in segments
-            for w in (seg.words or [])
-        ]
     except Exception as exc:  # noqa: BLE001 - alignment is an enhancement; never block analysis
         log.warning(
             "Transcription failed (%s: %s); lyric timings will be estimated from vocal activity.",

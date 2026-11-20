@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import builtins
 import stat
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -61,6 +62,7 @@ def test_mel_spectrogram_shape_bounds_and_resampling():
     assert window is not None and window.shape == (80, SYNCNET_MEL_WINDOW)
     assert mel_window_for_frame(mel_16, 10_000) is None
     assert mel_spectrogram(np.zeros(0, dtype=np.float32), 16000).shape == (80, 0)
+    assert mel_spectrogram(wav_16k, 0).shape == (80, 0)
 
 
 def test_resample_frames_to_25fps():
@@ -104,6 +106,23 @@ def test_extract_face_tracks_interpolates_and_separates_two_faces():
     presences = sorted(p for p, _ in tracks)
     assert presences == [pytest.approx(0.8), pytest.approx(1.0)]
     assert all(len(boxes) == 5 for _, boxes in tracks)
+
+
+def test_extract_face_tracks_solo_keeps_largest_face_over_leftmost_background_face():
+    class ForegroundAndBackgroundDetector:
+        def faces(self, frame):
+            # Largest face first (on the right), smaller background face on the left.
+            return [
+                Face(height_fraction=0.6, bbox=(120, 20, 180, 80)),
+                Face(height_fraction=0.15, bbox=(10, 40, 25, 55)),
+            ]
+
+    frames = [np.zeros((100, 200, 3), dtype=np.uint8) for _ in range(3)]
+    tracks = extract_face_tracks(frames, ForegroundAndBackgroundDetector(), max_faces=1)
+    assert len(tracks) == 1
+    presence, boxes = tracks[0]
+    assert presence == 1.0
+    assert boxes[0] == (120, 20, 180, 80)
 
 
 def test_score_embedding_sequences_detects_alignment_and_lag():
@@ -228,6 +247,64 @@ def test_ensure_syncnet_model_downloads_caches_and_validates_paths(tmp_path, mon
         ensure_syncnet_model(model_path=tmp_path / "bad\x00.pt")
     with pytest.raises(DependencyMissing, match="not found"):
         ensure_syncnet_model(model_path=tmp_path / "missing.pt")
+
+    from mvdirector.qc.common import download_cached_model
+
+    with pytest.raises(DependencyMissing, match="Invalid"):
+        download_cached_model("../escape.pt", "https://example.com/a.pt", cache_dir)
+
+
+def test_corrupt_cached_syncnet_checkpoint_redownloads_once(tmp_path, monkeypatch):
+    import zipfile
+
+    cache_dir = tmp_path / "syncnet_cache"
+    cache_dir.mkdir()
+    monkeypatch.setenv("MVD_SYNCNET_CACHE_DIR", str(cache_dir))
+    cached = cache_dir / "stable_syncnet.pt"
+    cached.write_bytes(b"corrupt-zip")
+    downloads = 0
+
+    def handler(request):
+        nonlocal downloads
+        downloads += 1
+        return httpx.Response(200, content=b"valid-checkpoint", request=request)
+
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        syncnet.httpx,
+        "Client",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs),
+    )
+
+    class FakeModel:
+        def load_state_dict(self, state_dict, strict=True):
+            pass
+
+        def to(self, device):
+            return self
+
+        def eval(self):
+            return self
+
+    class FakeTorch:
+        @staticmethod
+        def load(path, map_location="cpu", weights_only=True):
+            if Path(path).read_bytes() == b"corrupt-zip":
+                raise zipfile.BadZipFile("truncated")
+            return {"state_dict": {}}
+
+    monkeypatch.setattr(syncnet, "build_stable_syncnet", lambda torch_mod: FakeModel())
+    loaded = syncnet._load_stable_syncnet_checkpoint(FakeTorch, None, "cpu")
+    assert isinstance(loaded, FakeModel)
+    assert downloads == 1
+    assert cached.read_bytes() == b"valid-checkpoint"
+
+    # Explicit model_path is never deleted or re-downloaded.
+    explicit = tmp_path / "explicit.pt"
+    explicit.write_bytes(b"corrupt-zip")
+    with pytest.raises(DependencyMissing, match="could not load"):
+        syncnet._load_stable_syncnet_checkpoint(FakeTorch, explicit, "cpu")
+    assert explicit.read_bytes() == b"corrupt-zip" and downloads == 1
 
 
 def test_mediapipe_face_analyzer_populates_clipped_bbox(tmp_path, monkeypatch):

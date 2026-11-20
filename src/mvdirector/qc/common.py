@@ -41,6 +41,13 @@ def download_cached_model(
     client_factory: Callable[..., Any] | None = None,
 ) -> Path:
     """Resolve an explicit model path or atomically download and cache it under ``cache_dir``."""
+    if (
+        not filename
+        or "\x00" in filename
+        or Path(filename).name != filename
+        or filename in (".", "..")
+    ):
+        raise DependencyMissing(f"Invalid {label} filename: {filename!r}")
     if model_path is not None:
         raw = str(model_path)
         if "\x00" in raw:

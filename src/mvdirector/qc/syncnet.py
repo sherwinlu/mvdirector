@@ -18,6 +18,7 @@ import contextlib
 import functools
 import logging
 import os
+import zipfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -121,7 +122,7 @@ def mel_spectrogram(samples: np.ndarray, sample_rate: int) -> np.ndarray:
     wav = np.asarray(samples, dtype=np.float32)
     if wav.ndim > 1:
         wav = wav.mean(axis=1)
-    if wav.size == 0:
+    if wav.size == 0 or sample_rate <= 0:
         return np.zeros((_AUDIO_NUM_MELS, 0), dtype=np.float32)
     if sample_rate != SYNCNET_SAMPLE_RATE:
         wav = librosa.resample(wav, orig_sr=sample_rate, target_sr=SYNCNET_SAMPLE_RATE)
@@ -190,11 +191,13 @@ def extract_face_tracks(
         detected = [f.bbox for f in face_analyzer.faces(frame) if f.bbox is not None]
         if not detected:
             continue
-        detected.sort(key=lambda b: (b[0] + b[2]) * 0.5)
         if limit == 1:
+            # FaceAnalyzer returns faces largest-first; keep the foreground singer rather than
+            # sorting left-to-right (which could latch onto a smaller background face).
             coords[0][idx] = detected[0]
             anchors[0] = (detected[0][0] + detected[0][2]) * 0.5 / max(frame_w, 1)
             continue
+        detected.sort(key=lambda b: (b[0] + b[2]) * 0.5)
         used: set[int] = set()
         for box in detected:
             cx = (box[0] + box[2]) * 0.5 / max(frame_w, 1)
@@ -562,9 +565,10 @@ def _load_stable_syncnet_checkpoint(torch_mod: Any, model_path: Path | None, dev
         model.eval()
         return model
 
+    load_errors = (RuntimeError, ValueError, OSError, KeyError, EOFError, zipfile.BadZipFile)
     try:
         return _load(resolved)
-    except (RuntimeError, ValueError, OSError, KeyError) as exc:
+    except load_errors as exc:
         if model_path is not None:
             raise DependencyMissing(
                 f"StableSyncNet could not load checkpoint {resolved}: {exc}"
@@ -579,7 +583,7 @@ def _load_stable_syncnet_checkpoint(torch_mod: Any, model_path: Path | None, dev
         resolved = ensure_syncnet_model(model_path=None)
         try:
             return _load(resolved)
-        except (RuntimeError, ValueError, OSError, KeyError) as retry_exc:
+        except load_errors as retry_exc:
             with contextlib.suppress(OSError):
                 resolved.unlink(missing_ok=True)
             raise DependencyMissing(
@@ -626,6 +630,7 @@ class StableSyncNetScorer:
         if self._closed:
             return
         self._closed = True
+        self._model = None
         if self._owns_faces:
             closer = getattr(self._faces, "close", None)
             if callable(closer):
@@ -637,28 +642,34 @@ class StableSyncNetScorer:
     def __exit__(self, *_: object) -> None:
         self.close()
 
-    def _encode_batches(
-        self, visual_windows: np.ndarray, audio_windows: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray]:
-        if self._encoder is not None:
-            return self._encoder(visual_windows, audio_windows)
+    def _encode_visual(self, visual_windows: np.ndarray) -> np.ndarray:
         torch_mod = self._torch
-        v_parts: list[np.ndarray] = []
-        a_parts: list[np.ndarray] = []
+        parts: list[np.ndarray] = []
         with torch_mod.no_grad():
             for start in range(0, len(visual_windows), self._batch_size):
                 batch = torch_mod.from_numpy(visual_windows[start : start + self._batch_size]).to(
                     self._device, dtype=torch_mod.float32
                 )
-                v_parts.append(self._model.encode_visual(batch).cpu().numpy())
+                parts.append(self._model.encode_visual(batch).cpu().numpy())
+        return np.concatenate(parts, axis=0) if parts else np.zeros((0, 0), dtype=np.float32)
+
+    def _encode_audio(self, audio_windows: np.ndarray) -> np.ndarray:
+        torch_mod = self._torch
+        parts: list[np.ndarray] = []
+        with torch_mod.no_grad():
             for start in range(0, len(audio_windows), self._batch_size):
                 batch = torch_mod.from_numpy(audio_windows[start : start + self._batch_size]).to(
                     self._device, dtype=torch_mod.float32
                 )
-                a_parts.append(self._model.encode_audio(batch).cpu().numpy())
-        v_out = np.concatenate(v_parts, axis=0) if v_parts else np.zeros((0, 0), dtype=np.float32)
-        a_out = np.concatenate(a_parts, axis=0) if a_parts else np.zeros((0, 0), dtype=np.float32)
-        return v_out, a_out
+                parts.append(self._model.encode_audio(batch).cpu().numpy())
+        return np.concatenate(parts, axis=0) if parts else np.zeros((0, 0), dtype=np.float32)
+
+    def _encode_batches(
+        self, visual_windows: np.ndarray, audio_windows: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if self._encoder is not None:
+            return self._encoder(visual_windows, audio_windows)
+        return self._encode_visual(visual_windows), self._encode_audio(audio_windows)
 
     def score(
         self,
@@ -720,6 +731,7 @@ class StableSyncNetScorer:
             )
 
         audio_windows = np.stack(audio_list, axis=0).astype(np.float32)
+        cached_audio_embeds = self._encode_audio(audio_windows) if self._encoder is None else None
         max_lag_frames = max(1, round(max_lag_seconds * SYNCNET_FPS))
 
         measurements: list[SyncMeasurement] = []
@@ -733,7 +745,10 @@ class StableSyncNetScorer:
                 ],
                 axis=0,
             ).astype(np.float32)
-            v_embeds, a_embeds = self._encode_batches(visual_windows, audio_windows)
+            if cached_audio_embeds is not None:
+                v_embeds, a_embeds = self._encode_visual(visual_windows), cached_audio_embeds
+            else:
+                v_embeds, a_embeds = self._encode_batches(visual_windows, audio_windows)
             measurements.append(
                 score_embedding_sequences(v_embeds, a_embeds, max_lag_frames, presence)
             )

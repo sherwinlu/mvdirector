@@ -7,8 +7,8 @@ Requires Python 3.11+ and `ffmpeg`. Installing the `mvdirector` package provides
 ```bash
 brew install ffmpeg
 python -m venv .venv && source .venv/bin/activate
-pip install -c constraints.txt -e ".[qc,align,ui,anthropic,dev]"
-export ANTHROPIC_API_KEY=...                                # or the key for your provider; none with Ollama (see below)
+pip install -c constraints.txt -e ".[qc,align,ui,dev]"      # add "anthropic" to use llm.provider: anthropic
+ollama pull gemma3:12b                                      # the default local model; or set the key for a cloud provider
 export COMFY_URL=https://<pod-id>-8188.proxy.runpod.net     # or http://127.0.0.1:8188
 ```
 
@@ -70,9 +70,9 @@ One model does every text task: writing a Suno brief (`mvd brief`), planning the
 
 ```yaml
 llm:
-  provider: anthropic        # anthropic | openai | gemini | ollama | openai_compatible
-  model: claude-sonnet-5-5   # any model name your provider offers; required for every
-                             #   provider except anthropic
+  provider: ollama           # ollama (local) | anthropic | openai | gemini | openai_compatible
+  model: gemma3:12b          # any model name your provider offers; required for every
+                             #   provider except ollama
   base_url: null             # server address (or set MVD_LLM_URL); required for openai_compatible
   api_key_env: null          # override the key variable (MVD_* or listed in MVD_ALLOWED_ENV_VARS)
   max_tokens: 8000
@@ -90,9 +90,10 @@ llm:
 | `ollama` | Local models served by Ollama (e.g. `qwen2.5vl:7b`, `gemma3:12b`) | none | `${MVD_LLM_URL:-http://localhost:11434}` |
 | `openai_compatible` | LM Studio, llama.cpp server, vLLM, OpenRouter and similar | optional (`api_key_env`) | **`base_url` or `MVD_LLM_URL` is required** |
 
-Model names change often, so none is hard-coded: use the name your provider or local server lists. `llm.model` has a Claude default only for `anthropic`. For any other provider the config is rejected until you name a model, so a forgotten model never reaches the server as a Claude name. Examples:
+The default is a local Ollama model (`gemma3:12b`), so nothing leaves your machine and no API key is needed. Install [Ollama](https://ollama.com), then run `ollama pull gemma3:12b` and `mvd llm-check`. Model names change often, so use the name your provider or local server lists. `llm.model` has a default only for `ollama`. For any other provider the config is rejected until you name a model, so a forgotten model never reaches the server as an Ollama name. Examples:
 
 ```yaml
+llm: {provider: anthropic, model: <claude model name>}
 llm: {provider: gemini, model: <gemini model name>}
 llm: {provider: openai, model: <openai model name>}
 llm: {provider: ollama, model: <a local model that accepts images>}
@@ -105,16 +106,15 @@ llm: {provider: openai_compatible, base_url: "http://localhost:1234/v1", model: 
 
 ### Local Models
 
-- **Verified local setup (Ollama).** Planning, vision checks and prompt rewrites ran on a local Ollama model with no API key. Claude stays the built-in default, so set the provider explicitly:
+- **Verified local setup (Ollama), the default.** Planning, vision checks and prompt rewrites ran on a local Ollama model with no API key. Raise the timeout for a slow or busy GPU:
 
   ```yaml
   llm:
-    provider: ollama
     model: gemma3:12b        # accepts images; use whatever your Ollama lists
     timeout_seconds: 600     # a local model can be slow when the GPU is busy
   ```
 
-  Run `mvd llm-check` first. Install with `pip install -e ".[qc,align,ui,dev]"`; the `anthropic` extra is not needed.
+  Run `mvd llm-check` first. Install with `pip install -e ".[qc,align,ui,dev]"`; the `anthropic` extra is only needed for `llm.provider: anthropic`.
 - **One Ollama model at a time.** If another job holds a large model in Ollama, the vision checks queue behind it and time out, and a model that does not fit in memory alongside it makes things worse (a 21 GB model next to `gemma3:12b` did not fit in 39 GB). Pause the other job, or restart Ollama if requests hang.
 - Ollama's default context window is small, and a server may silently drop the start of a prompt that does not fit. The `ollama` provider sets the window per request (`16384` by default, `llm.context_tokens` to change it) and warns when the server reports that the prompt filled it. The `openai_compatible` provider cannot set it: configure the window in the server.
 - Use fewer shots per request (`5` to `10`) so each reply stays short and valid.

@@ -2,7 +2,7 @@
 
 Plan, generate, quality-check and assemble a lip-synced music video from a Suno song.
 
-You supply the mix, the vocal stem, the lyrics and a style brief (or generate lyrics and a brief with `mvd brief`). The pipeline analyzes the audio, has an LLM direct a shot list (Claude by default; a local Ollama model works too and needs no API key), locks character sheets, turnaround videos, set plates, hero props and optional 3D camera-blocking previz, renders stills and video clips **through ComfyUI** (open-weight GPU models like Qwen, Z-Image, Krea, LTX, Wan, or MOSS, or paid cloud API nodes like Nano Banana, Seedream, Seedance, Grok, or P-H3 / MiniMax), rejects and regenerates anything that fails its quality checks, and cuts the result to the beat with the original mix on top.
+You supply the mix, the vocal stem, the lyrics and a style brief (or generate lyrics and a brief with `mvd brief`). The pipeline analyzes the audio, has an LLM direct a shot list (a local Ollama model by default, which needs no API key; Claude, OpenAI and Gemini work too), locks character sheets, turnaround videos, set plates, hero props and optional 3D camera-blocking previz, renders stills and video clips **through ComfyUI** (open-weight GPU models like Qwen, Z-Image, Krea, LTX, Wan, or MOSS, or paid cloud API nodes like Nano Banana, Seedream, Seedance, Grok, or P-H3 / MiniMax), rejects and regenerates anything that fails its quality checks, and cuts the result to the beat with the original mix on top.
 
 The orchestrator runs on your Mac (or Linux/Windows machine). ComfyUI is the single execution engine for all image and video generation and can run anywhere with an HTTP address: a RunPod GPU pod, a local install, or a lightweight CPU-only ComfyUI instance when your workflows use paid cloud API nodes.
 
@@ -50,8 +50,8 @@ Everything revolves around one file, `manifest.json`. Each stage reads it, does 
 ```bash
 brew install ffmpeg
 python -m venv .venv && source .venv/bin/activate
-pip install -c constraints.txt -e ".[qc,align,ui,anthropic,dev]"
-export ANTHROPIC_API_KEY=...                                # not needed with a local Ollama model, see docs/setup.md
+pip install -c constraints.txt -e ".[qc,align,ui,dev]"      # add "anthropic" to use Claude
+ollama pull gemma3:12b                                      # default local LLM, see docs/setup.md for cloud providers
 export COMFY_URL=https://<pod-id>-8188.proxy.runpod.net     # or http://127.0.0.1:8188
 
 mvd init projects/my-song

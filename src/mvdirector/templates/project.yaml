@@ -61,9 +61,9 @@ comfy:
 llm:
   # One model does every text task: planning, vision checks and prompt rewrites.
   enabled: true                  # false = rule-based planning, no vision checks, no prompt rewrites
-  provider: anthropic            # anthropic | openai | gemini | ollama | openai_compatible
-  model: claude-sonnet-5-5       # any model name your provider offers; must be set
-                                 #   explicitly for every provider except anthropic
+  provider: ollama               # ollama (local) | anthropic | openai | gemini | openai_compatible
+  model: gemma3:12b              # any model name your provider offers; accepts images for vision checks
+                                 #   must be set explicitly for every provider except ollama
   base_url: null                 # server address (or set MVD_LLM_URL); required for openai_compatible
   api_key_env: null              # env var holding the key; defaults: ANTHROPIC_API_KEY,
                                  #   OPENAI_API_KEY, GEMINI_API_KEY (ollama needs none). Custom

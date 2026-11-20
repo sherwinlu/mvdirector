@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `Transcriber` / `WhisperTranscriber` and `StemSeparator` / `DemucsSeparator` extension points.
 
 ### Changed
+- Behaviour change: the language model now runs locally by default (`llm.provider: ollama`, `llm.model: gemma3:12b`), so no API key is needed. To keep using Claude, set `llm.provider: anthropic` and name a model. A config that sets `provider: anthropic` without a `model` is now rejected, like the other cloud providers. Projects from the earlier template name both `provider` and `model` and are unaffected; a `project.yaml` that left `provider` out relied on the old default and must add `provider: anthropic`.
 - The Whisper model size and language used by `mvd analyze` now follow `prepare.whisper_model` and `prepare.whisper_language` (defaults unchanged: `small`, auto-detect).
 
 ## [0.3.1] - 2026-11-19

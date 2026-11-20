@@ -591,9 +591,9 @@ def test_each_provider_builds_its_backend(fields, cls):
     assert isinstance(build(FakeServer(openai_reply(GOOD)), **fields), cls)
 
 
-def test_anthropic_is_the_default_provider(monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "a-test")
-    assert isinstance(build_llm(LLMConfig()), AnthropicChat)
+def test_ollama_is_the_default_provider_and_needs_no_key(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert isinstance(build_llm(LLMConfig()), OllamaChat)
 
 
 @pytest.mark.parametrize(
@@ -673,7 +673,7 @@ def test_config_validation(monkeypatch):
         LLMConfig(model="  ")
     defaults = LLMConfig()
     assert (defaults.provider, defaults.json_mode, defaults.timeout_seconds) == (
-        "anthropic",
+        "ollama",
         "auto",
         180.0,
     )
@@ -859,7 +859,7 @@ def test_old_project_files_with_only_the_original_llm_keys_still_load(tmp_path):
 
     path = tmp_path / "project.yaml"
     path.write_text(
-        "llm:\n  enabled: true\n  model: claude-sonnet-5-5\n"
+        "llm:\n  enabled: true\n  provider: anthropic\n  model: claude-sonnet-5-5\n"
         "  max_tokens: 8000\n  shots_per_request: 20\n"
     )
     llm = load_config(path).llm

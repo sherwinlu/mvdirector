@@ -46,9 +46,9 @@ IMAGE_ERROR = "this model is missing data required for image input"
 # ------------------------------------------------------- the model must be named explicitly
 
 
-@pytest.mark.parametrize("provider", ["openai", "gemini", "ollama"])
+@pytest.mark.parametrize("provider", ["openai", "gemini", "anthropic"])
 def test_other_providers_need_an_explicit_model(provider):
-    """The default model name is a Claude model, which no other provider has."""
+    """The default model name is an Ollama model, which no other provider has."""
     with pytest.raises(
         ValueError, match=f"llm.model must be set when llm.provider is '{provider}'"
     ):
@@ -56,8 +56,9 @@ def test_other_providers_need_an_explicit_model(provider):
     assert LLMConfig(provider=provider, model="some-model").model == "some-model"
 
 
-def test_anthropic_keeps_its_default_model():
-    assert LLMConfig().model and LLMConfig(provider="anthropic").provider == "anthropic"
+def test_the_default_is_a_local_ollama_model():
+    config = LLMConfig()
+    assert (config.provider, config.model) == ("ollama", "gemma3:12b")
 
 
 def test_a_yaml_file_that_forgets_the_model_gets_a_clear_message(tmp_path):

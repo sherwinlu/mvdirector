@@ -366,7 +366,7 @@ def test_persistent_server_errors_give_up_with_the_servers_message():
 
 def test_a_timeout_is_not_retried_and_names_the_setting():
     server = FakeServer(httpx.ReadTimeout("slow"))
-    with pytest.raises(LLMError, match="timed out after 180 s.*llm.timeout_seconds"):
+    with pytest.raises(LLMError, match="timed out after 600 s.*llm.timeout_seconds"):
         ask(build(server))
     assert len(server.requests) == 1
 
@@ -675,7 +675,7 @@ def test_config_validation(monkeypatch):
     assert (defaults.provider, defaults.json_mode, defaults.timeout_seconds) == (
         "ollama",
         "auto",
-        180.0,
+        600.0,
     )
 
 

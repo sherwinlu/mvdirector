@@ -11,7 +11,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `prepare:` config section (`stem_model`, `stem_device`, `whisper_model`, `whisper_language`) and the `stems` extra (`pip install -e ".[stems,align]"`).
 - `Transcriber` / `WhisperTranscriber` and `StemSeparator` / `DemucsSeparator` extension points.
 
+### Fixed
+- Tempo detection folds half-time and double-time readings into 70-160 BPM (a slow blues no longer reads as 185 BPM), keeping the beat grid consistent. This changes `analysis.json` bars for songs whose tempo was outside that range; re-run `mvd analyze` and `mvd plan --overwrite` to pick it up.
+- `mvd prepare` falls back to the transcript's lyrics when the model's lyrics match less than 85% of the transcribed words, so a rewritten song cannot break word alignment. The inference prompt asks for plain-prose style fields and no BPM figure.
+
 ### Changed
+- `llm.timeout_seconds` now defaults to 600 (was 180) so local models on a busy GPU do not time out.
 - Behaviour change: the language model now runs locally by default (`llm.provider: ollama`, `llm.model: gemma3:12b`), so no API key is needed. To keep using Claude, set `llm.provider: anthropic` and name a model. A config that sets `provider: anthropic` without a `model` is now rejected, like the other cloud providers. Projects from the earlier template name both `provider` and `model` and are unaffected; a `project.yaml` that left `provider` out relied on the old default and must add `provider: anthropic`.
 - The Whisper model size and language used by `mvd analyze` now follow `prepare.whisper_model` and `prepare.whisper_language` (defaults unchanged: `small`, auto-detect).
 

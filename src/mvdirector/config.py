@@ -340,7 +340,7 @@ class LLMConfig(_Section):
     )
     max_tokens: int = Field(default=8000, ge=256)
     shots_per_request: int = Field(default=20, ge=1)
-    timeout_seconds: float = Field(default=180.0, gt=0)
+    timeout_seconds: float = Field(default=600.0, gt=0)
     json_mode: Literal["auto", "off", "object", "schema"] = Field(
         default="auto",
         description="How to ask the server for JSON: 'object' (valid JSON), 'schema' (JSON "

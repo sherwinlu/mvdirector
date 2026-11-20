@@ -3,6 +3,7 @@
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import numpy as np
+import pytest
 
 from mvdirector.audio import analysis as audio
 from mvdirector.audio import lyrics
@@ -14,6 +15,27 @@ def test_beat_tracking_finds_tempo_of_click_track():
     tempo, beats = audio.detect_beats(click_track(), SR)
     assert abs(tempo - BPM) < 4
     assert np.allclose(np.diff(beats), 0.5, atol=0.05)
+
+
+def test_double_time_tempo_is_folded_to_half_time():
+    beats = [i * 0.325 for i in range(10)]  # ~185 BPM
+    tempo, folded = audio.fold_tempo(185.0, beats)
+    assert tempo == 92.5 and folded == beats[::2]
+
+
+def test_half_time_tempo_is_folded_to_double_time():
+    tempo, folded = audio.fold_tempo(50.0, [0.0, 1.2, 2.4])
+    assert tempo == 100.0 and folded == pytest.approx([0.0, 0.6, 1.2, 1.8, 2.4])
+
+
+def test_tempo_in_range_and_degenerate_beats_are_untouched():
+    assert audio.fold_tempo(120.0, [0.0, 0.5, 1.0]) == (120.0, [0.0, 0.5, 1.0])
+    assert audio.fold_tempo(200.0, [0.0]) == (200.0, [0.0])
+    assert audio.fold_tempo(0.0, []) == (0.0, [])
+    assert audio.fold_tempo(float("inf"), [0.0, 0.5]) == (float("inf"), [0.0, 0.5])
+    # Near-zero tempo must not blow up memory via unbounded doubling.
+    tempo, folded = audio.fold_tempo(1e-6, [0.0, 1.0])
+    assert tempo == pytest.approx(1.6e-5) and len(folded) == 17
 
 
 def test_bars_take_every_nth_beat():

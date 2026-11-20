@@ -70,7 +70,7 @@ llm:
                                  #   names must be MVD_* or listed in MVD_ALLOWED_ENV_VARS.
   max_tokens: 8000               # response limit; raise it if replies are cut off
   shots_per_request: 20          # shots directed per call; use fewer (5-10) for small models
-  timeout_seconds: 180           # raise for slow local models
+  timeout_seconds: 600           # a local model can be slow when the GPU is busy
   json_mode: auto                # auto | off | object | schema
   context_tokens: null           # context window to request (ollama default 16384)
   # Examples:

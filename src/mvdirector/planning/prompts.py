@@ -165,9 +165,10 @@ transcript and a compact audio summary (duration, BPM, vocal coverage, energy ar
   [Pre-Chorus], [Chorus], [Verse 2], [Bridge], [Outro]; for duets or alternating vocalists, tag
   sections like [Verse 1: Singer 1]). Strictly preserve the actual sung words from the transcript
   so word-level audio alignment for lip-sync stays accurate—fix only capitalization, punctuation,
-  and line breaks, and never invent new verses or rewrite sung words. Put ONLY sung adlibs in
-  (parentheses); never put unspoken SFX or stage directions in parentheses. If the track is
-  instrumental with no transcribed words, return "[Instrumental]".
+  and line breaks, and never invent new verses or rewrite sung words (keep "kind of" as "kind of"
+  and contractions as sung, and fix a word only when the transcript is plainly a mishearing).
+  Put ONLY sung adlibs in (parentheses); never put unspoken SFX or stage directions in
+  parentheses. If the track is instrumental with no transcribed words, return "[Instrumental]".
 - music_style: a concise musical style description inferred from the lyrics' tone, structure,
   tempo, and energy arc (genre, vocal register/delivery, rhythm feel, and production mood).
 - visual_direction: a concrete creative brief for mvdirector's visual bible inferred from the
@@ -175,7 +176,9 @@ transcript and a compact audio summary (duration, BPM, vocal coverage, energy ar
   costume arc, 3 to 5 concrete locations/sets grounded in the lyrical imagery, lighting, color
   palette, and story beats. Explicitly design for on-camera lip-synced singing performance during
   vocal hooks and key verses (clear, well-lit, unobstructed face and mouth with no masks or
-  foreground obstructions) intercut with atmospheric/narrative cutaways inspired by the lyrics."""
+  foreground obstructions) intercut with atmospheric/narrative cutaways inspired by the lyrics.
+  Write music_style and visual_direction as plain prose without markdown (no asterisks, headings
+  or bullet syntax). Do not quote a BPM figure; describe the tempo feel in words."""
 
 PERFORMANCE_MOTION = (
     "The singer moves with the music, mouth closed, not singing. Slow, steady camera drift."

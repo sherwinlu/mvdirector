@@ -56,6 +56,7 @@ class VideoQC:
         face_analyzer: FaceAnalyzer | None,
         mouth_tracker: MouthTracker | None,
         vision: VisionJudge | None,
+        lipsync_scorer: lipsync.LipSyncScorer | None = None,
     ) -> None:
         self._qc = qc
         self._cfg = qc.video
@@ -63,6 +64,7 @@ class VideoQC:
         self._faces = face_analyzer
         self._mouth = mouth_tracker
         self._vision = vision
+        self._lipsync_scorer = lipsync_scorer
 
     def evaluate(
         self,
@@ -227,29 +229,44 @@ class VideoQC:
                 skipped(n, f"mouth too small to measure in a {shot.framing.value} shot")
                 for n in names
             ]
-        if self._mouth is None:
-            return [skipped(n, "mouth tracking unavailable") for n in names]
+        if self._lipsync_scorer is None and self._mouth is None:
+            return [skipped(n, "lip-sync scorer unavailable") for n in names]
 
         samples, sample_rate = sf.read(str(audio_slice), always_2d=True)
-        envelope = lipsync.envelope_at_fps(samples.mean(axis=1), sample_rate, fps, len(frames))
+        mono = samples.mean(axis=1)
+        envelope = lipsync.envelope_at_fps(mono, sample_rate, fps, len(frames))
         if lipsync.is_silent(envelope):
             return [skipped(n, "no vocal in this audio slice") for n in names]
 
-        max_lag = max(1, round(self._cfg.lipsync_max_lag_seconds * fps))
         visible_count = len(manifest.visible_characters(shot))
-        track_all = getattr(self._mouth, "track_all", None)
-        if visible_count > 1 and callable(track_all):
-            series_list = track_all(frames, max_faces=min(visible_count, 4))
+        if self._lipsync_scorer is not None:
+            result = self._lipsync_scorer.score(
+                frames,
+                fps,
+                mono,
+                sample_rate,
+                self._cfg.lipsync_max_lag_seconds,
+                max_faces=min(max(visible_count, 1), 4),
+            )
         else:
-            series_list = [self._mouth.track(frames)]
-        measurements = [lipsync.measure_sync(series, envelope, max_lag) for series in series_list]
-        present_measurements = [
-            m for m in measurements if m.face_presence >= self._cfg.face_presence_min
-        ]
-        if present_measurements:
-            result = max(present_measurements, key=lambda m: (m.correlation, m.face_presence))
-        else:
-            result = max(measurements, key=lambda m: (m.face_presence, m.correlation))
+            assert self._mouth is not None
+            max_lag = max(1, round(self._cfg.lipsync_max_lag_seconds * fps))
+            track_all = getattr(self._mouth, "track_all", None)
+            if visible_count > 1 and callable(track_all):
+                series_list = track_all(frames, max_faces=min(visible_count, 4))
+            else:
+                series_list = [self._mouth.track(frames)]
+            measurements = [
+                lipsync.measure_sync(series, envelope, max_lag) for series in series_list
+            ]
+            present_measurements = [
+                m for m in measurements if m.face_presence >= self._cfg.face_presence_min
+            ]
+            if present_measurements:
+                result = max(present_measurements, key=lambda m: (m.correlation, m.face_presence))
+            else:
+                result = max(measurements, key=lambda m: (m.face_presence, m.correlation))
+
         presence_ok = result.face_presence >= self._cfg.face_presence_min
         presence = CheckResult(
             name="face_presence",
@@ -265,6 +282,13 @@ class VideoQC:
         )
         in_sync = result.correlation >= self._cfg.lipsync_min
         blocking = self._cfg.lipsync_blocking
+        lag_fps = result.eval_fps or fps
+        sync_metrics: dict[str, float] = {
+            "correlation": round(result.correlation, 4),
+            "lag_seconds": round(result.lag_frames / lag_fps, 3),
+        }
+        if result.confidence is not None:
+            sync_metrics["sync_confidence"] = round(result.confidence, 4)
         sync = CheckResult(
             name="lipsync",
             status=CheckStatus.PASSED if in_sync else CheckStatus.FAILED,
@@ -282,10 +306,7 @@ class VideoQC:
                 "Keep the face frontal with the mouth unobstructed, and simplify body and "
                 "camera movement so the mouth can follow the vocal."
             ),
-            metrics={
-                "correlation": round(result.correlation, 4),
-                "lag_seconds": round(result.lag_frames / fps, 3),
-            },
+            metrics=sync_metrics,
         )
         return [presence, sync]
 

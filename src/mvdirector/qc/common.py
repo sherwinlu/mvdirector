@@ -7,16 +7,101 @@
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
+import httpx
 import numpy as np
 
-from mvdirector.errors import ImagesNotSupportedError, LLMError, LLMUnavailableError
+from mvdirector.errors import (
+    DependencyMissing,
+    ImagesNotSupportedError,
+    LLMError,
+    LLMUnavailableError,
+)
 from mvdirector.models import AssetKind, CheckResult, CheckStatus, Manifest, Shot
 from mvdirector.qc.scoring import linear_score, skipped
 from mvdirector.qc.vision import VisionJudge
 
 log = logging.getLogger(__name__)
+
+
+def download_cached_model(
+    filename: str,
+    url: str,
+    cache_dir: Path,
+    *,
+    model_path: Path | None = None,
+    label: str = "model",
+    env_var: str | None = None,
+    timeout: float = 60.0,
+    client_factory: Callable[..., Any] | None = None,
+) -> Path:
+    """Resolve an explicit model path or atomically download and cache it under ``cache_dir``."""
+    if model_path is not None:
+        raw = str(model_path)
+        if "\x00" in raw:
+            raise DependencyMissing(f"Invalid {label} path: null byte not allowed")
+        resolved = model_path.expanduser()
+        if resolved.is_file() and resolved.stat().st_size > 0:
+            return resolved
+        raise DependencyMissing(f"{label} file not found: {resolved}")
+
+    target = cache_dir / filename
+    if target.is_file() and target.stat().st_size > 0:
+        return target
+
+    log.info("Downloading %s %s to %s", label, filename, target)
+    make_client = client_factory or httpx.Client
+    tmp_path: Path | None = None
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            dir=target.parent, prefix=f".{filename}.", suffix=".part", delete=False
+        ) as handle:
+            tmp_path = Path(handle.name)
+            with (
+                make_client(follow_redirects=True, timeout=timeout) as client,
+                client.stream("GET", url) as response,
+            ):
+                response.raise_for_status()
+                encoding = response.headers.get("content-encoding", "identity").strip().lower()
+                expected = (
+                    response.headers.get("content-length") if encoding in ("", "identity") else None
+                )
+                for chunk in response.iter_bytes():
+                    handle.write(chunk)
+        size = tmp_path.stat().st_size
+        if expected and expected.isdigit() and size != int(expected):
+            raise DependencyMissing(
+                f"Incomplete download of {label} '{filename}' ({size} of {expected} "
+                f"bytes). Retry, or place the file at {target}."
+            )
+        if size == 0:
+            raise DependencyMissing(
+                f"Downloaded empty {label} from {url}. "
+                f"Place the file at {target} or set qc.on_missing_dependency: skip."
+            )
+        # NamedTemporaryFile uses 0600; make cached models readable by non-root container users.
+        os.chmod(tmp_path, 0o644)
+        os.replace(tmp_path, target)
+        tmp_path = None
+        return target
+    except DependencyMissing:
+        raise
+    except (httpx.HTTPError, OSError) as exc:
+        env_hint = f" (or set {env_var})" if env_var else ""
+        raise DependencyMissing(
+            f"Failed to download {label} '{filename}' from {url} ({exc}). "
+            f"Place the file at {target}{env_hint}, or set "
+            "qc.on_missing_dependency: skip in project.yaml."
+        ) from exc
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
 
 
 def dimensions_check(

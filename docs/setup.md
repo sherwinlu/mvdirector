@@ -18,6 +18,7 @@ The extras let you install only what you use; by default `qc.on_missing_dependen
 |---|---|---|
 | `anthropic` | Official Anthropic SDK (`llm.provider: anthropic`) | Use `openai`, `gemini`, `ollama`, or `openai_compatible` without installing the Anthropic SDK. |
 | `qc` | MediaPipe Tasks (Apache-2.0): face detection, face framing, face presence and lip-sync. The two model files (~5 MB) download once into `~/.cache/mvdirector/mediapipe` (override with `MVD_MEDIAPIPE_CACHE_DIR`); the Docker images pre-fetch them. | Runs stop at startup unless `qc.on_missing_dependency: skip` is set (which records those checks as `skipped`). |
+| `syncnet` | PyTorch + MediaPipe for `qc.lipsync_backend: stable_syncnet` (ByteDance LatentSync's pixel-space `stable_syncnet.pt` under OpenRAIL++ paired with Apache-2.0 MediaPipe Face Detector for face cropping, avoiding Oxford VGG's research-only `syncnet_v2.model` and S3FD). Checkpoint (~1.6 GB) downloads once into `~/.cache/mvdirector/syncnet` (override with `MVD_SYNCNET_CACHE_DIR` or `qc.syncnet_model_path`). | Uses the default CPU-only MediaPipe mouth-vs-loudness check. |
 | `align` | `faster-whisper` word timestamps | Lyric timing is estimated from vocal activity. |
 | `ui` | Streamlit review UI | Use `mvd status`, `mvd approve`, `mvd reject`. |
 | `insightface` | InsightFace `buffalo_l` face-embedding similarity (`qc.face_backend: insightface`) | Identity is checked by the multimodal LLM (`vision_character`) against the reference sheet. |

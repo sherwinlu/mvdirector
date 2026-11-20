@@ -26,6 +26,8 @@ dependencies = [
 anthropic = ["anthropic>=0.40,<3"]
 # Commercially permissive face detection, face framing and lip-sync checks (Apache-2.0).
 qc = ["mediapipe>=0.10,<2"]
+# Neural lip-sync scoring via ByteDance LatentSync's stable_syncnet.pt (OpenRAIL++) + MediaPipe.
+syncnet = ["mediapipe>=0.10,<2", "torch>=2.1,<3"]
 # Optional non-commercial research face-embedding identity check (buffalo_l weights).
 insightface = ["insightface>=2.1,<3", "onnxruntime>=1.17,<2"]
 # Word-level lyric alignment.

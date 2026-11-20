@@ -12,6 +12,7 @@ is pure numpy; face tracking is supplied by a MouthTracker.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 import numpy as np
 
@@ -21,6 +22,22 @@ class SyncMeasurement:
     correlation: float
     lag_frames: int  # positive: the mouth moves after the audio
     face_presence: float  # share of frames where a face was tracked
+    eval_fps: float | None = None  # fps used to interpret lag_frames (defaults to clip fps)
+    confidence: float | None = None  # optional peak-vs-median sharpness (SyncNet)
+
+
+class LipSyncScorer(Protocol):
+    """End-to-end audio-visual lip-sync scorer (e.g. StableSyncNet)."""
+
+    def score(
+        self,
+        frames: list[np.ndarray],
+        fps: float,
+        samples: np.ndarray,
+        sample_rate: int,
+        max_lag_seconds: float,
+        max_faces: int = 1,
+    ) -> SyncMeasurement: ...
 
 
 def envelope_at_fps(samples: np.ndarray, sample_rate: int, fps: float, n_frames: int) -> np.ndarray:

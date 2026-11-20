@@ -149,7 +149,7 @@ A failed **hard** check rejects the attempt outright. Otherwise the attempt pass
 | `dimensions`, `duration` | yes | Usable file, long enough for the shot plus its handle |
 | `temporal` | static or cut: yes | Frozen clips, abrupt scene changes (relaxed for `allow_cuts` montage shots), flicker |
 | `face_presence` | yes | Face tracked through the clip (lip-sync shots) |
-| `lipsync` | advisory | Correlation between mouth opening and vocal loudness, within `qc.video.lipsync_max_lag_seconds`; a weak score sends the shot to review (`lipsync` reason) unless `qc.video.lipsync_blocking: true` |
+| `lipsync` | advisory | Mouth-to-vocal sync within `qc.video.lipsync_max_lag_seconds`: either MediaPipe mouth-opening vs. vocal-loudness correlation (`qc.lipsync_backend: mediapipe`, default) or ByteDance LatentSync `stable_syncnet.pt` cosine similarity + MediaPipe face cropping (`qc.lipsync_backend: stable_syncnet`); a weak score sends the shot to review (`lipsync` reason) unless `qc.video.lipsync_blocking: true` |
 | `identity` | yes | Median similarity to the portrait across sampled frames |
 | `vision_spec`, `vision_artifacts`, `vision_character` | as above | Vision LLM on frames sampled across the clip, including morphing |
 

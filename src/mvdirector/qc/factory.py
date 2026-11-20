@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TypeVar
 
 from mvdirector.config import ProjectConfig
@@ -22,6 +23,8 @@ from mvdirector.qc.faces import (
     MouthTracker,
 )
 from mvdirector.qc.image import ImageQC
+from mvdirector.qc.lipsync import LipSyncScorer
+from mvdirector.qc.syncnet import StableSyncNetScorer
 from mvdirector.qc.video import VideoQC
 from mvdirector.qc.vision import VisionJudge
 
@@ -36,13 +39,15 @@ class QualityGates:
     video: VideoQC
     face_analyzer: FaceAnalyzer | None
     mouth_tracker: MouthTracker | None = None
+    lipsync_scorer: LipSyncScorer | None = None
     vision_enabled: bool = False
     face_backend: str = "mediapipe"
+    lipsync_backend: str = "mediapipe"
     vision_reason: str | None = None
 
     def close(self) -> None:
-        """Release native resources held by the face backends (a no-op for fakes)."""
-        for component in (self.face_analyzer, self.mouth_tracker):
+        """Release native resources held by the face and lip-sync backends (a no-op for fakes)."""
+        for component in (self.lipsync_scorer, self.face_analyzer, self.mouth_tracker):
             closer = getattr(component, "close", None)
             if callable(closer):
                 closer()
@@ -55,10 +60,10 @@ class QualityGates:
             active.extend(["face_present", "face_framing"])
         else:
             skipped.append(("face_present, face_framing", f"{self.face_backend} unavailable"))
-        if self.mouth_tracker is not None:
+        if self.lipsync_scorer is not None or self.mouth_tracker is not None:
             active.extend(["face_presence", "lipsync"])
         else:
-            skipped.append(("face_presence, lipsync", "mediapipe unavailable"))
+            skipped.append(("face_presence, lipsync", f"{self.lipsync_backend} unavailable"))
         if self.face_backend == "insightface" and self.face_analyzer is not None:
             active.append("identity")
         elif self.face_backend == "mediapipe":
@@ -98,8 +103,24 @@ def build_quality_gates(config: ProjectConfig, llm: LLMClient | None) -> Quality
         InsightFaceAnalyzer if config.qc.face_backend == "insightface" else MediaPipeFaceAnalyzer
     )
     faces: FaceAnalyzer | None = _optional(face_cls, policy)
+    mouth: MouthTracker | None = None
+    scorer: LipSyncScorer | None = None
     try:
-        mouth: MouthTracker | None = _optional(MediaPipeMouthTracker, policy)
+        if config.qc.lipsync_backend == "stable_syncnet":
+            model_path = (
+                Path(config.qc.syncnet_model_path) if config.qc.syncnet_model_path else None
+            )
+            shared_mp = faces if isinstance(faces, MediaPipeFaceAnalyzer) else None
+            scorer = _optional(
+                lambda: StableSyncNetScorer(
+                    model_path=model_path,
+                    device=config.qc.syncnet_device,
+                    face_analyzer=shared_mp,
+                ),
+                policy,
+            )
+        else:
+            mouth = _optional(MediaPipeMouthTracker, policy)
     except Exception:
         closer = getattr(faces, "close", None)
         if callable(closer):
@@ -112,10 +133,12 @@ def build_quality_gates(config: ProjectConfig, llm: LLMClient | None) -> Quality
         log.warning("Vision checks are off (%s).", vision_reason)
     return QualityGates(
         image=ImageQC(config.qc, config.video, faces, vision),
-        video=VideoQC(config.qc, config.video, faces, mouth, vision),
+        video=VideoQC(config.qc, config.video, faces, mouth, vision, lipsync_scorer=scorer),
         face_analyzer=faces,
         mouth_tracker=mouth,
+        lipsync_scorer=scorer,
         vision_enabled=vision is not None,
         face_backend=config.qc.face_backend,
+        lipsync_backend=config.qc.lipsync_backend,
         vision_reason=vision_reason,
     )

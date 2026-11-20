@@ -74,9 +74,9 @@ llm:
   json_mode: auto                # auto | off | object | schema
   context_tokens: null           # context window to request (ollama default 16384)
   # Examples:
+  #   provider: anthropic         model: <a Claude model>
   #   provider: openai            model: <an OpenAI model>
   #   provider: gemini            model: <a Gemini model>
-  #   provider: ollama            model: <a local model that accepts images>
   #   provider: openai_compatible base_url: http://localhost:1234/v1   (LM Studio)
 
 planning:

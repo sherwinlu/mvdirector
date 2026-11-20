@@ -59,6 +59,7 @@ def test_other_providers_need_an_explicit_model(provider):
 def test_the_default_is_a_local_ollama_model():
     config = LLMConfig()
     assert (config.provider, config.model) == ("ollama", "gemma3:12b")
+    assert LLMConfig(provider="ollama").model == "gemma3:12b"
 
 
 def test_a_yaml_file_that_forgets_the_model_gets_a_clear_message(tmp_path):

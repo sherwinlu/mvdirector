@@ -11,6 +11,7 @@ unit-tested without audio files. ``analyze_project`` is the only part that does 
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 
 import numpy as np
@@ -46,9 +47,14 @@ def fold_tempo(
     Halving keeps every other beat (starting with the first); doubling adds a beat midway
     between each pair.
     """
+    if not math.isfinite(tempo) or tempo <= 0 or low <= 0 or high < low:
+        return tempo, beats
     while tempo > high and len(beats) > 1:
         tempo, beats = tempo / 2, beats[::2]
-    while 0 < tempo < low and len(beats) > 1:
+    # Cap octave doublings so a near-zero degenerate tempo cannot blow up memory.
+    for _ in range(4):
+        if tempo >= low or len(beats) <= 1:
+            break
         doubled = [t for a, b in zip(beats, beats[1:]) for t in (a, (a + b) / 2)]
         tempo, beats = tempo * 2, [*doubled, beats[-1]]
     return tempo, beats

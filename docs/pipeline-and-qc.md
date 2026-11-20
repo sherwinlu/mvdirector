@@ -32,7 +32,7 @@ If you only have a single `.mp3` or `.wav` file (no stem split, no lyrics file, 
 mvd prepare /path/to/song.mp3
 ```
 
-`mvd prepare` transcodes the track to `inputs/mix.wav`, separates `inputs/vocals.wav` (and `inputs/drums.wav` if `inputs.drums` is configured) with Demucs so lip-sync and vocal detection work, transcribes the isolated vocals with `faster-whisper`, and uses the configured LLM (or a deterministic fallback when `llm.enabled: false`) to structure `[Section]`-tagged `inputs/lyrics.txt` and infer a lip-sync-ready `inputs/style.md` from the lyrics and audio dynamics. Pass `--overwrite` to re-separate stems or replace non-starter `lyrics.txt` / `style.md`.
+`mvd prepare` transcodes the track to `inputs/mix.wav`, separates `inputs/vocals.wav` (and `inputs/drums.wav` if `inputs.drums` is configured) with Demucs so lip-sync and vocal detection work, transcribes the isolated vocals with `faster-whisper`, and uses the configured LLM (or a deterministic fallback when `llm.enabled: false`) to structure `[Section]`-tagged `inputs/lyrics.txt` and infer a lip-sync-ready `inputs/style.md` from the lyrics and audio dynamics. Pass `--overwrite` to re-separate stems or replace non-starter `lyrics.txt` / `style.md`. Set `inputs.word_timestamps` (for example `inputs/word_timestamps.json`) before running `mvd prepare` to also save the word timings; `mvd analyze` then reuses them instead of transcribing the vocals a second time. Review the inferred `lyrics.txt` and `style.md` before `mvd plan`: they come from automatic transcription and a model's reading of the lyrics.
 
 ---
 

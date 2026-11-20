@@ -78,6 +78,45 @@
       ],
       "title": "TimeSpan",
       "type": "object"
+    },
+    "VocalTurn": {
+      "additionalProperties": false,
+      "description": "A contiguous vocal phrase attributed to one acoustic voice cluster or simultaneous duet.",
+      "properties": {
+        "start": {
+          "title": "Start",
+          "type": "number"
+        },
+        "end": {
+          "title": "End",
+          "type": "number"
+        },
+        "voice": {
+          "description": "Acoustic voice id ('voice_1', 'voice_2', ordered low-to-high pitch, or 'both' when multiple voices sing simultaneously).",
+          "title": "Voice",
+          "type": "string"
+        },
+        "median_f0_hz": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Median fundamental frequency in Hz across voiced frames.",
+          "title": "Median F0 Hz"
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "voice"
+      ],
+      "title": "VocalTurn",
+      "type": "object"
     }
   },
   "additionalProperties": false,
@@ -123,6 +162,14 @@
         "$ref": "#/$defs/TimeSpan"
       },
       "title": "Vocal Windows",
+      "type": "array"
+    },
+    "vocal_turns": {
+      "description": "Diarized vocal turns grouped by acoustic voice pitch and timbre.",
+      "items": {
+        "$ref": "#/$defs/VocalTurn"
+      },
+      "title": "Vocal Turns",
       "type": "array"
     },
     "lyric_lines": {

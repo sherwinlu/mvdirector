@@ -706,3 +706,291 @@ def test_pinned_details_edge_cases():
     from mvdirector.qc import vision
 
     assert "a scar" in vision.VisionJudge.specification(shot, pinned)
+
+
+def test_off_bar_duet_handoff_cuts_in_vocal_gap_and_maps_acoustic_voices():
+    from mvdirector.models import Framing, VocalTurn
+
+    # Bars every 2s [0, 2, ..., 16]. Elias sings 0.5-8.6s; Odalie enters mid-bar at 8.8-15.5s!
+    # Snapping to nearest bar (8.0s or 10.0s) would bleed one singer's voice into the other's shot.
+    beats = [round(0.5 * i, 3) for i in range(32)]
+    duet_analysis = Analysis(
+        duration=16.0,
+        tempo_bpm=120.0,
+        beats=beats,
+        bars=beats[::4],
+        bar_intensity=[0.6] * 8,
+        vocal_windows=[TimeSpan(start=0.5, end=15.5)],
+        vocal_turns=[
+            VocalTurn(start=0.5, end=8.6, voice="voice_1", median_f0_hz=130.0),
+            VocalTurn(start=8.8, end=15.5, voice="voice_2", median_f0_hz=280.0),
+        ],
+        lyric_lines=[
+            LyricLine(
+                text="Wait in the snow",
+                section="Chorus",
+                start=0.5,
+                end=4.2,
+                timing_source="aligned",
+            ),
+            LyricLine(
+                text="Hold the door",
+                section="Chorus",
+                start=4.4,
+                end=8.6,
+                timing_source="aligned",
+            ),
+            LyricLine(
+                text="Too late tonight",
+                section="Chorus",
+                start=8.8,
+                end=12.0,
+                timing_source="aligned",
+            ),
+            LyricLine(
+                text="Turn out the light",
+                section="Chorus",
+                start=12.2,
+                end=15.5,
+                timing_source="aligned",
+            ),
+        ],
+    )
+
+    class UntaggedChorusDirector:
+        def complete_json(self, *, system, content, schema):
+            if schema is BibleReply:
+                return BibleReply(
+                    style="gothic",
+                    palette="cool",
+                    lighting="moonlight",
+                    negative_prompt="blurry",
+                    characters=[
+                        CharacterReply(
+                            id="elias",
+                            name="Elias",
+                            appearance="22-year-old male baritone with dark hair.",
+                            wardrobe=[WardrobeReply(id="coat", description="Dark coat.")],
+                        ),
+                        CharacterReply(
+                            id="odalie",
+                            name="Odalie",
+                            appearance="20-year-old female soprano with curls.",
+                            wardrobe=[WardrobeReply(id="gown", description="Silk gown.")],
+                        ),
+                    ],
+                    settings=[SetReply(name="Manor", description="a Victorian hall")],
+                )
+            ids = re.findall(r"- id=(s\d+)", content[0]["text"])
+            return ShotBatchReply(
+                shots=[
+                    ShotCreative(
+                        id=sid,
+                        type=ShotType.LIPSYNC,
+                        framing=Framing.MEDIUM_CLOSE,
+                        setting="Manor",
+                        still_prompt="Close singing shot.",
+                        motion_prompt="Sings softly.",
+                    )
+                    for sid in ids
+                ]
+            )
+
+    cfg = ProjectConfig()
+    cfg.video.max_clip_seconds = 6.0
+    cfg.planning.max_lipsync_share = None
+    manifest = build_manifest(cfg, duet_analysis, "lyrics", "style", UntaggedChorusDirector())
+
+    # Exact handoff cut lands inside [8.6, 8.8] (at 8.7s), never on bar 8.0 or bar 10.0!
+    boundaries = [s.start for s in manifest.shots]
+    assert 8.7 in boundaries
+    elias_shots = [s for s in manifest.shots if s.end <= 8.7]
+    odalie_shots = [s for s in manifest.shots if s.start >= 8.7]
+    assert all(s.character == "elias" for s in elias_shots)
+    assert all(s.character == "odalie" for s in odalie_shots)
+    assert all("Too late" not in s.lyrics for s in elias_shots)
+    assert all("Hold the door" not in s.lyrics for s in odalie_shots)
+    # Boundary shots record mute_spans across the 8.7s handoff so handles never bleed.
+    last_elias = elias_shots[-1]
+    first_odalie = odalie_shots[0]
+    assert any(m.start <= 8.8 and m.end > 8.7 for m in last_elias.audio_slice.mute_spans)
+    assert any(m.start < 8.6 and m.end >= 8.45 for m in first_odalie.audio_slice.mute_spans)
+
+
+def test_solo_vs_listener_two_shot_vs_both_singing_together_end_to_end():
+    from mvdirector.models import Framing, LyricLine, VocalTurn
+    from mvdirector.planning.segmenter import dominant_voice
+
+    # External diarizers that emit overlapping solo turns also resolve to 'both'.
+    overlapping = [
+        VocalTurn(start=8.0, end=12.0, voice="voice_1", median_f0_hz=130.0),
+        VocalTurn(start=8.0, end=12.0, voice="voice_2", median_f0_hz=280.0),
+    ]
+    assert dominant_voice(overlapping, 8.0, 12.0) == "both"
+
+    beats = [round(0.5 * i, 3) for i in range(32)]
+    bars = beats[::4]  # 0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0 (duration 16.0)
+    duet_analysis = Analysis(
+        duration=16.0,
+        tempo_bpm=120.0,
+        beats=beats,
+        bars=bars,
+        bar_intensity=[0.5] * len(bars),
+        vocal_windows=[TimeSpan(start=0.2, end=15.8)],
+        vocal_turns=[
+            VocalTurn(start=0.2, end=3.9, voice="voice_1", median_f0_hz=130.0),
+            VocalTurn(start=4.1, end=7.9, voice="voice_2", median_f0_hz=280.0),
+            VocalTurn(start=8.1, end=11.9, voice="both", median_f0_hz=None),
+            # Inside [Chorus: Both], Elias sings the final 4s adlib completely solo:
+            VocalTurn(start=12.1, end=15.8, voice="voice_1", median_f0_hz=132.0),
+        ],
+        lyric_lines=[
+            LyricLine(
+                text="Cold iron gate",
+                section="Verse 1: Elias",
+                start=0.3,
+                end=3.8,
+                timing_source="aligned",
+            ),
+            LyricLine(
+                text="Candle in the hall",
+                section="Verse 2: Odalie",
+                start=4.2,
+                end=7.8,
+                timing_source="aligned",
+            ),
+            LyricLine(
+                text="Hold back the dawn",
+                section="Chorus: Both",
+                start=8.2,
+                end=11.8,
+                timing_source="aligned",
+            ),
+            LyricLine(
+                text="Stay with me now",
+                section="Chorus: Both",
+                start=12.2,
+                end=15.7,
+                timing_source="aligned",
+            ),
+        ],
+    )
+    batch_requests: list[str] = []
+
+    class TogetherDirector:
+        def complete_json(self, *, system, content, schema):
+            if schema is BibleReply:
+                return BibleReply(
+                    style="gothic cinema",
+                    palette="slate and amber",
+                    lighting="candlelight",
+                    negative_prompt="blurry",
+                    characters=[
+                        CharacterReply(
+                            id="elias",
+                            name="Elias",
+                            appearance="24-year-old male baritone.",
+                            wardrobe=[WardrobeReply(id="coat", description="Dark wool coat.")],
+                        ),
+                        CharacterReply(
+                            id="odalie",
+                            name="Odalie",
+                            appearance="23-year-old female soprano.",
+                            wardrobe=[WardrobeReply(id="gown", description="Ivory silk gown.")],
+                        ),
+                    ],
+                    settings=[SetReply(name="Hall", description="grand staircase")],
+                )
+            text = content[0]["text"]
+            batch_requests.append(text)
+            return ShotBatchReply(
+                shots=[
+                    ShotCreative(
+                        id="s001",
+                        type=ShotType.LIPSYNC,
+                        framing=Framing.CLOSE_UP,
+                        setting="Hall",
+                        character="elias",
+                        characters=["elias"],
+                        still_prompt="Close-up of Elias at the gate.",
+                        motion_prompt="Elias sings steadily.",
+                    ),
+                    ShotCreative(
+                        id="s002",
+                        type=ShotType.LIPSYNC,
+                        framing=Framing.MEDIUM_CLOSE,
+                        setting="Hall",
+                        character="odalie",
+                        characters=["odalie", "elias"],
+                        still_prompt="Odalie on the stairs while Elias watches.",
+                        motion_prompt="Odalie sings as Elias stands nearby.",
+                    ),
+                    # Model mistakenly picks close_up and omits Odalie on a simultaneous duet shot:
+                    ShotCreative(
+                        id="s003",
+                        type=ShotType.LIPSYNC,
+                        framing=Framing.CLOSE_UP,
+                        setting="Hall",
+                        character="elias",
+                        characters=["elias"],
+                        still_prompt="Elias and Odalie singing.",
+                        motion_prompt="They sing together.",
+                    ),
+                    ShotCreative(
+                        id="s004",
+                        type=ShotType.LIPSYNC,
+                        framing=Framing.CLOSE_UP,
+                        setting="Hall",
+                        character="elias",
+                        characters=["elias"],
+                        still_prompt="Close-up of Elias singing the final line.",
+                        motion_prompt="Elias sings quietly.",
+                    ),
+                ]
+            )
+
+    cfg = ProjectConfig()
+    cfg.video.max_clip_seconds = 4.5
+    cfg.planning.max_lipsync_share = None
+    manifest = build_manifest(cfg, duet_analysis, "lyrics", "style", TogetherDirector())
+
+    assert len(batch_requests) == 1
+    assert "vocal='solo' singer='elias'" in batch_requests[0]
+    assert "vocal='solo' singer='odalie'" in batch_requests[0]
+    assert "vocal='together' singers=['elias', 'odalie']" in batch_requests[0]
+
+    s1, s2, s3, s4 = manifest.shots
+    # 1. Solo Elias
+    assert (s1.character, s1.characters, s1.singers) == ("elias", ["elias"], ["elias"])
+    assert "Elias sings with clear, natural mouth movement" in prompts.compose_motion_prompt(
+        manifest, s1
+    )
+
+    # 2. Solo Odalie in a two-shot with Elias listening silently
+    assert (s2.character, s2.characters, s2.singers) == ("odalie", ["odalie", "elias"], ["odalie"])
+    s2_still = prompts.compose_still_prompt(manifest, s2)
+    s2_motion = prompts.compose_motion_prompt(manifest, s2)
+    assert "Only Odalie is singing; Elias listens with mouth closed." in s2_still
+    assert "Also in frame (Elias):" in s2_still
+    assert "while Elias listens with mouth closed, not singing." in s2_motion
+
+    # 3. Both singing together: widened to MEDIUM_CLOSE, both in characters & singers
+    assert s3.framing is Framing.MEDIUM_CLOSE
+    assert s3.characters == ["elias", "odalie"]
+    assert s3.singers == ["elias", "odalie"]
+    s3_still = prompts.compose_still_prompt(manifest, s3)
+    s3_motion = prompts.compose_motion_prompt(manifest, s3)
+    assert "Both Elias and Odalie singing together" in s3_still
+    assert "Co-singer in frame (Odalie):" in s3_still
+    assert "Both Elias and Odalie sing together with clear, natural mouth movement" in s3_motion
+    # Together shot keeps [8.0, 12.0] unmuted while muting adjacent solo handles!
+    assert all(m.end <= s3.start or m.start >= s3.end for m in s3.audio_slice.mute_spans)
+    assert any(m.start < s3.start for m in s3.audio_slice.mute_spans)
+    assert any(m.end > s3.end for m in s3.audio_slice.mute_spans)
+
+    # 4. Solo adlib inside [Chorus: Both] overridden by 100% voice_1 dominance
+    assert (s4.character, s4.singers) == ("elias", ["elias"])
+
+    # Unsafe singer identifiers are strictly rejected at deserialization.
+    with pytest.raises(ValueError, match="Invalid character id"):
+        s3.model_validate({**s3.model_dump(), "singers": ["../evil"]})

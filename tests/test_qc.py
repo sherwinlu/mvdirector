@@ -821,3 +821,175 @@ def test_weak_lipsync_blocks_when_configured(tmp_path, monkeypatch):
     report = _unsynced_video_report(tmp_path, monkeypatch, blocking=True)
     sync = next(c for c in report.checks if c.name == "lipsync")
     assert sync.hard and report.has_hard_failure and not report.passed
+
+
+def test_oversized_or_squashed_face_in_wide_shot_is_a_hard_failure(still_path):
+    # Matches the 0.1172 BlazeFace measurement from a vertically squashed figure in a wide shot.
+    squashed = [Face(0.1172, np.array([1.0, 0.0]))]
+    report = _image_report(still_path, squashed, _shot(ShotType.PERFORMANCE, Framing.WIDE))
+    assert not report.passed and report.has_hard_failure
+    framing = next(c for c in report.checks if c.name == "face_framing")
+    assert framing.status is CheckStatus.FAILED and framing.hard
+    assert "allows at most 10%" in framing.detail
+
+
+def test_unexpected_face_in_broll_cutaway_is_rejected(still_path):
+    report = _image_report(still_path, [Face(0.1172, None)], _shot(ShotType.BROLL, Framing.WIDE))
+    assert not report.passed and report.has_hard_failure
+    no_people = next(c for c in report.checks if c.name == "no_people")
+    assert no_people.status is CheckStatus.FAILED and no_people.hard
+    assert "unexpected face detected in cutaway" in no_people.detail
+
+
+def test_both_singing_still_requires_two_adequately_sized_faces(still_path):
+    from mvdirector.models import Character
+    from mvdirector.qc.image import ImageQC
+
+    config = ProjectConfig()
+    shot = _shot(ShotType.LIPSYNC, Framing.MEDIUM_CLOSE)
+    shot.character = "elias"
+    shot.characters = ["elias", "odalie"]
+    shot.singers = ["elias", "odalie"]
+    manifest = Manifest(
+        title="Duet",
+        duration=4.0,
+        fps=24,
+        characters={
+            "elias": Character(name="Elias", appearance="Elias."),
+            "odalie": Character(name="Odalie", appearance="Odalie."),
+        },
+        shots=[shot],
+    )
+
+    # Missing second singer -> hard face_present failure
+    one_face_gate = ImageQC(config.qc, config.video, FakeFaces([Face(0.28, None)]), None)
+    r_one = one_face_gate.evaluate(still_path, shot, manifest, reference=None)
+    assert not r_one.passed and r_one.has_hard_failure
+    assert _status(r_one, "face_present") is CheckStatus.FAILED
+    assert "requires both singers visible" in r_one.issues[0]
+
+    # Second singer tiny in far background -> hard face_framing failure
+    tiny_second_gate = ImageQC(
+        config.qc, config.video, FakeFaces([Face(0.26, None), Face(0.06, None)]), None
+    )
+    r_tiny = tiny_second_gate.evaluate(still_path, shot, manifest, reference=None)
+    assert not r_tiny.passed and r_tiny.has_hard_failure
+    assert _status(r_tiny, "face_framing") is CheckStatus.FAILED
+    assert "co-singer face is 6%" in r_tiny.issues[0]
+
+    # Balanced medium close-up two-shot -> passes
+    two_faces_gate = ImageQC(
+        config.qc, config.video, FakeFaces([Face(0.24, None), Face(0.18, None)]), None
+    )
+    r_ok = two_faces_gate.evaluate(still_path, shot, manifest, reference=None)
+    assert r_ok.passed
+    assert _status(r_ok, "face_present") is CheckStatus.PASSED
+    assert _status(r_ok, "face_framing") is CheckStatus.PASSED
+
+
+def test_both_singing_video_requires_both_mouths_tracked_and_synced(tmp_path, monkeypatch):
+    import soundfile as sf
+
+    from mvdirector import media
+    from mvdirector.models import Character
+    from mvdirector.qc.video import VideoQC
+
+    envelope, synced_mouth = _singing(n_frames=96, fps=24.0, seed=5)
+    audio_path = tmp_path / "slice.wav"
+    sf.write(str(audio_path), np.repeat(envelope, 1000).astype(np.float32), 24000)
+
+    monkeypatch.setattr(
+        media,
+        "probe",
+        lambda p: media.MediaInfo(width=1280, height=720, fps=24.0, duration=4.25, has_audio=True),
+    )
+    fake_frames = [
+        np.full((64, 64, 3), 100 + (i % 6), dtype=np.uint8) for i in range(len(synced_mouth))
+    ]
+    monkeypatch.setattr(media, "extract_frames", lambda p, width: fake_frames)
+
+    shot = _shot(ShotType.LIPSYNC, Framing.MEDIUM_CLOSE)
+    shot.character = "elias"
+    shot.characters = ["elias", "odalie"]
+    shot.singers = ["elias", "odalie"]
+    manifest = Manifest(
+        title="Duet",
+        duration=4.0,
+        fps=24,
+        characters={
+            "elias": Character(name="Elias", appearance="Elias."),
+            "odalie": Character(name="Odalie", appearance="Odalie."),
+        },
+        shots=[shot],
+    )
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"fake")
+    config = ProjectConfig()
+    config.qc.video.lipsync_blocking = True
+
+    # One mouth synced + one mouth frozen: fails on 'both' even though a solo two-shot would pass!
+    class OneFrozenTracker:
+        def track(self, frames):
+            return synced_mouth
+
+        def track_all(self, frames, max_faces=2):
+            return [synced_mouth, np.full(len(frames), 0.02)]
+
+    r_frozen = VideoQC(config.qc, config.video, None, OneFrozenTracker(), None).evaluate(
+        video_path, shot, manifest, audio_path, None
+    )
+    assert not r_frozen.passed and r_frozen.has_hard_failure
+    assert _status(r_frozen, "lipsync") is CheckStatus.FAILED
+    assert "both singers must lip-sync together" in r_frozen.issues[0]
+
+    # Only 1 face tracked: fails face_presence
+    class SingleFoundTracker:
+        def track(self, frames):
+            return synced_mouth
+
+        def track_all(self, frames, max_faces=2):
+            return [synced_mouth]
+
+    r_missing = VideoQC(config.qc, config.video, None, SingleFoundTracker(), None).evaluate(
+        video_path, shot, manifest, audio_path, None
+    )
+    assert not r_missing.passed and r_missing.has_hard_failure
+    assert _status(r_missing, "face_presence") is CheckStatus.FAILED
+    assert "tracked 1 of 2 singing faces" in r_missing.issues[0]
+
+    # Both mouths synced: passes!
+    class BothSyncedTracker:
+        def track(self, frames):
+            return synced_mouth
+
+        def track_all(self, frames, max_faces=2):
+            return [synced_mouth, synced_mouth * 0.95]
+
+    r_both = VideoQC(config.qc, config.video, None, BothSyncedTracker(), None).evaluate(
+        video_path, shot, manifest, audio_path, None
+    )
+    assert r_both.passed
+    assert _status(r_both, "face_presence") is CheckStatus.PASSED
+    assert _status(r_both, "lipsync") is CheckStatus.PASSED
+
+
+def test_qc_and_retry_config_boundaries_and_partial_framing_thresholds(still_path):
+    from pydantic import ValidationError
+
+    from mvdirector.qc.image import ImageQC
+
+    with pytest.raises(ValidationError):
+        ProjectConfig.model_validate({"qc": {"image": {"vision_spec_hard_min": 1.5}}})
+    with pytest.raises(ValidationError):
+        ProjectConfig.model_validate({"qc": {"video": {"vision_spec_hard_min": -0.1}}})
+    with pytest.raises(ValidationError):
+        ProjectConfig.model_validate({"retry": {"strategies": []}})
+
+    cfg = ProjectConfig()
+    cfg.qc.image.min_face_fraction = {}
+    cfg.qc.image.max_face_fraction = {}
+    shot = _shot(ShotType.PERFORMANCE, Framing.MEDIUM)
+    report = ImageQC(cfg.qc, cfg.video, FakeFaces([Face(0.20, None)]), None).evaluate(
+        still_path, shot, Manifest(title="T", duration=4.0, fps=24, shots=[shot]), None
+    )
+    assert report.passed

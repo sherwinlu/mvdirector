@@ -199,6 +199,14 @@
           "description": "Seconds between slice start and shot start.",
           "title": "Head Handle",
           "type": "number"
+        },
+        "mute_spans": {
+          "description": "Song-timeline spans silenced inside this slice so another singer's voice does not bleed into lip-sync.",
+          "items": {
+            "$ref": "#/$defs/TimeSpan"
+          },
+          "title": "Mute Spans",
+          "type": "array"
         }
       },
       "required": [
@@ -675,6 +683,14 @@
           "title": "Characters",
           "type": "array"
         },
+        "singers": {
+          "description": "Character ids actively singing in this shot (1 for solo A or B, 2+ when singing together in unison/harmony; empty when not singing).",
+          "items": {
+            "type": "string"
+          },
+          "title": "Singers",
+          "type": "array"
+        },
         "wardrobe": {
           "anyOf": [
             {
@@ -798,6 +814,25 @@
       ],
       "title": "ShotType",
       "type": "string"
+    },
+    "TimeSpan": {
+      "additionalProperties": false,
+      "properties": {
+        "start": {
+          "title": "Start",
+          "type": "number"
+        },
+        "end": {
+          "title": "End",
+          "type": "number"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "title": "TimeSpan",
+      "type": "object"
     },
     "VisualBible": {
       "additionalProperties": false,

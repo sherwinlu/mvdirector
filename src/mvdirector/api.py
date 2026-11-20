@@ -611,6 +611,10 @@ def upscale(
     force: bool = False,
     overwrite: bool = False,
     comfy_provider: ComfyEndpointProvider | None = None,
+    *,
+    width: int | None = None,
+    height: int | None = None,
+    on_shot_done: Callable[[str, int, int], None] | None = None,
 ) -> list[Path]:
     """Upscale winning/approved draft clips through the optional 'upscale' workflow."""
     project = open_project(project_dir)
@@ -626,7 +630,16 @@ def upscale(
         manifest = project.load_manifest()
         comfy.ping()
         return upscale_mod.upscale_videos(
-            project, manifest, comfy, template, shot_ids=shots, force=force, overwrite=overwrite
+            project,
+            manifest,
+            comfy,
+            template,
+            shot_ids=shots,
+            force=force,
+            overwrite=overwrite,
+            width=width,
+            height=height,
+            on_shot_done=on_shot_done,
         )
 
 
@@ -693,13 +706,20 @@ def assemble(
     output: Path | None = None,
     force: bool = False,
     review_mode: ReviewMode | None = None,
+    *,
+    draft: bool = False,
+    width: int | None = None,
+    height: int | None = None,
 ) -> Path:
     """Join the approved clips and lay the original mix over them."""
     project = open_project(project_dir, review_mode)
     manifest = project.load_manifest()
     safe_title = "".join(c if c.isalnum() else "_" for c in manifest.title).strip("_") or "video"
-    target = output or project.output_dir / f"{safe_title}{'_draft' if force else ''}.mp4"
-    result = assemble_mod.assemble(project, manifest, target, force=force)
+    suffix = "_draft" if (force or draft) else ""
+    target = output or project.output_dir / f"{safe_title}{suffix}.mp4"
+    result = assemble_mod.assemble(
+        project, manifest, target, force=force, draft=draft, width=width, height=height
+    )
     project.storage.push()  # the final cut is not referenced by the manifest
     return result
 

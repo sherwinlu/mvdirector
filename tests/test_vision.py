@@ -198,3 +198,68 @@ def test_still_with_wrong_costume_is_rejected_even_when_the_face_matches(manifes
     assert not report.passed and report.has_hard_failure
     assert report.issues == ["vision_character: cape present"]
     assert report.fix_hints == ["No cape."]
+
+
+def test_broll_exclusion_violation_like_minute_hand_is_a_hard_qc_failure(manifest, png):
+    """Even when sharpness and artifact_free are 1.0, failing vision_spec rejects the still."""
+    config = ProjectConfig()
+    clock_shot = _shot(ShotType.BROLL, None)
+    clock_shot.framing = Framing.MEDIUM
+    clock_shot.still_prompt = (
+        "Dust motes floating in shafts of light revealing a large silent grandfather clock, "
+        "no minute hand, tarnished brass."
+    )
+    verdict = VisionVerdict(
+        spec_match=0.2,
+        artifact_free=0.98,
+        character_match=None,
+        issues=["grandfather clock face has a visible minute hand"],
+        fix=(
+            "Close-up of the tarnished brass clock dial showing only one short hour hand on a "
+            "bare center pin."
+        ),
+    )
+    llm = FakeLLM(verdict)
+    gate = ImageQC(config.qc, config.video, FakeFaces([]), VisionJudge(llm))
+    report = gate.evaluate(png, clock_shot, manifest, reference=None)
+    assert "Must NOT appear in frame (hard fail if visible): minute hand" in llm.content[-1]["text"]
+    assert "height-to-width" in llm.system and "no minute hand" in llm.system
+    spec = next(c for c in report.checks if c.name == "vision_spec")
+    assert spec.status is CheckStatus.FAILED and spec.hard
+    assert not report.passed and report.has_hard_failure
+    assert "minute hand" in report.issues[0]
+
+
+def test_vision_specification_distinguishes_solo_listener_and_together_duet():
+    duet_manifest = Manifest(
+        title="Duet",
+        duration=12.0,
+        fps=24,
+        characters={
+            "elias": Character(name="Elias", appearance="Dark-haired baritone."),
+            "odalie": Character(name="Odalie", appearance="Soprano with curls."),
+        },
+        visual_bible=VisualBible(style="35mm film"),
+    )
+
+    solo_shot = _shot(ShotType.LIPSYNC, None)
+    solo_shot.character = "elias"
+    solo_shot.characters = ["elias"]
+    solo_shot.singers = ["elias"]
+    assert "Vocal delivery: Solo — ONLY Elias is singing." in VisionJudge.specification(
+        solo_shot, duet_manifest
+    )
+
+    listener_shot = _shot(ShotType.LIPSYNC, None)
+    listener_shot.character = "odalie"
+    listener_shot.characters = ["odalie", "elias"]
+    listener_shot.singers = ["odalie"]
+    listener_spec = VisionJudge.specification(listener_shot, duet_manifest)
+    assert "ONLY Odalie is singing; Elias is listening with mouth closed." in listener_spec
+
+    together_shot = _shot(ShotType.LIPSYNC, None)
+    together_shot.character = "elias"
+    together_shot.characters = ["elias", "odalie"]
+    together_shot.singers = ["elias", "odalie"]
+    together_spec = VisionJudge.specification(together_shot, duet_manifest)
+    assert "Simultaneous duet — BOTH Elias and Odalie are singing TOGETHER" in together_spec

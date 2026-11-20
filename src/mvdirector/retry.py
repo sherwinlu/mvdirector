@@ -38,6 +38,9 @@ class _RewriteReply(BaseModel):
     prompt: str
 
 
+_PROMPT_FAILURE_CHECKS = frozenset({"vision_spec", "no_people", "face_framing"})
+
+
 class RetryPolicy:
     def __init__(self, config: RetryConfig, project_seed: int, llm: LLMClient | None) -> None:
         self._config = config
@@ -72,6 +75,19 @@ class RetryPolicy:
         if all(a.error is not None for a in prior):
             # Every earlier attempt was an infrastructure error; nothing to learn from yet.
             return RetryStrategy.NEW_SEED
+        used = {a.strategy for a in prior if a.error is None}
+        last_qc = next((a.qc for a in reversed(prior) if a.qc is not None), None)
+        if (
+            last_qc is not None
+            and RetryStrategy.REWRITE_PROMPT in ladder
+            and RetryStrategy.REWRITE_PROMPT not in used
+            and any(c.name in _PROMPT_FAILURE_CHECKS for c in last_qc.failed_checks)
+        ):
+            return RetryStrategy.REWRITE_PROMPT
+        if RetryStrategy.REWRITE_PROMPT in used:
+            for candidate in ladder:
+                if candidate not in used:
+                    return candidate
         return ladder[min(len(prior) - 1, len(ladder) - 1)]
 
     def _rewrite(

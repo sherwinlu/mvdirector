@@ -12,16 +12,34 @@ import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
 
 from mvdirector.llm import LLMClient, image_block, text_block
-from mvdirector.models import AssetKind, Framing, Manifest, Shot
+from mvdirector.models import AssetKind, Framing, Manifest, Shot, ShotType
+from mvdirector.planning.prompts import extract_negative_exclusions, join_names
 
 _SYSTEM = """You are the quality-control supervisor on an AI-generated music video. You are
 shown {subject}. Judge it strictly against the shot specification.
 
 Score from 0 to 1:
-- spec_match: framing, setting, lighting and action match the specification, and the
-  production rules that can be judged from {frames_word} are followed.
+- spec_match: framing, camera distance, setting, lighting and action match the specification, and
+  the production rules that can be judged from {frames_word} are followed.
+  * Explicit exclusions & absences: verify every 'no ...', 'without ...', 'missing ...' or
+    'Must NOT appear' constraint in the specification (for example 'no minute hand', 'no cape',
+    'no people'). If a forbidden object, clock hand, garment or person is visible anyway—or if
+    any person or face appears when no singer should be visible—score spec_match <= 0.2 and name
+    the offending element in 'issues'.
+  * Environmental scale: people and props must sit at realistic physical scale relative to doors,
+    windows, furniture and buildings (a person near a house or manor must never appear giant or
+    nearly as tall as the architecture; score spec_match <= 0.2 if scale is implausible, or if a
+    wide shot is filled top-to-bottom by a foreground figure).
+  * Vocal delivery & cast staging: verify 'Vocal delivery' when present—on simultaneous duet
+    shots, BOTH named vocalists must appear in frame with unobstructed mouths singing together; on
+    solo two-shots with a listener, ONLY the named solo vocalist sings while the listener's mouth
+    stays closed (score spec_match <= 0.2 if a co-singer is missing or the wrong person is singing).
 - artifact_free: no malformed hands or fingers, extra or missing limbs, warped faces,
   melted objects, garbled text, watermarks{video_artifacts}.
+  * Body proportions & height-to-width ratios: check human head-to-body, torso-to-leg and
+    height-to-width proportions carefully. Vertically squashed or compressed bodies, dwarf or
+    stubby legs beneath a wide coat or torso, oversized heads, or stiff front-facing reference
+    cutout poses pasted onto a scene MUST score artifact_free <= 0.3.
 - character_match: the singer matches the character description and, when a reference
   sheet or portrait is given, looks like the same person. A sheet shows the same person from
   several angles. Judge only details large enough to resolve at the stated framing. Check face
@@ -32,7 +50,8 @@ Score from 0 to 1:
   Use null if the specification says no singer should be visible.
 
 List each concrete problem in 'issues' (empty if none). In 'fix', give one short,
-practical instruction for the prompt that would avoid the worst problem."""
+practical instruction for the prompt that would avoid the worst problem; when a 'no <part>'
+exclusion failed, state affirmatively what should appear instead without repeating 'no <part>'."""
 
 
 # What can fairly be judged at each framing. Small marks and jewelry do not resolve in wide
@@ -161,6 +180,37 @@ class VisionJudge:
             f"Action: {shot.motion_prompt}",
             f"Look: {bible.style}",
         ]
+        if shot.type.shows_singer and len(manifest.characters) > 1:
+            singing = manifest.singing_characters(shot)
+            visible = manifest.visible_characters(shot)
+            if shot.type is ShotType.LIPSYNC and len(singing) >= 2:
+                names = join_names([c.name or cid or "performer" for cid, c, _ in singing])
+                lead = f"BOTH {names}" if len(singing) == 2 else names
+                lines.append(
+                    f"Vocal delivery: Simultaneous duet — {lead} are singing TOGETHER; "
+                    "all singing faces must be clearly visible with unobstructed singing mouths."
+                )
+            elif shot.type is ShotType.LIPSYNC and len(singing) == 1 and len(visible) > 1:
+                solo_id, solo_char, _ = singing[0]
+                solo_label = solo_char.name or solo_id or "lead"
+                listener_list = [
+                    c.name or cid or "performer" for cid, c, _ in visible if cid != solo_id
+                ]
+                listeners = join_names(listener_list)
+                be_verb = "are" if len(listener_list) > 1 else "is"
+                mouth_noun = "mouths" if len(listener_list) > 1 else "mouth"
+                lines.append(
+                    f"Vocal delivery: Solo in two-shot — ONLY {solo_label} is singing; "
+                    f"{listeners} {be_verb} listening with {mouth_noun} closed."
+                )
+            elif shot.type is ShotType.LIPSYNC and len(singing) == 1:
+                solo_id, solo_char, _ = singing[0]
+                solo_label = solo_char.name or solo_id or "lead"
+                lines.append(f"Vocal delivery: Solo — ONLY {solo_label} is singing.")
+            else:
+                lines.append(
+                    "Vocal delivery: Non-singing performance — mouths closed, nobody singing."
+                )
         if shot.type.shows_singer and character.appearance:
             lines.append(
                 f"Detail level for a {shot.framing.value} shot: {DETAIL_BY_FRAMING[shot.framing]}"
@@ -194,6 +244,11 @@ class VisionJudge:
         for prop in bible.resolve_props(shot.props):
             desc = f": {prop.description}" if prop.description else ""
             lines.append(f"Hero prop ({prop.name}){desc}")
+        exclusions = extract_negative_exclusions(shot.still_prompt)
+        if exclusions:
+            lines.append(
+                "Must NOT appear in frame (hard fail if visible): " + ", ".join(exclusions)
+            )
         if bible.rules:
             lines.append("Production rules:\n" + "\n".join(f"- {rule}" for rule in bible.rules))
         return "\n".join(lines)

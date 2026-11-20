@@ -671,7 +671,7 @@ class StableSyncNetScorer:
             return self._encoder(visual_windows, audio_windows)
         return self._encode_visual(visual_windows), self._encode_audio(audio_windows)
 
-    def score(
+    def score_all(
         self,
         frames: list[np.ndarray],
         fps: float,
@@ -679,39 +679,30 @@ class StableSyncNetScorer:
         sample_rate: int,
         max_lag_seconds: float,
         max_faces: int = 1,
-    ) -> SyncMeasurement:
+    ) -> list[SyncMeasurement]:
+        """Score every tracked face in ``frames`` (up to ``max_faces``)."""
         if self._closed:
             raise RuntimeError("StableSyncNetScorer has been closed")
         frames_25 = resample_frames_to_25fps(frames, fps)
         if not frames_25:
-            return SyncMeasurement(
-                correlation=0.0,
-                lag_frames=0,
-                face_presence=0.0,
-                eval_fps=SYNCNET_FPS,
-                confidence=0.0,
-            )
+            return []
         tracks = extract_face_tracks(frames_25, self._faces, max_faces=max_faces)
         if not tracks:
-            return SyncMeasurement(
-                correlation=0.0,
-                lag_frames=0,
-                face_presence=0.0,
-                eval_fps=SYNCNET_FPS,
-                confidence=0.0,
-            )
+            return []
 
         n_frames = len(frames_25)
         n_visual_windows = n_frames - SYNCNET_NUM_FRAMES + 1
         if n_visual_windows <= 0:
-            best_presence = max(p for p, _ in tracks)
-            return SyncMeasurement(
-                correlation=0.0,
-                lag_frames=0,
-                face_presence=best_presence,
-                eval_fps=SYNCNET_FPS,
-                confidence=0.0,
-            )
+            return [
+                SyncMeasurement(
+                    correlation=0.0,
+                    lag_frames=0,
+                    face_presence=p,
+                    eval_fps=SYNCNET_FPS,
+                    confidence=0.0,
+                )
+                for p, _ in tracks
+            ]
 
         mel = mel_spectrogram(samples, sample_rate)
         audio_list: list[np.ndarray] = []
@@ -721,14 +712,16 @@ class StableSyncNetScorer:
                 break
             audio_list.append(window[np.newaxis, :, :])  # (1, 80, 52)
         if not audio_list:
-            best_presence = max(p for p, _ in tracks)
-            return SyncMeasurement(
-                correlation=0.0,
-                lag_frames=0,
-                face_presence=best_presence,
-                eval_fps=SYNCNET_FPS,
-                confidence=0.0,
-            )
+            return [
+                SyncMeasurement(
+                    correlation=0.0,
+                    lag_frames=0,
+                    face_presence=p,
+                    eval_fps=SYNCNET_FPS,
+                    confidence=0.0,
+                )
+                for p, _ in tracks
+            ]
 
         audio_windows = np.stack(audio_list, axis=0).astype(np.float32)
         cached_audio_embeds = self._encode_audio(audio_windows) if self._encoder is None else None
@@ -751,6 +744,28 @@ class StableSyncNetScorer:
                 v_embeds, a_embeds = self._encode_batches(visual_windows, audio_windows)
             measurements.append(
                 score_embedding_sequences(v_embeds, a_embeds, max_lag_frames, presence)
+            )
+        return measurements
+
+    def score(
+        self,
+        frames: list[np.ndarray],
+        fps: float,
+        samples: np.ndarray,
+        sample_rate: int,
+        max_lag_seconds: float,
+        max_faces: int = 1,
+    ) -> SyncMeasurement:
+        measurements = self.score_all(
+            frames, fps, samples, sample_rate, max_lag_seconds, max_faces=max_faces
+        )
+        if not measurements:
+            return SyncMeasurement(
+                correlation=0.0,
+                lag_frames=0,
+                face_presence=0.0,
+                eval_fps=SYNCNET_FPS,
+                confidence=0.0,
             )
         present = [m for m in measurements if m.face_presence >= 0.5]
         pool = present or measurements

@@ -385,6 +385,16 @@ class ShotRunner:
             refs.append(("set_image", plate))
         return refs
 
+    def _still_negative_prompt(self, shot: Shot) -> str:
+        parts = [self._manifest.visual_bible.negative_prompt]
+        raw_still = shot.still.prompt_override or shot.still_prompt
+        parts.extend(prompts.extract_negative_exclusions(raw_still))
+        if shot.type is ShotType.BROLL:
+            parts.append("people, human figures, faces")
+        else:
+            parts.append("vertically squashed body, stubby legs, oversized head")
+        return ", ".join(p.strip(", ") for p in parts if p and p.strip(", "))
+
     def _generate_still(
         self,
         shot: Shot,
@@ -397,7 +407,7 @@ class ShotRunner:
         width, height = video.generation_size(draft=self._draft)
         params: dict[str, Any] = {
             "positive_prompt": attempt.prompt,
-            "negative_prompt": self._manifest.visual_bible.negative_prompt,
+            "negative_prompt": self._still_negative_prompt(shot),
             "seed": attempt.seed,
             "width": width,
             "height": height,
@@ -521,6 +531,7 @@ class ShotRunner:
         if not self._project.config.retry.lipsync_fallback or shot.type is not ShotType.LIPSYNC:
             return False
         shot.fallback_from, shot.type = shot.type, ShotType.PERFORMANCE
+        shot.singers = []
         shot.motion_prompt = prompts.PERFORMANCE_MOTION
         state.reset(self._project.config.retry.max_attempts)
         state.prompt_override = None
@@ -557,6 +568,53 @@ class ShotRunner:
         )
         self._project.save_manifest(self._manifest)
 
+    def _effective_mute_spans(self, shot: Shot) -> list[tuple[float, float]]:
+        """Song-timeline spans silenced inside ``shot.audio_slice`` to prevent duet voice bleed."""
+        if shot.type is not ShotType.LIPSYNC:
+            return []
+        s_start, s_end = shot.audio_slice.start, shot.audio_slice.end
+        spans: list[tuple[float, float]] = [
+            (max(s_start, m.start), min(s_end, m.end))
+            for m in shot.audio_slice.mute_spans
+            if min(s_end, m.end) - max(s_start, m.start) >= 0.01
+        ]
+        # Also guard adjacent-shot singer handoffs on older manifests that predate mute_spans.
+        active = self._manifest.active_singer_ids(shot)
+        if len(self._manifest.characters) > 1 and active:
+            shots = self._manifest.shots
+            pos = next((i for i, item in enumerate(shots) if item.id == shot.id), None)
+            if pos is not None:
+                if pos > 0 and s_start < shot.start:
+                    prev = shots[pos - 1]
+                    prev_singers = self._manifest.active_singer_ids(prev) or (
+                        {rc}
+                        if prev.character
+                        and (rc := self._manifest.resolve_character_id(prev.character))
+                        else set()
+                    )
+                    if prev_singers and prev_singers != active:
+                        spans.append((s_start, shot.start))
+                if pos + 1 < len(shots) and s_end > shot.end:
+                    nxt = shots[pos + 1]
+                    next_singers = self._manifest.active_singer_ids(nxt) or (
+                        {rc}
+                        if nxt.character
+                        and (rc := self._manifest.resolve_character_id(nxt.character))
+                        else set()
+                    )
+                    if next_singers and next_singers != active:
+                        spans.append((shot.end, s_end))
+        if not spans:
+            return []
+        ordered = sorted(spans)
+        merged: list[list[float]] = [[ordered[0][0], ordered[0][1]]]
+        for a, b in ordered[1:]:
+            if a <= merged[-1][1] + 0.01:
+                merged[-1][1] = max(merged[-1][1], b)
+            else:
+                merged.append([a, b])
+        return [(round(a, 4), round(b, 4)) for a, b in merged if b - a >= 0.01]
+
     def _ensure_audio_slice(self, shot: Shot) -> Path:
         """The shot's audio slice, cut again whenever its timing or its source audio changed.
 
@@ -578,16 +636,24 @@ class ShotRunner:
                 return path  # the source audio is gone; keep the slice that was already cut
             raise
         source_stat = source_path.stat()
-        stamp = {
+        mute_spans = self._effective_mute_spans(shot)
+        stamp: dict[str, Any] = {
             "source": source_path.name,
             "source_size": source_stat.st_size,
             "source_mtime_ns": source_stat.st_mtime_ns,
             "start": round(shot.audio_slice.start, 4),
             "end": round(shot.audio_slice.end, 4),
         }
+        if mute_spans:
+            stamp["mute_spans"] = [list(span) for span in mute_spans]
         marker = path.with_name(f"{path.name}.json")
         if not path.is_file() or _read_stamp(marker) != stamp:
             media.slice_audio(source_path, path, shot.audio_slice.start, shot.audio_slice.end)
+            if mute_spans:
+                rel_mutes = [
+                    (a - shot.audio_slice.start, b - shot.audio_slice.start) for a, b in mute_spans
+                ]
+                media.mute_audio_spans(path, rel_mutes)
             atomic_write(marker, json.dumps(stamp))
         return path
 

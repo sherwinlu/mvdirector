@@ -538,3 +538,54 @@ def test_build_manifest_thins_duet_after_bible_using_section_singers():
         kept = [s for s in manifest.shots if s.section == label and s.type is ShotType.LIPSYNC]
         assert len(kept) >= 2
     assert all(s.still_prompt == "still" for s in manifest.shots)
+
+
+def test_empty_landscape_performance_prompt_converts_to_broll_or_rule_based_singer():
+    manor_prompt = (
+        "Wide, static shot of the crooked Victorian manor on a snow-covered hill, "
+        "silhouette against a pearl gray and blue sky."
+    )
+    shot = _shot(0, "Intro", 0.3, ShotType.PERFORMANCE)
+    creative = ShotCreative(
+        id=shot.id,
+        type=ShotType.PERFORMANCE,
+        framing=Framing.WIDE,
+        setting="Manor",
+        still_prompt=manor_prompt,
+        motion_prompt="The singer stands in the snow.",
+    )
+    planner._apply_creative(shot, creative, planner.VisualBible(), allow_broll_conversion=True)
+    assert shot.type is ShotType.BROLL
+    assert shot.still_prompt == manor_prompt
+    assert "No people" in shot.motion_prompt
+
+    # When 2 cutaways already preceded this shot, keep it PERFORMANCE with a real singer prompt.
+    capped = _shot(2, "Intro", 0.3, ShotType.PERFORMANCE)
+    planner._apply_creative(capped, creative, planner.VisualBible(), allow_broll_conversion=False)
+    assert capped.type is ShotType.PERFORMANCE
+    assert "singer" in capped.still_prompt.lower()
+    assert "Victorian manor" not in capped.still_prompt
+
+
+def test_wide_still_prompt_scales_singer_and_extracts_negative_exclusions():
+    wide_shot = _shot(0, "Intro", 0.3, ShotType.PERFORMANCE)
+    wide_shot.framing = Framing.WIDE
+    wide_shot.still_prompt = "Wide shot of the singer walking up the snowy path toward the manor."
+    manifest = Manifest(
+        title="t",
+        duration=4.0,
+        fps=24,
+        character=planner.Character(appearance="Teen boy in dark coat and red scarf."),
+        shots=[wide_shot],
+    )
+    composed = prompts.compose_still_prompt(manifest, wide_shot)
+    assert "~7.5 heads tall" in composed and "never towering over buildings" in composed
+    assert "human eye height" not in composed
+
+    clock_prompt = (
+        "Dust motes floating in shafts of light revealing a large silent grandfather clock, "
+        "no minute hand, tarnished brass."
+    )
+    assert prompts.extract_negative_exclusions(clock_prompt) == ["minute hand"]
+    lyric = "A blue that paints the town, no promise of tomorrow"
+    assert prompts.extract_negative_exclusions(lyric) == []

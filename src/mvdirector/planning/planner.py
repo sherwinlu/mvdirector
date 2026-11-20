@@ -18,11 +18,12 @@ from collections.abc import Callable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from mvdirector.audio.lyrics import parse_lyrics
+from mvdirector.audio.lyrics import labels_have_multiple_singers, parse_lyrics, section_singers
 from mvdirector.config import ProjectConfig
 from mvdirector.errors import LLMError
 from mvdirector.llm import LLMClient, text_block
 from mvdirector.models import (
+    BOTH_VOICES,
     Analysis,
     AssetState,
     AudioSlice,
@@ -33,12 +34,18 @@ from mvdirector.models import (
     SetDesign,
     Shot,
     ShotType,
+    TimeSpan,
     VisualBible,
     WardrobeState,
     validate_safe_id,
 )
 from mvdirector.planning import prompts
-from mvdirector.planning.segmenter import frames_for, segment
+from mvdirector.planning.segmenter import (
+    dominant_voice,
+    frames_for,
+    segment,
+    voice_activity_in_span,
+)
 
 log = logging.getLogger(__name__)
 
@@ -217,10 +224,15 @@ def build_manifest(
         duration=analysis.duration,
         fps=config.video.fps,
     )
-    # Derive multi-singer section snapping deterministically from the lyric section tags
-    # BEFORE calling the LLM, so cut points never vary with model output.
+    # Derive multi-singer section snapping deterministically from lyric section tags and
+    # acoustic voice turns BEFORE calling the LLM, so cut points never vary with model output.
     if config.video.snap_sections == "auto":
-        snap_sections = has_multiple_section_singers(analysis, lyrics_text)
+        voices = {t.voice for t in analysis.vocal_turns}
+        snap_sections = (
+            has_multiple_section_singers(analysis, lyrics_text)
+            or len(voices) >= 2
+            or BOTH_VOICES in voices
+        )
     else:
         snap_sections = config.video.snap_sections == "always"
     manifest.shots = _timed_shots(config, analysis, snap_sections=snap_sections)
@@ -229,14 +241,16 @@ def build_manifest(
         manifest.visual_bible = VisualBible(style=" ".join(style_text.split()))
     else:
         _write_bible(manifest, lyrics_text, style_text, llm)
+    voice_map = _map_voices_to_characters(analysis, manifest)
     if config.planning.max_lipsync_share is not None:
-        # After the bible, so each shot's section can be matched to the singer it names.
+        # After the bible, so each shot can be matched to its section or acoustic singer.
         _thin_lipsync(
             manifest.shots,
             config.planning.max_lipsync_share,
-            lambda shot: _section_singer(shot, manifest.characters),
+            lambda shot: _shot_singer_hint(shot, analysis, manifest.characters, voice_map),
         )
-    _direct_shots(manifest, config, llm)
+    _direct_shots(manifest, config, llm, analysis=analysis, voice_map=voice_map)
+    _populate_slice_mutes(manifest, analysis, voice_map)
     _report_mix(manifest.shots, has_bible=llm is not None)
     return manifest
 
@@ -304,163 +318,6 @@ def _write_bible(manifest: Manifest, lyrics_text: str, style_text: str, llm: LLM
     )
 
 
-_STRUCTURAL_SECTION_WORDS = frozenset(
-    {
-        "intro",
-        "verse",
-        "pre-chorus",
-        "prechorus",
-        "pre",
-        "chorus",
-        "post-chorus",
-        "postchorus",
-        "post",
-        "hook",
-        "big",
-        "refrain",
-        "bridge",
-        "outro",
-        "interlude",
-        "instrumental",
-        "solo",
-        "break",
-        "breakdown",
-        "drop",
-        "build",
-        "buildup",
-        "build-up",
-        "tag",
-        "coda",
-        "spoken",
-        "adlib",
-        "ad-lib",
-        "adlibs",
-        "ad-libs",
-        "rap",
-        "fade",
-        "ending",
-        "end",
-        "part",
-        "section",
-        "final",
-        "reprise",
-        "repeat",
-        "repeated",
-        "again",
-        "vamp",
-        "turnaround",
-        "soft",
-        "loud",
-        "quiet",
-        "whisper",
-        "whispered",
-        "acoustic",
-        "heavy",
-        "stripped",
-        "building",
-        "calm",
-        "intense",
-        "acapella",
-        "capella",
-        "fast",
-        "slow",
-        "high",
-        "low",
-        "emotional",
-        "softly",
-        "gently",
-        "out",
-        "in",
-        "up",
-        "down",
-        "lead",
-        "backing",
-        "backup",
-        "vocal",
-        "vocals",
-        "vox",
-    }
-)
-_ENSEMBLE_SECTION_WORDS = frozenset(
-    {"duet", "both", "together", "all", "everyone", "ensemble", "choir", "group", "harmony"}
-)
-# Generic performer designators that name a singer without a proper name ("[Female Verse]").
-_DESIGNATOR_WORDS = frozenset(
-    {"male", "female", "man", "woman", "boy", "girl", "guy", "lady", "he", "she", "him", "her"}
-)
-# Designators that only identify a singer together with a number ("[Singer 2]", "Voice 1").
-_NUMBERED_DESIGNATORS = frozenset(
-    {"singer", "voice", "vocalist", "vocal", "vocals", "rapper", "character", "performer"}
-)
-_SINGER_SPLIT = re.compile(r"\s*(?:&|\+|/|\band\b)\s*", flags=re.IGNORECASE)
-_REPEAT_MARKER = re.compile(r"\s*[(\[]?\s*(?:x|×)\s*\d+\s*[)\]]?\s*$", flags=re.IGNORECASE)
-_BRACKETED_CUE = re.compile(r"^(.*?)\s*[(\[]([^()\[\]]+)[)\]]\s*$")
-_DASH_SPLIT = re.compile(r"\s+[-—–]\s+")
-
-
-def _is_structural(words: list[str]) -> bool:
-    core = [w for w in (re.sub(r"^\d+|\d+$", "", w) for w in words) if w]
-    return bool(core) and all(w in _STRUCTURAL_SECTION_WORDS for w in core)
-
-
-def _looks_like_name(text: str) -> bool:
-    return all(w[:1].isupper() for w in text.split())
-
-
-def _singers_in_cue(cue: str, *, explicit: bool, cased: bool) -> set[str] | None:
-    """Performer keys named by one section cue, or ``None`` when the cue names an ensemble.
-
-    ``explicit`` cues come from a performer form (``Label: Cue``, ``Label (Cue)``,
-    ``Label - Cue``) and are trusted more than a bare label, which only counts when it is a
-    capitalised proper name or a generic designator such as ``Female``.
-    """
-    singers: set[str] = set()
-    head = cue.split(",", 1)[0].strip()
-    for raw in _SINGER_SPLIT.split(head):
-        part = _REPEAT_MARKER.sub("", raw.strip())
-        if not part:
-            continue
-        words = part.lower().split()
-        if " ".join(words) in _ENSEMBLE_SECTION_WORDS:
-            return None
-        if len(words) == 2 and words[0] in _NUMBERED_DESIGNATORS and words[1].isdigit():
-            singers.add(f"{words[0]} {words[1]}")
-            continue
-        core = [re.sub(r"^\d+|\d+$", "", w) for w in words]
-        core = [w for w in core if w]
-        if not core:
-            continue
-        if any(w in _STRUCTURAL_SECTION_WORDS for w in core):
-            # "Female Verse", "Male Chorus": a designator attached to a structural label.
-            rest = [w for w in core if w not in _STRUCTURAL_SECTION_WORDS]
-            if rest and all(w in _DESIGNATOR_WORDS for w in rest):
-                singers.add(" ".join(rest))
-            continue
-        if all(w in _DESIGNATOR_WORDS for w in core):
-            singers.add(" ".join(core))
-            continue
-        if len(core) > 3 or any(w.isdigit() for w in words):
-            continue
-        if explicit or (cased and _looks_like_name(part)):
-            singers.add(" ".join(core))
-    return singers
-
-
-def _section_cue(label: str) -> tuple[str, bool]:
-    """Split a section label into its performer cue and whether that cue was explicit."""
-    label = _REPEAT_MARKER.sub("", label.strip())
-    bracketed = _BRACKETED_CUE.match(label)
-    if bracketed:
-        return bracketed.group(2).strip(), True
-    if ":" in label:
-        return label.split(":", 1)[1].strip(), True
-    if _DASH_SPLIT.search(label):
-        lhs, rhs = _DASH_SPLIT.split(label, maxsplit=1)
-        # A dash often introduces a mood ("Verse 1 - angry"), so only a capitalised name counts.
-        return (rhs if _is_structural(lhs.lower().split()) else lhs).strip(), False
-    return label, False
-
-
 def has_multiple_section_singers(analysis: Analysis, lyrics_text: str = "") -> bool:
     """Detect deterministically from lyric section tags whether more than one singer performs.
 
@@ -472,19 +329,7 @@ def has_multiple_section_singers(analysis: Analysis, lyrics_text: str = "") -> b
     """
     labels: list[str] = [line.section for line in analysis.lyric_lines if line.section]
     labels.extend(_section_order(lyrics_text))
-    singers: set[str] = set()
-    for raw in labels:
-        label = raw.strip()
-        if not label:
-            continue
-        cue, explicit = _section_cue(label)
-        if not cue:
-            continue
-        found = _singers_in_cue(cue, explicit=explicit, cased=label != label.lower())
-        if found is None:
-            return True
-        singers |= found
-    return len(singers) >= 2
+    return labels_have_multiple_singers(labels)
 
 
 def _section_order(lyrics_text: str) -> list[str]:
@@ -754,7 +599,344 @@ def _fix_mismatched_singer_prompt(
             shot.motion_prompt = pattern.sub(_replace_if_proper, shot.motion_prompt)
 
 
-def _direct_shots(manifest: Manifest, config: ProjectConfig, llm: LLMClient | None) -> None:
+_LOW_REGISTER_RE = re.compile(
+    r"\b(?:male|man|boy|guy|gentleman|baritone|bass|tenor|he|him|his)\b", flags=re.IGNORECASE
+)
+_HIGH_REGISTER_RE = re.compile(
+    r"\b(?:female|woman|girl|lady|soprano|mezzo|alto|she|her|hers)\b", flags=re.IGNORECASE
+)
+_EMPTY_SCENE_EXPLICIT_RE = re.compile(
+    r"\b(?:no\s+(?:people|person|performers?|singers?|figures?|humans?)|"
+    r"empty\s+of\s+people|completely\s+empty|uninhabited|devoid\s+of\s+people)\b",
+    flags=re.IGNORECASE,
+)
+_PERFORMER_CUE_RE = re.compile(
+    r"\b(?:singer|vocalist|performer|artist|musician|band|duet|couple|pair|"
+    r"man|woman|boy|girl|person|people|figure|figures|crowd|dancer|"
+    r"he|him|his|she|her|hers|they|them|their|"
+    r"face|eyes|hands|arms|shoulders|"
+    r"standing|sitting|walking|running|leaning|turning|looking|gazing|watching|"
+    r"holding|wearing|dressed|kneeling|stepping|reaching|dancing|moving)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _is_empty_scene_prompt(
+    prompt_text: str, characters: dict[str, Character] | None = None
+) -> bool:
+    """True when ``prompt_text`` describes an empty setting/object with no performer in frame."""
+    cleaned = prompt_text.strip()
+    if not cleaned:
+        return False
+    if _EMPTY_SCENE_EXPLICIT_RE.search(cleaned):
+        return True
+    if len(cleaned.split()) < 6:
+        return False
+    if characters and _characters_in_text(cleaned, characters):
+        return False
+    return not bool(_PERFORMER_CUE_RE.search(cleaned))
+
+
+def _register_rank(char: Character) -> int:
+    text = f"{char.name} {char.appearance}"
+    low = len(_LOW_REGISTER_RE.findall(text))
+    high = len(_HIGH_REGISTER_RE.findall(text))
+    return -1 if low > high else (1 if high > low else 0)
+
+
+def _map_voices_to_characters(analysis: Analysis, manifest: Manifest) -> dict[str, str]:
+    """Map diarized solo voice ids ('voice_1', 'voice_2') to ``manifest.characters`` ids."""
+    if not analysis.vocal_turns or len(manifest.characters) < 2:
+        return {}
+    voice_f0: dict[str, list[float]] = {}
+    for turn in analysis.vocal_turns:
+        if turn.voice == BOTH_VOICES:
+            continue
+        voice_f0.setdefault(turn.voice, []).append(turn.median_f0_hz or 0.0)
+    if not voice_f0:
+        return {}
+    ordered_voices = sorted(voice_f0, key=lambda v: statistics.median(voice_f0[v]))
+
+    overlaps: dict[tuple[str, str], float] = {}
+    for line in analysis.lyric_lines:
+        if line.start is None or line.end is None or not line.section:
+            continue
+        named = _characters_in_text(line.section, manifest.characters)
+        if len(named) != 1:
+            continue
+        cid = named[0]
+        for turn in analysis.vocal_turns:
+            if turn.voice == BOTH_VOICES:
+                continue
+            shared = turn.overlap(line.start, line.end)
+            if shared > 0:
+                overlaps[(turn.voice, cid)] = overlaps.get((turn.voice, cid), 0.0) + shared
+
+    mapping: dict[str, str] = {}
+    used_chars: set[str] = set()
+    for (voice, cid), seconds in sorted(overlaps.items(), key=lambda item: item[1], reverse=True):
+        if seconds >= 0.1 and voice not in mapping and cid not in used_chars:
+            mapping[voice] = cid
+            used_chars.add(cid)
+
+    if len(voice_f0) < 2:
+        return mapping
+
+    remaining_voices = [v for v in ordered_voices if v not in mapping]
+    remaining_chars = sorted(
+        (cid for cid in manifest.characters if cid not in used_chars),
+        key=lambda cid: _register_rank(manifest.characters[cid]),
+    )
+    for voice, cid in zip(remaining_voices, remaining_chars):
+        mapping[voice] = cid
+    return mapping
+
+
+_TOGETHER_PROMPT_RE = re.compile(
+    r"\b(?:sing(?:ing)?\s+together|both\s+sing(?:ing)?|in\s+unison|in\s+harmony)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _duet_character_ids(
+    characters: dict[str, Character], voice_map: dict[str, str] | None = None
+) -> list[str]:
+    """Primary pair/group of singing character ids for ensemble ('both') sections."""
+    if voice_map:
+        mapped = [cid for cid in characters if cid in set(voice_map.values())]
+        if len(mapped) >= 2:
+            return mapped
+    return list(characters.keys())
+
+
+def _resolve_designator_cue(
+    cue_key: str,
+    characters: dict[str, Character],
+    voice_map: dict[str, str] | None = None,
+) -> str | None:
+    """Resolve generic performer cues ('singer 1', 'male', 'female') to a character id."""
+    parts = cue_key.split()
+    if len(parts) == 2 and parts[1].isdigit():
+        idx = int(parts[1])
+        voice_key = f"voice_{idx}"
+        if voice_map and voice_key in voice_map:
+            return voice_map[voice_key]
+        ordered = sorted(characters, key=lambda cid: _register_rank(characters[cid]))
+        if 1 <= idx <= len(ordered):
+            return ordered[idx - 1]
+    want_rank = (
+        -1 if _LOW_REGISTER_RE.search(cue_key) else (1 if _HIGH_REGISTER_RE.search(cue_key) else 0)
+    )
+    if want_rank != 0:
+        matches = [cid for cid, char in characters.items() if _register_rank(char) == want_rank]
+        if len(matches) == 1:
+            return matches[0]
+    return None
+
+
+def _section_singers_for_shot(
+    shot: Shot,
+    characters: dict[str, Character],
+    voice_map: dict[str, str] | None = None,
+) -> list[str]:
+    """Character ids indicated by ``shot.section`` (1 for solo, 2+ for ensemble/both, 0 if none)."""
+    if not shot.section or not characters:
+        return []
+    cues = section_singers(shot.section)
+    if cues is None:
+        return _duet_character_ids(characters, voice_map)
+    named = _characters_in_text(shot.section, characters)
+    if named:
+        return named
+    resolved: list[str] = []
+    for cue in sorted(cues):
+        cid = _resolve_designator_cue(cue, characters, voice_map)
+        if cid and cid not in resolved:
+            resolved.append(cid)
+    return resolved
+
+
+def _shot_voice_dominance(shot: Shot, analysis: Analysis) -> tuple[str | None, float, float]:
+    """Return ``(dominant_voice, share_of_voiced_time, dominant_seconds)`` inside ``shot``."""
+    totals = voice_activity_in_span(analysis.vocal_turns, shot.start, shot.end)
+    if not totals:
+        return None, 0.0, 0.0
+    best_voice, best_sec = max(totals.items(), key=lambda pair: pair[1])
+    total_sec = sum(totals.values())
+    return best_voice, (best_sec / total_sec if total_sec > 0 else 0.0), best_sec
+
+
+def _resolve_shot_singers(
+    shot: Shot,
+    analysis: Analysis | None,
+    characters: dict[str, Character],
+    voice_map: dict[str, str] | None = None,
+) -> list[str]:
+    """Resolve active singing character ids for ``shot`` (1 = solo, 2+ = singing together)."""
+    if not characters:
+        return []
+    sec_singers = _section_singers_for_shot(shot, characters, voice_map)
+    if analysis is None or not analysis.vocal_turns:
+        return sec_singers
+    best_voice, share, seconds = _shot_voice_dominance(shot, analysis)
+    if best_voice is None or seconds < 0.15:
+        return sec_singers
+    if best_voice == BOTH_VOICES and len(characters) >= 2:
+        together = (
+            sec_singers if len(sec_singers) >= 2 else _duet_character_ids(characters, voice_map)
+        )
+        if not sec_singers and share >= 0.55 and seconds >= 0.20:
+            return together
+        if len(sec_singers) >= 2:
+            return together
+        if len(sec_singers) == 1 and share >= 0.75 and seconds >= 0.30:
+            return together
+    if voice_map and best_voice in voice_map:
+        acoustic_char = voice_map[best_voice]
+        if not sec_singers and share >= 0.70:
+            return [acoustic_char]
+        if len(sec_singers) >= 2 and share >= 0.85 and seconds >= 0.25:
+            return [acoustic_char]
+        if len(sec_singers) == 1 and share >= 0.85:
+            return [acoustic_char]
+    return sec_singers
+
+
+def _shot_singer_hint(
+    shot: Shot,
+    analysis: Analysis | None,
+    characters: dict[str, Character],
+    voice_map: dict[str, str] | None = None,
+) -> str | None:
+    """Return the solo singer id for ``shot``, or ``None`` when shared ('both') or untagged."""
+    if characters:
+        resolved = _resolve_shot_singers(shot, analysis, characters, voice_map)
+        return resolved[0] if len(resolved) == 1 else None
+    if analysis is None or not analysis.vocal_turns:
+        return None
+    best_voice, share, seconds = _shot_voice_dominance(shot, analysis)
+    if best_voice is None or best_voice == BOTH_VOICES or seconds < 0.15:
+        return None
+    return best_voice if share >= 0.70 else None
+
+
+def _merge_spans(spans: list[tuple[float, float]], gap: float = 0.02) -> list[tuple[float, float]]:
+    if not spans:
+        return []
+    ordered = sorted((a, b) for a, b in spans if b > a)
+    if not ordered:
+        return []
+    merged: list[list[float]] = [[ordered[0][0], ordered[0][1]]]
+    for start, end in ordered[1:]:
+        if start <= merged[-1][1] + gap:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(a, b) for a, b in merged]
+
+
+def _neighbor_singer_ids(manifest: Manifest, shot: Shot) -> set[str]:
+    active = manifest.active_singer_ids(shot)
+    if active:
+        return active
+    if shot.character and (resolved := manifest.resolve_character_id(shot.character)):
+        return {resolved}
+    return set()
+
+
+def _populate_slice_mutes(
+    manifest: Manifest,
+    analysis: Analysis,
+    voice_map: dict[str, str],
+) -> None:
+    """Record foreign-singer mute spans on lip-sync slices so voices never bleed across cuts."""
+    shots = manifest.shots
+    multi_char = len(manifest.characters) > 1
+    for idx, shot in enumerate(shots):
+        if shot.type is not ShotType.LIPSYNC:
+            shot.audio_slice.mute_spans = []
+            continue
+        s_start, s_end = shot.audio_slice.start, shot.audio_slice.end
+        active = manifest.active_singer_ids(shot)
+        is_together = len(active) >= 2
+        handle_mutes: list[tuple[float, float]] = []
+        body_mutes: list[tuple[float, float]] = []
+
+        if multi_char and active:
+            if idx > 0 and s_start < shot.start:
+                prev_singers = _neighbor_singer_ids(manifest, shots[idx - 1])
+                if prev_singers and prev_singers != active:
+                    handle_mutes.append((s_start, shot.start))
+            if idx + 1 < len(shots) and s_end > shot.end:
+                next_singers = _neighbor_singer_ids(manifest, shots[idx + 1])
+                if next_singers and next_singers != active:
+                    handle_mutes.append((shot.end, s_end))
+
+        own_voice = dominant_voice(analysis.vocal_turns, shot.start, shot.end)
+        is_together_voice = is_together or own_voice == BOTH_VOICES
+        for turn in analysis.vocal_turns:
+            ov_s = max(s_start, turn.start)
+            ov_e = min(s_end, turn.end)
+            if ov_e - ov_s < 0.01:
+                continue
+            turn_char = voice_map.get(turn.voice)
+            if is_together_voice:
+                # On simultaneous duet shots, both mapped vocalists belong inside the shot body,
+                # while solo turns bleeding into handles from adjacent solo bars are muted (unless
+                # overlapping solo turns make the handle itself simultaneous 'both').
+                foreign_in_body = bool(active and turn_char is not None and turn_char not in active)
+                handle_is_both = turn.voice == BOTH_VOICES or (
+                    (
+                        ov_s < shot.start
+                        and dominant_voice(analysis.vocal_turns, ov_s, min(ov_e, shot.start))
+                        == BOTH_VOICES
+                    )
+                    or (
+                        ov_e > shot.end
+                        and dominant_voice(analysis.vocal_turns, max(ov_s, shot.end), ov_e)
+                        == BOTH_VOICES
+                    )
+                )
+                foreign_in_handle = foreign_in_body or not handle_is_both
+            elif turn.voice == BOTH_VOICES:
+                # A solo singer is part of 'both' inside their own shot body, so only mute handles.
+                foreign_in_body = False
+                foreign_in_handle = bool(active or own_voice is not None)
+            else:
+                foreign_solo = (
+                    turn_char is not None and bool(active) and turn_char not in active
+                ) or (not voice_map and own_voice is not None and turn.voice != own_voice)
+                foreign_in_body = foreign_solo
+                foreign_in_handle = foreign_solo
+
+            if foreign_in_handle:
+                if ov_s < shot.start:
+                    handle_mutes.append((ov_s, min(ov_e, shot.start)))
+                if ov_e > shot.end:
+                    handle_mutes.append((max(ov_s, shot.end), ov_e))
+            if foreign_in_body:
+                in_s, in_e = max(ov_s, shot.start), min(ov_e, shot.end)
+                if in_e - in_s >= 0.01:
+                    body_mutes.append((in_s, in_e))
+
+        merged_body = _merge_spans(body_mutes)
+        muted_body_dur = sum(b - a for a, b in merged_body)
+        # Never mute the entire shot body if diarization disagreed with every frame of the shot.
+        keep_body = shot.duration - muted_body_dur >= 0.20
+        combined = _merge_spans(handle_mutes + (merged_body if keep_body else []))
+        shot.audio_slice.mute_spans = [
+            TimeSpan(start=round(a, 3), end=round(b, 3)) for a, b in combined if b - a >= 0.01
+        ]
+
+
+def _direct_shots(
+    manifest: Manifest,
+    config: ProjectConfig,
+    llm: LLMClient | None,
+    *,
+    analysis: Analysis | None = None,
+    voice_map: dict[str, str] | None = None,
+) -> None:
     monotonic = config.planning.wardrobe_monotonic
     wardrobe = _Wardrobe(manifest.character.wardrobe_ids, monotonic)
     cast_wardrobes = {
@@ -774,6 +956,8 @@ def _direct_shots(manifest: Manifest, config: ProjectConfig, llm: LLMClient | No
                     cast_wardrobes,
                     llm,
                     allow_multicut=config.planning.allow_multicut_shots,
+                    analysis=analysis,
+                    voice_map=voice_map,
                 )
             except LLMError as exc:
                 # One bad batch must not lose the whole plan: these shots get simple rule-based
@@ -795,17 +979,21 @@ def _direct_shots(manifest: Manifest, config: ProjectConfig, llm: LLMClient | No
                 allow_multicut=config.planning.allow_multicut_shots,
                 lipsync_widest=config.planning.lipsync_widest_framing,
                 allow_broll_conversion=can_cutaway,
+                characters=manifest.characters,
             )
             if not shot.type.shows_singer:
                 shot.character = None
                 shot.characters = []
+                shot.singers = []
                 shot.wardrobe = None
                 shot.character_wardrobes = {}
                 continue
             if not manifest.characters:
+                shot.singers = []
                 shot.wardrobe = wardrobe.assign(item.wardrobe if item else None, shot.id)
                 continue
 
+            enforced_singers = _resolve_shot_singers(shot, analysis, manifest.characters, voice_map)
             section_chars = _characters_in_text(shot.section, manifest.characters)
             requested_char: str | None = None
             if item and item.character:
@@ -816,21 +1004,30 @@ def _direct_shots(manifest: Manifest, config: ProjectConfig, llm: LLMClient | No
                         shot.id,
                         item.character,
                     )
-            if shot.type is ShotType.LIPSYNC and len(section_chars) == 1:
-                resolved_primary: str | None = section_chars[0]
+
+            is_together = shot.type is ShotType.LIPSYNC and len(enforced_singers) >= 2
+            if is_together:
+                resolved_primary: str | None = (
+                    requested_char if requested_char in enforced_singers else enforced_singers[0]
+                )
+            elif shot.type is ShotType.LIPSYNC and len(enforced_singers) == 1:
+                resolved_primary = enforced_singers[0]
             else:
                 resolved_primary = (
                     requested_char
+                    or (enforced_singers[0] if enforced_singers else None)
                     or (section_chars[0] if section_chars else None)
                     or manifest.primary_character_id()
                 )
             if resolved_primary is None:
                 continue
             primary_id = resolved_primary
-            if shot.type is ShotType.LIPSYNC and len(section_chars) == 1:
-                _fix_mismatched_singer_prompt(shot, primary_id, manifest.characters)
 
             visible_ids = [primary_id]
+            if is_together:
+                for cid in enforced_singers:
+                    if cid not in visible_ids:
+                        visible_ids.append(cid)
             if item and item.characters:
                 for raw_cid in item.characters:
                     resolved = manifest.resolve_character_id(raw_cid)
@@ -845,8 +1042,47 @@ def _direct_shots(manifest: Manifest, config: ProjectConfig, llm: LLMClient | No
             ):
                 if mentioned_id not in visible_ids:
                     visible_ids.append(mentioned_id)
-            if shot.type is ShotType.LIPSYNC and shot.framing is Framing.CLOSE_UP:
-                visible_ids = [primary_id]
+
+            if (
+                shot.type is ShotType.LIPSYNC
+                and not enforced_singers
+                and len(visible_ids) >= 2
+                and _TOGETHER_PROMPT_RE.search(f"{shot.still_prompt} {shot.motion_prompt}")
+            ):
+                is_together = True
+                enforced_singers = list(visible_ids)
+
+            if shot.type is ShotType.LIPSYNC:
+                if is_together:
+                    shot.singers = [
+                        primary_id,
+                        *(cid for cid in enforced_singers if cid != primary_id),
+                    ]
+                    if shot.framing is Framing.CLOSE_UP:
+                        shot.framing = Framing.MEDIUM_CLOSE
+                    if item is None:
+                        names = prompts.join_names(
+                            [manifest.characters[cid].name or cid for cid in shot.singers]
+                        )
+                        energy = (
+                            "high-energy" if pace_label(shot.intensity) == "high" else "restrained"
+                        )
+                        shot.still_prompt = (
+                            f"Medium close-up two-shot of {names} singing together directly to "
+                            f"camera, {energy} mood, {shot.setting}."
+                        )
+                        shot.motion_prompt = (
+                            f"{names} sing the line together in harmony with natural head "
+                            "movement. Steady camera."
+                        )
+                else:
+                    shot.singers = [primary_id]
+                    if len(enforced_singers) == 1:
+                        _fix_mismatched_singer_prompt(shot, primary_id, manifest.characters)
+                    if shot.framing is Framing.CLOSE_UP:
+                        visible_ids = [primary_id]
+            else:
+                shot.singers = []
 
             shot.character = primary_id
             shot.characters = visible_ids
@@ -876,6 +1112,8 @@ def _ask_for_batch(
     llm: LLMClient,
     *,
     allow_multicut: bool = False,
+    analysis: Analysis | None = None,
+    voice_map: dict[str, str] | None = None,
 ) -> dict[str, ShotCreative]:
     bible, character = manifest.visual_bible, manifest.character
     lines = []
@@ -949,9 +1187,16 @@ def _ask_for_batch(
         last_pace = pace
         singer_hint = ""
         if len(manifest.characters) > 1:
-            sec_chars = _characters_in_text(s.section, manifest.characters)
-            if sec_chars:
-                singer_hint = f"singer={sec_chars[0]!r} "
+            resolved_singers = _resolve_shot_singers(s, analysis, manifest.characters, voice_map)
+            if len(resolved_singers) >= 2:
+                joined = ", ".join(repr(cid) for cid in resolved_singers)
+                singer_hint = f"vocal='together' singers=[{joined}] "
+            elif len(resolved_singers) == 1:
+                singer_hint = f"vocal='solo' singer={resolved_singers[0]!r} "
+            else:
+                sec_chars = _characters_in_text(s.section, manifest.characters)
+                if sec_chars:
+                    singer_hint = f"vocal='solo' singer={sec_chars[0]!r} "
         shot_lines.append(
             f"- id={s.id} section={s.section or '(instrumental lead-in)'!r} {singer_hint}"
             f"at={_clock(s.start)} ({s.start / total:.0%} through the song) type={s.type.value} "
@@ -989,6 +1234,7 @@ def _apply_creative(
     allow_multicut: bool = False,
     lipsync_widest: Framing = Framing.MEDIUM_CLOSE,
     allow_broll_conversion: bool = True,
+    characters: dict[str, Character] | None = None,
 ) -> None:
     """Copy the model's choices onto a shot, enforcing the rules it must not break."""
     if creative is None:
@@ -1003,7 +1249,27 @@ def _apply_creative(
         _apply_rule_based_with_set(shot, bible, creative.setting)
         return
     if shot.type is ShotType.PERFORMANCE and creative.type is not ShotType.LIPSYNC:
-        if creative.type is ShotType.BROLL and not allow_broll_conversion:
+        effective_type = creative.type
+        if effective_type is ShotType.PERFORMANCE and _is_empty_scene_prompt(
+            creative.still_prompt, characters
+        ):
+            if allow_broll_conversion:
+                log.info(
+                    "%s: performance still_prompt describes an empty scene with no performer; "
+                    "converting to broll cutaway",
+                    shot.id,
+                )
+                effective_type = ShotType.BROLL
+            else:
+                log.warning(
+                    "%s: performance still_prompt omitted the performer after %d cutaways; "
+                    "using rule-based performance direction",
+                    shot.id,
+                    _MAX_CUTAWAY_RUN,
+                )
+                _apply_rule_based_with_set(shot, bible, creative.setting)
+                return
+        if effective_type is ShotType.BROLL and not allow_broll_conversion:
             log.warning(
                 "%s: keeping performance shot with rule-based direction so the singer is not off "
                 "screen for more than %d shots in a row",
@@ -1012,7 +1278,7 @@ def _apply_creative(
             )
             _apply_rule_based_with_set(shot, bible, creative.setting)
             return
-        shot.type = creative.type
+        shot.type = effective_type
     shot.framing = creative.framing or _default_framing(shot)
     if shot.type is ShotType.LIPSYNC and _TIGHT_TO_WIDE.index(shot.framing) > _TIGHT_TO_WIDE.index(
         lipsync_widest
@@ -1022,7 +1288,17 @@ def _apply_creative(
     shot.allow_cuts = bool(allow_multicut and creative.allow_cuts)
     shot.props = _resolve_props(bible, creative.props, shot.id)
     shot.still_prompt = creative.still_prompt
-    shot.motion_prompt = creative.motion_prompt
+    if (
+        shot.type is ShotType.BROLL
+        and creative.type is ShotType.PERFORMANCE
+        and (
+            _PERFORMER_CUE_RE.search(creative.motion_prompt)
+            or bool(characters and _characters_in_text(creative.motion_prompt, characters))
+        )
+    ):
+        shot.motion_prompt = _BROLL_PACE_MOTION[pace_label(shot.intensity)]
+    else:
+        shot.motion_prompt = creative.motion_prompt
 
 
 def _resolve_props(bible: VisualBible, raw_props: list[str], shot_id: str) -> list[str]:

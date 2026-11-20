@@ -157,6 +157,26 @@ concept, optional target duration, and musical/visual vibe, write:
 - visual_direction: a short creative brief covering the performer look, key costume states,
   locations, lighting, palette, and story beats for mvdirector's visual bible."""
 
+INFER_FROM_LYRICS_SYSTEM = """You are a music video director and producer preparing a project from
+a finished audio track with no existing lyrics file or style brief. Given a timestamped vocal
+transcript and a compact audio summary (duration, BPM, vocal coverage, energy arc), return:
+
+- lyrics: the transcribed words organized under [Section] headers ([Intro], [Verse 1],
+  [Pre-Chorus], [Chorus], [Verse 2], [Bridge], [Outro]; for duets or alternating vocalists, tag
+  sections like [Verse 1: Singer 1]). Strictly preserve the actual sung words from the transcript
+  so word-level audio alignment for lip-sync stays accurate—fix only capitalization, punctuation,
+  and line breaks, and never invent new verses or rewrite sung words. Put ONLY sung adlibs in
+  (parentheses); never put unspoken SFX or stage directions in parentheses. If the track is
+  instrumental with no transcribed words, return "[Instrumental]".
+- music_style: a concise musical style description inferred from the lyrics' tone, structure,
+  tempo, and energy arc (genre, vocal register/delivery, rhythm feel, and production mood).
+- visual_direction: a concrete creative brief for mvdirector's visual bible inferred from the
+  lyrics' themes, imagery, persona, and emotional arc. Cover the singer/performer's look and
+  costume arc, 3 to 5 concrete locations/sets grounded in the lyrical imagery, lighting, color
+  palette, and story beats. Explicitly design for on-camera lip-synced singing performance during
+  vocal hooks and key verses (clear, well-lit, unobstructed face and mouth with no masks or
+  foreground obstructions) intercut with atmospheric/narrative cutaways inspired by the lyrics."""
+
 PERFORMANCE_MOTION = (
     "The singer moves with the music, mouth closed, not singing. Slow, steady camera drift."
 )

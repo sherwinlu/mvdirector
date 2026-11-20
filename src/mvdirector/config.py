@@ -120,6 +120,45 @@ class InputsConfig(_Section):
     )
 
 
+_SAFE_MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_SAFE_LANG_CODE = re.compile(r"^[a-z]{2,3}$")
+
+
+class PrepareConfig(_Section):
+    stem_model: str = Field(
+        default="htdemucs",
+        description="Demucs model name used by `mvd prepare` to separate vocals (and drums).",
+    )
+    stem_device: Literal["auto", "cpu", "cuda", "mps"] = Field(
+        default="auto",
+        description="PyTorch device for stem separation ('auto' lets Demucs choose cuda/mps/cpu).",
+    )
+    whisper_model: str = Field(
+        default="small",
+        description="faster-whisper model size used for lyric transcription and alignment.",
+    )
+    whisper_language: str | None = Field(
+        default=None,
+        description="Optional ISO-639-1 language code for transcription (e.g. 'en'); null = auto.",
+    )
+
+    @field_validator("stem_model", "whisper_model")
+    @classmethod
+    def _check_model_name(cls, value: str) -> str:
+        if not _SAFE_MODEL_NAME.match(value):
+            raise ValueError(f"Invalid model name {value!r}: use letters, digits, '.', '_' or '-'.")
+        return value
+
+    @field_validator("whisper_language")
+    @classmethod
+    def _check_language(cls, value: str | None) -> str | None:
+        if value is not None and not _SAFE_LANG_CODE.match(value):
+            raise ValueError(
+                f"Invalid language code {value!r}: expected a 2- or 3-letter lowercase ISO code."
+            )
+        return value
+
+
 _SNAP_ASPECT_TOLERANCE = 0.03  # the default qc aspect_tolerance
 
 
@@ -588,6 +627,7 @@ class ProjectConfig(_Section):
     title: str = "Untitled"
     seed: int = 1234
     inputs: InputsConfig = Field(default_factory=InputsConfig)
+    prepare: PrepareConfig = Field(default_factory=PrepareConfig)
     video: VideoConfig = Field(default_factory=VideoConfig)
     comfy: ComfyConfig = Field(default_factory=ComfyConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)

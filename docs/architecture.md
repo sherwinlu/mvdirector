@@ -20,8 +20,9 @@ src/mvdirector/
                       prompts.py (prompt text), brief.py (`mvd brief`), previz.py (3D camera plans)
   comfy/              workflow.py (templates + bindings), client.py (HTTP),
                       provider.py (ComfyEndpointProvider: which endpoint serves a stage)
-  qc/                 scoring, common.py, image and video gates, lipsync maths, faces,
-                      vision (judge + prompt), factory
+  qc/                 scoring, common.py, image and video gates, lipsync maths, syncnet
+                      (LatentSync StableSyncNet + MediaPipe), faces, vision (judge + prompt),
+                      factory
   retry.py            retry policy
   report.py           per-check tallies for `mvd qc-report`
   cleanup.py          superseded and orphaned generations for `mvd clean`
@@ -59,7 +60,7 @@ Changing `models.py` changes the manifest format. Once a release has shipped, bu
 
 ## Extending
 
-- **Another face or lip-sync backend:** implement `FaceAnalyzer` or `MouthTracker` (`qc/faces.py`) and construct it in `qc/factory.py`. A SyncNet-style scorer fits behind `MouthTracker` or as an extra check in `qc/video.py`.
+- **Another face or lip-sync backend:** implement `FaceAnalyzer` / `MouthTracker` (`qc/faces.py`) or `LipSyncScorer` (`qc/lipsync.py`, as `StableSyncNetScorer` in `qc/syncnet.py` does) and construct it in `qc/factory.py`.
 - **A new check:** return a `CheckResult` from the image or video gate and give it a weight under `qc.weights`.
 - **A new retry strategy:** add it to `RetryStrategy` and handle it in `RetryPolicy.prepare`.
 - **Another model provider:** subclass `ChatBackend` in `llm/` (implement `_send`, translating the neutral content blocks) and add it to `PROVIDERS` and `build_llm` in `llm/factory.py`.

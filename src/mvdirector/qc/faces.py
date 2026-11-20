@@ -13,7 +13,6 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
-import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +23,7 @@ import numpy as np
 from PIL import Image
 
 from mvdirector.errors import DependencyMissing
+from mvdirector.qc.common import download_cached_model
 
 log = logging.getLogger(__name__)
 _ModelT = TypeVar("_ModelT")
@@ -50,61 +50,16 @@ def _mediapipe_cache_dir() -> Path:
 
 
 def _ensure_mediapipe_model(filename: str, url: str, model_path: Path | None = None) -> Path:
-    if model_path is not None:
-        if model_path.is_file() and model_path.stat().st_size > 0:
-            return model_path
-        raise DependencyMissing(f"MediaPipe model file not found: {model_path}")
-
-    target = _mediapipe_cache_dir() / filename
-    if target.is_file() and target.stat().st_size > 0:
-        return target
-
-    log.info("Downloading MediaPipe model %s to %s", filename, target)
-    tmp_path: Path | None = None
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            dir=target.parent, prefix=f".{filename}.", suffix=".part", delete=False
-        ) as handle:
-            tmp_path = Path(handle.name)
-            with (
-                httpx.Client(follow_redirects=True, timeout=60.0) as client,
-                client.stream("GET", url) as response,
-            ):
-                response.raise_for_status()
-                encoding = response.headers.get("content-encoding", "identity").strip().lower()
-                expected = (
-                    response.headers.get("content-length") if encoding in ("", "identity") else None
-                )
-                for chunk in response.iter_bytes():
-                    handle.write(chunk)
-        size = tmp_path.stat().st_size
-        if expected and expected.isdigit() and size != int(expected):
-            raise DependencyMissing(
-                f"Incomplete download of MediaPipe model '{filename}' ({size} of {expected} "
-                f"bytes). Retry, or place the file at {target}."
-            )
-        if size == 0:
-            raise DependencyMissing(
-                f"Downloaded empty MediaPipe model from {url}. "
-                f"Place the file at {target} or set qc.on_missing_dependency: skip."
-            )
-        # NamedTemporaryFile uses 0600; make cached models readable by non-root container users.
-        os.chmod(tmp_path, 0o644)
-        os.replace(tmp_path, target)
-        tmp_path = None
-        return target
-    except DependencyMissing:
-        raise
-    except (httpx.HTTPError, OSError) as exc:
-        raise DependencyMissing(
-            f"Failed to download MediaPipe model '{filename}' from {url} ({exc}). "
-            f"Place the file at {target} (or set MVD_MEDIAPIPE_CACHE_DIR), or set "
-            "qc.on_missing_dependency: skip in project.yaml."
-        ) from exc
-    finally:
-        if tmp_path is not None:
-            tmp_path.unlink(missing_ok=True)
+    return download_cached_model(
+        filename,
+        url,
+        _mediapipe_cache_dir(),
+        model_path=model_path,
+        label="MediaPipe model",
+        env_var="MVD_MEDIAPIPE_CACHE_DIR",
+        timeout=60.0,
+        client_factory=httpx.Client,
+    )
 
 
 def _load_mediapipe_model(
@@ -173,6 +128,7 @@ def _to_mp_image(mp_module: Any, image: np.ndarray) -> Any:
 class Face:
     height_fraction: float  # face box height / frame height
     embedding: np.ndarray | None = None  # L2-normalised identity vector, when available
+    bbox: tuple[int, int, int, int] | None = None  # (x1, y1, x2, y2) in frame pixels, when known
 
 
 class FaceAnalyzer(Protocol):
@@ -273,13 +229,26 @@ class MediaPipeFaceAnalyzer:
             raise RuntimeError("MediaPipeFaceAnalyzer has been closed")
         if not _validate_rgb_image(image):
             return []
-        frame_height = image.shape[0]
+        frame_height, frame_width = image.shape[0], image.shape[1]
         result = self._detector.detect(_to_mp_image(self._mp, image))
         found: list[Face] = []
         for detection in result.detections or []:
-            height_fraction = float(np.clip(detection.bounding_box.height / frame_height, 0.0, 1.0))
-            if height_fraction > 0:
-                found.append(Face(height_fraction=height_fraction, embedding=None))
+            box = detection.bounding_box
+            height_fraction = float(np.clip(box.height / frame_height, 0.0, 1.0))
+            if height_fraction <= 0:
+                continue
+            bbox: tuple[int, int, int, int] | None = None
+            origin_x = getattr(box, "origin_x", None)
+            origin_y = getattr(box, "origin_y", None)
+            box_w = getattr(box, "width", None)
+            if origin_x is not None and origin_y is not None and box_w is not None:
+                x1 = max(0, min(frame_width, int(round(origin_x))))
+                y1 = max(0, min(frame_height, int(round(origin_y))))
+                x2 = max(x1, min(frame_width, int(round(origin_x + box_w))))
+                y2 = max(y1, min(frame_height, int(round(origin_y + box.height))))
+                if x2 > x1 and y2 > y1:
+                    bbox = (x1, y1, x2, y2)
+            found.append(Face(height_fraction=height_fraction, embedding=None, bbox=bbox))
         return sorted(found, key=lambda face: face.height_fraction, reverse=True)
 
 
@@ -298,14 +267,20 @@ class InsightFaceAnalyzer:
         self._app.prepare(ctx_id=-1, det_size=(640, 640))
 
     def faces(self, image: np.ndarray) -> list[Face]:
-        height = image.shape[0]
-        found = [
-            Face(
-                height_fraction=float(f.bbox[3] - f.bbox[1]) / height,
-                embedding=np.asarray(f.normed_embedding),
+        height, width = image.shape[0], image.shape[1]
+        found = []
+        for f in self._app.get(image[:, :, ::-1]):  # insightface expects BGR
+            x1 = max(0, min(width, int(round(float(f.bbox[0])))))
+            y1 = max(0, min(height, int(round(float(f.bbox[1])))))
+            x2 = max(x1, min(width, int(round(float(f.bbox[2])))))
+            y2 = max(y1, min(height, int(round(float(f.bbox[3])))))
+            found.append(
+                Face(
+                    height_fraction=float(f.bbox[3] - f.bbox[1]) / height,
+                    embedding=np.asarray(f.normed_embedding),
+                    bbox=(x1, y1, x2, y2) if (x2 > x1 and y2 > y1) else None,
+                )
             )
-            for f in self._app.get(image[:, :, ::-1])  # insightface expects BGR
-        ]
         return sorted(found, key=lambda face: face.height_fraction, reverse=True)
 
 

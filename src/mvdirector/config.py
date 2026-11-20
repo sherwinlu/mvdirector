@@ -488,6 +488,28 @@ class QCConfig(_Section):
             "identity checks, whose pretrained weights are non-commercial research only)."
         ),
     )
+    lipsync_backend: Literal["mediapipe", "stable_syncnet"] = Field(
+        default="mediapipe",
+        description=(
+            "Lip-sync scorer backend: 'mediapipe' (default, Apache-2.0, CPU-only mouth-opening "
+            "vs. vocal-loudness correlation) or 'stable_syncnet' (ByteDance LatentSync "
+            "stable_syncnet.pt under OpenRAIL++ paired with Apache-2.0 MediaPipe Face Detector "
+            "for face cropping; requires the 'qc' and 'syncnet' extras)."
+        ),
+    )
+    syncnet_model_path: str | None = Field(
+        default=None,
+        description=(
+            "Optional local path to ByteDance LatentSync's stable_syncnet.pt checkpoint. "
+            "When unset, downloaded and cached automatically on first use."
+        ),
+    )
+    syncnet_device: Literal["auto", "cpu", "cuda", "mps"] = Field(
+        default="auto",
+        description=(
+            "PyTorch device for qc.lipsync_backend: stable_syncnet ('auto' picks cuda/mps/cpu)."
+        ),
+    )
     on_missing_dependency: Literal["skip", "fail"] = Field(
         default="fail",
         description=(
@@ -495,6 +517,12 @@ class QCConfig(_Section):
             "'skip' logs a warning and omits the check."
         ),
     )
+
+    @field_validator("syncnet_model_path", mode="before")
+    @classmethod
+    def _expand_syncnet_model_path(cls, value: Any) -> Any:
+        return expand_env(value)
+
     weights: dict[str, float] = Field(
         default_factory=lambda: {
             "lipsync": 3.0,

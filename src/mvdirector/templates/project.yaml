@@ -98,6 +98,7 @@ qc:
   pass_score: 0.70
   vision_enabled: true
   face_backend: mediapipe        # mediapipe (Apache-2.0, commercial-safe) | insightface (non-commercial research)
+  lipsync_backend: mediapipe     # mediapipe (Apache-2.0, CPU) | stable_syncnet (LatentSync OpenRAIL++ + MediaPipe)
   on_missing_dependency: fail    # fail (recommended) | skip
   # image: and video: thresholds are listed in the README; calibrate them on your own clips.
 

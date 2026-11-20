@@ -316,6 +316,9 @@ class ComfyConfig(_Section):
 
 
 LLMProvider = Literal["anthropic", "openai", "gemini", "ollama", "openai_compatible"]
+# The default model is a local one, so no API key or network service is needed out of the box.
+DEFAULT_LLM_PROVIDER: LLMProvider = "ollama"
+DEFAULT_LLM_MODEL = "gemma3:12b"
 
 
 class LLMConfig(_Section):
@@ -323,11 +326,11 @@ class LLMConfig(_Section):
 
     enabled: bool = True
     provider: LLMProvider = Field(
-        default="anthropic",
-        description="anthropic, openai, gemini, ollama (native API), or openai_compatible "
-        "(LM Studio, llama.cpp, vLLM, OpenRouter and similar).",
+        default=DEFAULT_LLM_PROVIDER,
+        description="ollama (native API, local, the default), anthropic, openai, gemini, or "
+        "openai_compatible (LM Studio, llama.cpp, vLLM, OpenRouter and similar).",
     )
-    model: str = "claude-sonnet-5-5"
+    model: str = DEFAULT_LLM_MODEL
     base_url: str | None = Field(
         default=None,
         description="Server address. Required for openai_compatible; optional for other providers.",
@@ -358,8 +361,8 @@ class LLMConfig(_Section):
     def _check_provider(self) -> LLMConfig:
         if not self.model.strip():
             raise ValueError("llm.model must not be empty")
-        if self.provider != "anthropic" and "model" not in self.model_fields_set:
-            # The default names a Claude model, which no other provider has.
+        if self.provider != DEFAULT_LLM_PROVIDER and "model" not in self.model_fields_set:
+            # The default names an Ollama model, which no other provider has.
             raise ValueError(
                 f"llm.model must be set when llm.provider is '{self.provider}'. Use the model "
                 "name your provider or server lists."

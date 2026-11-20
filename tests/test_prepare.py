@@ -162,6 +162,31 @@ class _FakeInferLLM:
         return self.reply
 
 
+def test_llm_lyrics_that_rewrite_the_song_fall_back_to_the_transcript() -> None:
+    summary = AudioSummary(12.0, 120.0, [TimeSpan(start=2.0, end=10.0)], 0.667, [])
+    transcript = _FakeTranscriber().transcript
+
+    rewritten = InferredInputsReply(
+        lyrics="[Verse]\nSomething completely different\nTotally new words here",
+        music_style="Synthwave",
+        visual_direction="Neon alley",
+    )
+    reply, _ = infer_inputs_from_transcript(transcript, summary, llm=_FakeInferLLM(rewritten))
+    assert "walking through the midnight rain" in reply.lyrics
+    assert "completely different" not in reply.lyrics
+
+    # A light edit (one contraction) keeps the model's section structure.
+    lightly_edited = InferredInputsReply(
+        lyrics=(
+            "[Verse 1]\nWalking through the midnight rain\n\n[Chorus]\nCalling out your neon nam"
+        ),
+        music_style="Synthwave",
+        visual_direction="Neon alley",
+    )
+    reply, _ = infer_inputs_from_transcript(transcript, summary, llm=_FakeInferLLM(lightly_edited))
+    assert "[Chorus]" in reply.lyrics
+
+
 def test_prepare_config_validation() -> None:
     cfg = PrepareConfig()
     assert cfg.stem_model == "htdemucs"

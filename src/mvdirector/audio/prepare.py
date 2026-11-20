@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +30,8 @@ from mvdirector.audio.lyrics import (
     Transcript,
     WhisperTranscriber,
     format_transcript_as_lyrics,
+    parse_lyrics,
+    tokenize,
 )
 from mvdirector.audio.stems import (
     SUPPORTED_AUDIO_SUFFIXES,
@@ -44,6 +47,10 @@ from mvdirector.planning.brief import ensure_writable
 from mvdirector.project import Project
 
 log = logging.getLogger(__name__)
+
+# Minimum token similarity between the model's lyrics and the transcript. Below it the model
+# rewrote the song, which would break word-level lyric alignment, so the transcript is used.
+MIN_LYRIC_FIDELITY = 0.85
 
 
 class InferredInputsReply(BaseModel):
@@ -199,6 +206,15 @@ def _build_inference_prompt(transcript: Transcript, summary: AudioSummary) -> st
     return "\n".join(header) + "\n\n" + body
 
 
+def lyric_fidelity(lyrics: str, transcript: Transcript) -> float:
+    """Share (0-1) of words that the lyrics and the transcript have in common, in order."""
+    sung = tokenize(" ".join(seg.text for seg in transcript.segments))
+    written = tokenize(" ".join(line.text for line in parse_lyrics(lyrics)))
+    if not sung and not written:
+        return 1.0
+    return SequenceMatcher(a=sung, b=written, autojunk=False).ratio()
+
+
 def infer_inputs_from_transcript(
     transcript: Transcript,
     summary: AudioSummary,
@@ -226,6 +242,14 @@ def infer_inputs_from_transcript(
     lyrics_text = reply.lyrics.strip()
     if not lyrics_text:
         lyrics_text = format_transcript_as_lyrics(transcript.segments).strip()
+    else:
+        fidelity = lyric_fidelity(lyrics_text, transcript)
+        if fidelity < MIN_LYRIC_FIDELITY:
+            log.warning(
+                "The model's lyrics match only %.0f%% of the transcript; using the transcript.",
+                fidelity * 100,
+            )
+            lyrics_text = format_transcript_as_lyrics(transcript.segments).strip()
     if not reply.music_style.strip() or not reply.visual_direction.strip():
         raise ConfigError("The model returned an empty music_style or visual_direction.")
     return (

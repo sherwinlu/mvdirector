@@ -23,6 +23,9 @@ log = logging.getLogger(__name__)
 
 ANALYSIS_SR = 22050
 HOP_LENGTH = 512
+# Tempos outside this range are folded by whole octaves: beat trackers often lock onto half or
+# double time (a slow blues reads as 185 BPM), and cuts follow the beat grid.
+TEMPO_RANGE_BPM = (70.0, 160.0)
 
 
 def load_mono(path: Path, sr: int = ANALYSIS_SR) -> np.ndarray:
@@ -32,13 +35,32 @@ def load_mono(path: Path, sr: int = ANALYSIS_SR) -> np.ndarray:
     return samples
 
 
+def fold_tempo(
+    tempo: float,
+    beats: list[float],
+    low: float = TEMPO_RANGE_BPM[0],
+    high: float = TEMPO_RANGE_BPM[1],
+) -> tuple[float, list[float]]:
+    """Halve or double ``tempo`` until it is within [low, high], adjusting ``beats`` to match.
+
+    Halving keeps every other beat (starting with the first); doubling adds a beat midway
+    between each pair.
+    """
+    while tempo > high and len(beats) > 1:
+        tempo, beats = tempo / 2, beats[::2]
+    while 0 < tempo < low and len(beats) > 1:
+        doubled = [t for a, b in zip(beats, beats[1:]) for t in (a, (a + b) / 2)]
+        tempo, beats = tempo * 2, [*doubled, beats[-1]]
+    return tempo, beats
+
+
 def detect_beats(samples: np.ndarray, sr: int = ANALYSIS_SR) -> tuple[float, list[float]]:
-    """Return (tempo in BPM, beat times in seconds)."""
+    """Return (tempo in BPM, beat times in seconds), folded into ``TEMPO_RANGE_BPM``."""
     import librosa
 
     tempo, frames = librosa.beat.beat_track(y=samples, sr=sr, hop_length=HOP_LENGTH)
     times = librosa.frames_to_time(frames, sr=sr, hop_length=HOP_LENGTH)
-    return float(np.atleast_1d(tempo)[0]), [float(t) for t in times]
+    return fold_tempo(float(np.atleast_1d(tempo)[0]), [float(t) for t in times])
 
 
 def bars_from_beats(beats: list[float], beats_per_bar: int) -> list[float]:

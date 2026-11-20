@@ -77,7 +77,7 @@ llm:
   api_key_env: null          # override the key variable (MVD_* or listed in MVD_ALLOWED_ENV_VARS)
   max_tokens: 8000
   shots_per_request: 20      # use 5 to 10 for small models
-  timeout_seconds: 180       # raise for slow local models
+  timeout_seconds: 600       # a local model can be slow when the GPU is busy
   json_mode: auto            # auto | off | object | schema
   context_tokens: null       # ollama: context window to request (default 16384)
 ```
@@ -106,12 +106,11 @@ llm: {provider: openai_compatible, base_url: "http://localhost:1234/v1", model: 
 
 ### Local Models
 
-- **Verified local setup (Ollama), the default.** Planning, vision checks and prompt rewrites ran on a local Ollama model with no API key. Raise the timeout for a slow or busy GPU:
+- **Verified local setup (Ollama), the default.** Planning, vision checks and prompt rewrites ran on a local Ollama model with no API key. `llm.timeout_seconds` defaults to 600 so a slow or busy GPU does not time out:
 
   ```yaml
   llm:
     model: gemma3:12b        # accepts images; use whatever your Ollama lists
-    timeout_seconds: 600     # a local model can be slow when the GPU is busy
   ```
 
   Run `mvd llm-check` first. Install with `pip install -e ".[qc,align,ui,dev]"`; the `anthropic` extra is only needed for `llm.provider: anthropic`.

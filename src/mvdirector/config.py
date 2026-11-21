@@ -676,6 +676,13 @@ class ReviewConfig(_Section):
 class ProjectConfig(_Section):
     title: str = "Untitled"
     seed: int = 1234
+    auto_tune: bool = Field(
+        default=True,
+        description=(
+            "Automatically adjust default transcription, beat-grid, cut-mode, pacing, and "
+            "lip-sync settings based on detected track characteristics."
+        ),
+    )
     inputs: InputsConfig = Field(default_factory=InputsConfig)
     prepare: PrepareConfig = Field(default_factory=PrepareConfig)
     video: VideoConfig = Field(default_factory=VideoConfig)

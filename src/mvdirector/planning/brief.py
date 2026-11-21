@@ -6,11 +6,11 @@
 
 from __future__ import annotations
 
-from importlib import resources
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
+from mvdirector import tuning as tuning_mod
 from mvdirector.errors import ConfigError
 from mvdirector.llm import LLMClient, text_block
 from mvdirector.planning import prompts
@@ -56,19 +56,6 @@ def generate_brief(
     return reply
 
 
-def _is_starter_file(path: Path, template_name: str) -> bool:
-    if not path.is_file():
-        return True
-    try:
-        starter = (
-            resources.files("mvdirector") / "templates" / "inputs" / template_name
-        ).read_text(encoding="utf-8")
-        current = path.read_text(encoding="utf-8-sig")
-    except (OSError, UnicodeDecodeError):
-        return False
-    return current.strip() == starter.strip()
-
-
 def _input_target(project: Project, relative: str, label: str) -> tuple[str, Path]:
     cleaned = relative.strip()
     if not cleaned:
@@ -90,7 +77,7 @@ def ensure_writable(project: Project, *, overwrite: bool = False) -> tuple[str, 
             (lyrics_target, "lyrics.txt", "lyrics"),
             (style_target, "style.md", "style brief"),
         ):
-            if target.is_file() and not _is_starter_file(target, template_name):
+            if target.is_file() and not tuning_mod.is_starter_input(target, template_name):
                 raise ConfigError(
                     f"Existing {label} at {target} would be overwritten. "
                     "Pass --overwrite to replace."

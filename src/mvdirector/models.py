@@ -109,6 +109,82 @@ class LyricLine(StrictModel):
     timing_source: Literal["aligned", "estimated", "none"] = "none"
 
 
+VocalMode = Literal["solo", "duet", "group", "instrumental"]
+_ISO_LANG_RE = re.compile(r"^[a-z]{2,3}$")
+
+
+class TrackProfile(StrictModel):
+    """Detected musical, vocal, and linguistic characteristics used to auto-tune parameters."""
+
+    languages: list[str] = Field(
+        default_factory=list,
+        description="Detected ISO-639-1/639-2 language codes (e.g. ['en'], ['fr', 'en'], ['zh']).",
+    )
+    multilingual: bool = Field(
+        default=False,
+        description="True when lyrics or style cues span more than one language.",
+    )
+    vocal_mode: VocalMode = Field(
+        default="solo",
+        description="Primary vocal arrangement ('solo', 'duet', 'group', or 'instrumental').",
+    )
+    rap_or_fast_vocal: bool = Field(
+        default=False,
+        description=(
+            "True when style cues or measured syllable rate indicate rap or rapid phrasing."
+        ),
+    )
+    drop_or_chop_heavy: bool = Field(
+        default=False,
+        description=(
+            "True when style/section cues or peak non-lyric bars indicate drops/vocal chops."
+        ),
+    )
+    extreme_vocals: bool = Field(
+        default=False,
+        description="True when cues indicate screamed, whispered, or heavily processed vocals.",
+    )
+    non_4_4_or_free_time: bool = Field(
+        default=False,
+        description="True when cues indicate 3/4, 6/8, odd meter, or rubato/beatless timing.",
+    )
+    beats_per_bar_hint: int | None = Field(
+        default=None,
+        ge=2,
+        le=12,
+        description="Meter grouping inferred from style cues when explicitly non-4/4 (e.g. 3).",
+    )
+    syllables_per_second: float | None = Field(
+        default=None,
+        ge=0.0,
+        allow_inf_nan=False,
+        description="Measured sung syllable/token rate across aligned or active vocal spans.",
+    )
+    intensity_contrast: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+        description="90th-minus-20th percentile of bar_intensity (0-1).",
+    )
+    reasons: list[str] = Field(
+        default_factory=list,
+        description="Human-readable explanations for detected track characteristics.",
+    )
+
+    @field_validator("languages")
+    @classmethod
+    def _check_languages(cls, values: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for raw in values:
+            code = raw.strip().lower()
+            if not _ISO_LANG_RE.match(code):
+                raise ValueError(f"Invalid ISO language code in track_profile: {raw!r}")
+            if code not in cleaned:
+                cleaned.append(code)
+        return cleaned
+
+
 class Analysis(StrictModel):
     schema_version: int = ANALYSIS_SCHEMA_VERSION
     duration: float
@@ -122,6 +198,10 @@ class Analysis(StrictModel):
         description="Diarized vocal turns grouped by acoustic voice pitch and timbre.",
     )
     lyric_lines: list[LyricLine] = Field(default_factory=list)
+    track_profile: TrackProfile | None = Field(
+        default=None,
+        description="Detected musical/vocal/language profile used for automatic parameter tuning.",
+    )
 
     @field_validator("schema_version")
     @classmethod

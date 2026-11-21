@@ -6,6 +6,7 @@
 
 title: My Song
 seed: 1234            # base seed; every attempt's seed is derived from it
+auto_tune: true       # auto-adjust default transcription, pacing, and lip-sync values per track
 
 inputs:
   mix: inputs/mix.wav            # full mix (also the final soundtrack)

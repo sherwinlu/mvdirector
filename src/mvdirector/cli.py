@@ -156,16 +156,47 @@ def prepare(
 
 
 @app.command()
-def analyze(project_dir: Path = ProjectDir) -> None:
-    """Analyze the audio: beats, bars, vocal activity and lyric timing."""
+def analyze(
+    project_dir: Path = ProjectDir,
+    tune_config: bool = typer.Option(
+        False,
+        "--tune",
+        help="Write auto-tuned track parameters into project.yaml.",
+    ),
+) -> None:
+    """Analyze the audio: beats, bars, vocal activity, lyric timing, and track profile."""
     try:
-        project, analysis = api.analyze(project_dir)
+        project, analysis = api.analyze(project_dir, apply_tuning=tune_config)
     except MVDError as exc:
         raise _fail(exc) from exc
     typer.echo(
         f"Wrote {project.analysis_path}: {analysis.tempo_bpm:.0f} BPM, "
         f"{len(analysis.bars)} bars, {len(analysis.vocal_windows)} vocal windows."
     )
+    if tune_config and analysis.track_profile is not None:
+        typer.echo(f"Updated {project.root / 'project.yaml'} with track-specific settings.")
+
+
+@app.command()
+def tune(
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Write recommended parameter adjustments into project.yaml.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Override non-default custom settings in project.yaml as well.",
+    ),
+    project_dir: Path = ProjectDir,
+) -> None:
+    """Inspect track lyrics, style, and audio analysis to recommend or apply project.yaml tuning."""
+    try:
+        result = api.tune(project_dir, apply=apply, force=force)
+    except MVDError as exc:
+        raise _fail(exc) from exc
+    typer.echo(result.report)
 
 
 @app.command()

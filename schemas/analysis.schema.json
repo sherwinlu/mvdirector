@@ -1,5 +1,107 @@
 {
   "$defs": {
+    "AnalyzedChapter": {
+      "additionalProperties": false,
+      "description": "Per-track or fixed-interval segment measured during long-form mix audio analysis.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "index": {
+          "minimum": 0,
+          "title": "Index",
+          "type": "integer"
+        },
+        "start": {
+          "minimum": 0.0,
+          "title": "Start",
+          "type": "number"
+        },
+        "end": {
+          "exclusiveMinimum": 0.0,
+          "title": "End",
+          "type": "number"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "artist": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Artist"
+        },
+        "bpm": {
+          "exclusiveMinimum": 0.0,
+          "title": "Bpm",
+          "type": "number"
+        },
+        "downbeat_offset": {
+          "default": 0.0,
+          "minimum": 0.0,
+          "title": "Downbeat Offset",
+          "type": "number"
+        },
+        "energy": {
+          "default": 0.5,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Energy",
+          "type": "number"
+        },
+        "mood_tags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Mood Tags",
+          "type": "array"
+        },
+        "genre_tags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Genre Tags",
+          "type": "array"
+        },
+        "theme_prompt": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Theme Prompt"
+        },
+        "clip_prompts": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Clip Prompts",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "index",
+        "start",
+        "end",
+        "title",
+        "bpm"
+      ],
+      "title": "AnalyzedChapter",
+      "type": "object"
+    },
     "LyricLine": {
       "additionalProperties": false,
       "properties": {
@@ -177,6 +279,14 @@
         "$ref": "#/$defs/LyricLine"
       },
       "title": "Lyric Lines",
+      "type": "array"
+    },
+    "chapters": {
+      "description": "Per-track segments measured in long-form mix mode.",
+      "items": {
+        "$ref": "#/$defs/AnalyzedChapter"
+      },
+      "title": "Chapters",
       "type": "array"
     }
   },

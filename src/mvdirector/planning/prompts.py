@@ -225,6 +225,25 @@ PERFORMANCE_MOTION = (
     "The singer moves with the music, mouth closed, not singing. Slow, steady camera drift."
 )
 
+MIX_THEMES_SYSTEM = """You are the visual director for a long-form continuous DJ or background mix
+(30 to 90+ minutes). Viewers play these mixes in the background and scrub across chapters, so each
+track chapter MUST have its own immediately recognizable visual environment, color palette, and
+lighting mood.
+
+Rules:
+- Return one entry per chapter 'id' given, plus top-level 'style' and 'negative_prompt' strings.
+- Uninhabited environments only: depict empty architecture, landscapes, kinetic light sculptures,
+  weather, interiors, or abstract/cybernetic spaces with zero people, faces, or performers. State
+  absences affirmatively by describing the uninhabited space itself.
+- High chapter contrast: neighbouring chapters MUST differ clearly in color palette, lighting
+  temperature, or spatial scale so timeline scrubbing gives instant visual chapter feedback.
+- Seamless loop physics: design every 'clip_prompts' entry and 'motion_style' for short (4-8s)
+  crossfade-looped clips. Use continuous cyclical or steady ambient motion (drifting fog, rippling
+  water, slow volumetric light sweeps, floating dust/embers, gentle camera glide). Avoid one-off
+  explosions, sudden whip-pans, narrative plot beats, internal cuts, or on-screen text.
+- Write every field in English. For each chapter, provide exactly the requested number of
+  complementary 'clip_prompts' (varying framing/angle within the same chapter environment)."""
+
 PANEL_LAYOUT = {
     "row": "Four equal panels in a single horizontal row, thin neutral grey dividers.",
     "grid": (
@@ -798,7 +817,10 @@ def compose_still_prompt(
                         else f"Also in frame ({sec_label})"
                     )
                     parts.append(f"{role_prefix}: {look}")
-    parts.append(_style_line(bible.style, bible.palette, bible.lighting))
+    chapter = manifest.find_chapter(shot.chapter_id)
+    palette = chapter.palette if chapter and chapter.palette else bible.palette
+    lighting = chapter.lighting if chapter and chapter.lighting else bible.lighting
+    parts.append(_style_line(bible.style, palette, lighting))
     return " ".join(part.strip() for part in parts if part.strip())
 
 

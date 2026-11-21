@@ -15,11 +15,11 @@ from pathlib import Path
 
 import typer
 
-from mvdirector import api
+from mvdirector import api, mix_assemble
 from mvdirector.config import ReviewMode
 from mvdirector.errors import MVDError
 from mvdirector.generation.runner import RunEvent
-from mvdirector.models import AssetKind, Character, Manifest
+from mvdirector.models import AssetKind, Character, Manifest, ProjectMode
 from mvdirector.project import Project
 from mvdirector.review import policy as review_policy
 
@@ -44,6 +44,9 @@ log = logging.getLogger("mvdirector")
 ProjectDir = typer.Option(Path("."), "--project", "-p", help="Project folder.")
 ModeOption = typer.Option(None, "--review-mode", help="Override review.mode from the config.")
 ShotsOption = typer.Option(None, "--shot", "-s", help="Limit to these shot ids (repeatable).")
+ChaptersOption = typer.Option(
+    None, "--chapter", "-C", help="Limit to these mix chapter ids (repeatable)."
+)
 SkipPreflight = typer.Option(
     False,
     "--skip-preflight",
@@ -107,16 +110,25 @@ def _lines(paths) -> str:  # noqa: ANN001
 
 
 @app.command()
-def init(directory: Path = typer.Argument(..., help="Folder to create the project in.")) -> None:
+def init(
+    directory: Path = typer.Argument(..., help="Folder to create the project in."),
+    mode: ProjectMode = typer.Option(
+        ProjectMode.STANDARD,
+        "--mode",
+        help="Pipeline mode: 'standard' (single track) or 'mix' (long-form continuous mix).",
+    ),
+) -> None:
     """Create a project folder with a starter config and workflow binding examples."""
     try:
-        api.init_project(directory)
+        api.init_project(directory, mode=mode)
     except MVDError as exc:
         raise _fail(exc) from exc
-    typer.echo(
-        f"Created project in {directory}. Next: add your audio to inputs/, then read "
-        f"workflows/README.md."
+    next_hint = (
+        "add your mix audio and edit inputs/tracklist.json, then run `mvd analyze`."
+        if mode is ProjectMode.MIX
+        else "add your audio to inputs/, then read workflows/README.md."
     )
+    typer.echo(f"Created {mode.value} project in {directory}. Next: {next_hint}")
 
 
 @app.command()
@@ -156,16 +168,32 @@ def prepare(
 
 
 @app.command()
-def analyze(project_dir: Path = ProjectDir) -> None:
-    """Analyze the audio: beats, bars, vocal activity and lyric timing."""
+def analyze(
+    project_dir: Path = ProjectDir,
+    mode: ProjectMode | None = typer.Option(
+        None, "--mode", help="Override project mode ('standard' or 'mix')."
+    ),
+    tracklist: Path | None = typer.Option(
+        None,
+        "--tracklist",
+        help="Cue sheet or tracklist (.json, .yaml, .cue, .txt) when running in mix mode.",
+    ),
+) -> None:
+    """Analyze the audio: beats, bars, vocal activity, lyric timing, or mix chapters."""
     try:
-        project, analysis = api.analyze(project_dir)
+        project, analysis = api.analyze(project_dir, mode=mode, tracklist=tracklist)
     except MVDError as exc:
         raise _fail(exc) from exc
-    typer.echo(
-        f"Wrote {project.analysis_path}: {analysis.tempo_bpm:.0f} BPM, "
-        f"{len(analysis.bars)} bars, {len(analysis.vocal_windows)} vocal windows."
-    )
+    if analysis.chapters:
+        typer.echo(
+            f"Wrote {project.analysis_path}: {len(analysis.chapters)} chapters, "
+            f"{analysis.tempo_bpm:.0f} BPM mean, {len(analysis.bars)} bars."
+        )
+    else:
+        typer.echo(
+            f"Wrote {project.analysis_path}: {analysis.tempo_bpm:.0f} BPM, "
+            f"{len(analysis.bars)} bars, {len(analysis.vocal_windows)} vocal windows."
+        )
 
 
 @app.command()
@@ -195,12 +223,28 @@ def brief(
 def plan(
     project_dir: Path = ProjectDir,
     overwrite: bool = typer.Option(False, help="Replace an existing manifest and its history."),
+    mode: ProjectMode | None = typer.Option(
+        None, "--mode", help="Override project mode ('standard' or 'mix')."
+    ),
+    tracklist: Path | None = typer.Option(
+        None,
+        "--tracklist",
+        help="Cue sheet or tracklist (.json, .yaml, .cue, .txt) when planning in mix mode.",
+    ),
 ) -> None:
-    """Create the shot manifest from the analysis, lyrics and style brief."""
+    """Create the shot manifest from the analysis, lyrics/tracklist and style brief."""
     try:
-        project, manifest = api.plan(project_dir, overwrite=overwrite)
+        project, manifest = api.plan(
+            project_dir, overwrite=overwrite, mode=mode, tracklist=tracklist
+        )
     except MVDError as exc:
         raise _fail(exc) from exc
+    if manifest.mode is ProjectMode.MIX:
+        typer.echo(
+            f"Wrote {project.manifest_path}: {len(manifest.chapters)} chapters, "
+            f"{len(manifest.shots)} loop units (visual_source={project.config.mix.visual_source})."
+        )
+        return
     kinds = Counter(shot.type.value for shot in manifest.shots)
     typer.echo(
         f"Wrote {project.manifest_path}: {len(manifest.shots)} shots {dict(kinds)}. "
@@ -510,6 +554,7 @@ def _generate(
     mode: ReviewMode | None,
     skip_preflight: bool = False,
     draft: bool = False,
+    chapters: list[str] | None = None,
 ) -> None:
     try:
         result = api.generate(
@@ -520,6 +565,7 @@ def _generate(
             skip_preflight=skip_preflight,
             draft=draft,
             observer=_progress,
+            chapters=chapters,
         )
     except MVDError as exc:
         raise _fail(exc) from exc
@@ -532,28 +578,46 @@ def _generate(
 def stills(
     project_dir: Path = ProjectDir,
     shot: list[str] = ShotsOption,
+    chapter: list[str] = ChaptersOption,
     skip_preflight: bool = SkipPreflight,
     draft: bool = DraftOption,
 ) -> None:
     """Generate and quality-check stills, regenerating failures automatically."""
-    _generate(project_dir, [AssetKind.STILL], shot or None, None, skip_preflight, draft=draft)
+    _generate(
+        project_dir,
+        [AssetKind.STILL],
+        shot or None,
+        None,
+        skip_preflight,
+        draft=draft,
+        chapters=chapter or None,
+    )
 
 
 @app.command()
 def videos(
     project_dir: Path = ProjectDir,
     shot: list[str] = ShotsOption,
+    chapter: list[str] = ChaptersOption,
     review_mode: ReviewMode = ModeOption,
     draft: bool = DraftOption,
 ) -> None:
     """Generate and quality-check videos for shots whose still has passed."""
-    _generate(project_dir, [AssetKind.VIDEO], shot or None, review_mode, draft=draft)
+    _generate(
+        project_dir,
+        [AssetKind.VIDEO],
+        shot or None,
+        review_mode,
+        draft=draft,
+        chapters=chapter or None,
+    )
 
 
 @app.command()
 def run(
     project_dir: Path = ProjectDir,
     shot: list[str] = ShotsOption,
+    chapter: list[str] = ChaptersOption,
     review_mode: ReviewMode = ModeOption,
     skip_preflight: bool = SkipPreflight,
     draft: bool = DraftOption,
@@ -566,6 +630,7 @@ def run(
         review_mode,
         skip_preflight,
         draft=draft,
+        chapters=chapter or None,
     )
 
 
@@ -675,13 +740,21 @@ def status(project_dir: Path = ProjectDir, review_mode: ReviewMode = ModeOption)
 
 
 def _print_status(project: Project, manifest: Manifest) -> None:
+    stills_only = review_policy.uses_stills_only(manifest, project.config)
     stills_by = Counter(s.still.status.value for s in manifest.shots)
     videos_by = Counter(s.video.status.value for s in manifest.shots)
     queue = review_policy.pending_review(manifest)
-    ready = sum(1 for s in manifest.shots if review_policy.is_ready(s))
+    ready = sum(1 for s in manifest.shots if review_policy.is_ready(s, stills_only=stills_only))
+    if manifest.mode is ProjectMode.MIX:
+        cached = mix_assemble.cached_segment_count(project, manifest)
+        typer.echo(
+            f"Mode: mix   Chapters: {len(manifest.chapters)}   "
+            f"Cached segments: {cached}/{len(manifest.chapters)}"
+        )
     typer.echo(f"Shots: {len(manifest.shots)}   review mode: {project.config.review.mode.value}")
     typer.echo(f"Stills: {dict(stills_by)}")
-    typer.echo(f"Videos: {dict(videos_by)}")
+    if not stills_only:
+        typer.echo(f"Videos: {dict(videos_by)}")
     typer.echo(
         f"Ready for assembly: {ready}/{len(manifest.shots)}   "
         f"generations so far: {manifest.total_generations}"
@@ -703,15 +776,18 @@ def _print_status(project: Project, manifest: Manifest) -> None:
 
 @app.command()
 def approve(
-    shot_ids: list[str] = typer.Argument(..., help="Shot ids to approve."),
+    shot_ids: list[str] = typer.Argument(None, help="Shot ids to approve."),
+    chapter: list[str] = ChaptersOption,
     still: bool = typer.Option(
         False, "--still", help="Accept an exhausted still so its video can be generated."
     ),
     project_dir: Path = ProjectDir,
 ) -> None:
-    """Approve shots from the command line (the review UI does the same)."""
+    """Approve shots (or --chapter in mix mode) from the command line."""
+    if not shot_ids and not chapter:
+        raise _fail(MVDError("Pass at least one shot id or --chapter to approve."))
     try:
-        api.approve(project_dir, shot_ids, still=still)
+        api.approve(project_dir, shot_ids or None, still=still, chapters=chapter or None)
     except MVDError as exc:
         raise _fail(exc) from exc
     typer.echo("Saved.")
@@ -792,9 +868,15 @@ def assemble(
     ),
     width: int | None = typer.Option(None, help="Override assembly width (even >= 64)."),
     height: int | None = typer.Option(None, help="Override assembly height (even >= 64)."),
+    chapter: list[str] = ChaptersOption,
+    rebuild_cache: bool = typer.Option(
+        False,
+        "--rebuild-cache",
+        help="Re-render all mix chapters instead of reusing cached chapter MP4s.",
+    ),
     review_mode: ReviewMode = ModeOption,
 ) -> None:
-    """Join the approved clips and lay the original mix over them."""
+    """Join the approved clips (or cached mix chapters) and lay the original mix over them."""
     try:
         result = api.assemble(
             project_dir,
@@ -804,10 +886,15 @@ def assemble(
             draft=draft,
             width=width,
             height=height,
+            chapters=chapter or None,
+            rebuild_cache=rebuild_cache,
         )
     except MVDError as exc:
         raise _fail(exc) from exc
     typer.echo(f"Wrote {result}")
+    sidecar = mix_assemble.chapters_sidecar_path(result)
+    if sidecar.is_file():
+        typer.echo(f"Wrote {sidecar}")
 
 
 @app.command()

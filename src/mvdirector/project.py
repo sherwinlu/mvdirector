@@ -115,6 +115,10 @@ class Project:
         return self.root / "assets" / "previz"
 
     @property
+    def segments_dir(self) -> Path:
+        return self.root / "assets" / "segments"
+
+    @property
     def output_dir(self) -> Path:
         return self.root / "output"
 
@@ -153,6 +157,15 @@ class Project:
     def previz_plan_path(self, shot_id: str) -> Path:
         safe_id = _require_safe_id(shot_id, "shot id")
         return self.path(Path("assets") / "previz" / f"{safe_id}.plan.json")
+
+    def segment_video_path(self, chapter_id: str, *, draft: bool = False) -> Path:
+        safe_id = _require_safe_id(chapter_id, "chapter id")
+        suffix = "_draft" if draft else ""
+        return self.path(Path("assets") / "segments" / f"{safe_id}{suffix}.mp4")
+
+    def segment_stamp_path(self, chapter_id: str, *, draft: bool = False) -> Path:
+        video_path = self.segment_video_path(chapter_id, draft=draft)
+        return video_path.with_name(f"{video_path.name}.json")
 
     def input_path(self, relative: str | None, label: str) -> Path:
         if not relative:

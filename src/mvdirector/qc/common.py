@@ -166,6 +166,8 @@ def vision_checks(
     character_hard_min: float,
     reference_image: Path | None = None,
     extra_references: list[tuple[str, Path]] | None = None,
+    *,
+    spec_hard_min: float | None = None,
 ) -> list[CheckResult]:
     """Three results from one model call: shot spec, artifacts and the character's identity."""
     names = ("vision_spec", "vision_artifacts", "vision_character")
@@ -203,8 +205,9 @@ def vision_checks(
         return [skipped(name, f"vision check errored: {exc}") for name in names]
 
     issues = "; ".join(verdict.issues)
+    effective_spec_min = spec_hard_min if spec_hard_min is not None else hard_min
     scored = [
-        ("vision_spec", verdict.spec_match, False, hard_min),
+        ("vision_spec", verdict.spec_match, True, effective_spec_min),
         ("vision_artifacts", verdict.artifact_free, True, hard_min),
         ("vision_character", verdict.character_match, True, character_hard_min),
     ]
@@ -222,6 +225,7 @@ def vision_checks(
                 score=value,
                 detail=issues if failed else "",
                 fix_hint=(verdict.fix or None) if failed else None,
+                metrics={name: round(value, 4)},
             )
         )
     return results

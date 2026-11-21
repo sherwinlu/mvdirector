@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -31,6 +31,7 @@ from mvdirector.audio.lyrics import (
     WhisperTranscriber,
     format_transcript_as_lyrics,
     parse_lyrics,
+    segment_speaker_label,
     tokenize,
 )
 from mvdirector.audio.stems import (
@@ -41,7 +42,7 @@ from mvdirector.audio.stems import (
 )
 from mvdirector.errors import ConfigError
 from mvdirector.llm import LLMClient, text_block
-from mvdirector.models import TimeSpan
+from mvdirector.models import BOTH_VOICES, TimeSpan, VocalTurn
 from mvdirector.planning import prompts
 from mvdirector.planning.brief import ensure_writable
 from mvdirector.project import Project
@@ -67,6 +68,7 @@ class AudioSummary:
     vocal_windows: list[TimeSpan]
     vocal_fraction: float
     energy_arc: list[str]
+    vocal_turns: list[VocalTurn] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -136,6 +138,7 @@ def summarize_audio(
     mix_rms, mix_times = analysis_mod.rms_envelope(mix)
     vocal_rms, vocal_times = analysis_mod.rms_envelope(vocals)
     windows = analysis_mod.detect_vocal_windows(vocal_rms, vocal_times)
+    vocal_turns = analysis_mod.detect_vocal_turns(vocals)
     intensities = analysis_mod.bar_intensity(mix_rms, mix_times, bars, duration)
     vocal_seconds = sum(w.duration for w in windows)
     vocal_fraction = min(1.0, vocal_seconds / duration) if duration > 0 else 0.0
@@ -145,6 +148,7 @@ def summarize_audio(
         vocal_windows=windows,
         vocal_fraction=round(vocal_fraction, 3),
         energy_arc=format_energy_arc(bars, intensities, duration),
+        vocal_turns=vocal_turns,
     )
 
 
@@ -192,13 +196,26 @@ def _build_inference_prompt(transcript: Transcript, summary: AudioSummary) -> st
         header.append(f"DETECTED LANGUAGE: {transcript.language}")
     if summary.energy_arc:
         header.append("ENERGY ARC: " + ", ".join(summary.energy_arc))
+    voices = {t.voice for t in summary.vocal_turns}
+    if len(voices) >= 2 or BOTH_VOICES in voices:
+        both_note = (
+            ", and simultaneous duet sections like [Chorus: Both]" if BOTH_VOICES in voices else ""
+        )
+        header.append(
+            "DETECTED VOICES: 2 distinct vocalists (Singer 1 lower register, Singer 2 higher "
+            f"register — tag alternating sections like [Verse 1: Singer 1]{both_note})"
+        )
 
     if transcript.segments:
-        lines = [
-            f"[{_format_mmss(seg.start)} - {_format_mmss(seg.end)}] {seg.text.strip()}"
-            for seg in transcript.segments
-            if seg.text.strip()
-        ]
+        lines = []
+        for seg in transcript.segments:
+            if not seg.text.strip():
+                continue
+            speaker = segment_speaker_label(seg.start, seg.end, summary.vocal_turns)
+            tag = f" ({speaker})" if speaker else ""
+            lines.append(
+                f"[{_format_mmss(seg.start)} - {_format_mmss(seg.end)}]{tag} {seg.text.strip()}"
+            )
         body = "TRANSCRIBED VOCALS:\n" + "\n".join(lines)
     else:
         body = "TRANSCRIBED VOCALS:\n(No intelligible vocals detected; treat as instrumental.)"
@@ -223,11 +240,12 @@ def infer_inputs_from_transcript(
 ) -> tuple[InferredInputsReply, bool]:
     """Infer structured ``lyrics.txt`` and ``style.md`` from transcribed vocals + audio summary."""
     has_lyrics = any(seg.text.strip() for seg in transcript.segments)
+    turns = summary.vocal_turns or None
     if llm is None:
         music_style, visual_direction = fallback_style_brief(summary, has_lyrics=has_lyrics)
         return (
             InferredInputsReply(
-                lyrics=format_transcript_as_lyrics(transcript.segments),
+                lyrics=format_transcript_as_lyrics(transcript.segments, vocal_turns=turns),
                 music_style=music_style,
                 visual_direction=visual_direction,
             ),
@@ -241,7 +259,7 @@ def infer_inputs_from_transcript(
     )
     lyrics_text = reply.lyrics.strip()
     if not lyrics_text:
-        lyrics_text = format_transcript_as_lyrics(transcript.segments).strip()
+        lyrics_text = format_transcript_as_lyrics(transcript.segments, vocal_turns=turns).strip()
     else:
         fidelity = lyric_fidelity(lyrics_text, transcript)
         if fidelity < MIN_LYRIC_FIDELITY:
@@ -249,7 +267,9 @@ def infer_inputs_from_transcript(
                 "The model's lyrics match only %.0f%% of the transcript; using the transcript.",
                 fidelity * 100,
             )
-            lyrics_text = format_transcript_as_lyrics(transcript.segments).strip()
+            lyrics_text = format_transcript_as_lyrics(
+                transcript.segments, vocal_turns=turns
+            ).strip()
     if not reply.music_style.strip() or not reply.visual_direction.strip():
         raise ConfigError("The model returned an empty music_style or visual_direction.")
     return (

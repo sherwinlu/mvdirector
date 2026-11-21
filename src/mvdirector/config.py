@@ -192,8 +192,8 @@ def _snap_size(
 
 
 class VideoConfig(_Section):
-    width: int = 1280
-    height: int = 720
+    width: int = Field(default=1280, ge=64)
+    height: int = Field(default=720, ge=64)
     draft_width: int | None = Field(
         default=None, ge=64, description="Optional width used when running with --draft."
     )
@@ -270,6 +270,14 @@ class VideoConfig(_Section):
     def _check_draft_dimensions(self) -> VideoConfig:
         if (self.draft_width is None) != (self.draft_height is None):
             raise ValueError("Set both video.draft_width and video.draft_height together.")
+        for label, val in (
+            ("video.width", self.width),
+            ("video.height", self.height),
+            ("video.draft_width", self.draft_width),
+            ("video.draft_height", self.draft_height),
+        ):
+            if val is not None and val % 2 != 0:
+                raise ValueError(f"{label} must be an even integer, got {val}.")
         return self
 
     def generation_size(self, draft: bool = False) -> tuple[int, int]:
@@ -471,7 +479,7 @@ class ImageQCConfig(_Section):
     sharpness_good: float = 150.0
     identity_hard_min: float = 0.30
     identity_good: float = 0.55
-    # Minimum face height as a share of frame height, per framing.
+    # Minimum and maximum face height as a share of frame height, per framing.
     min_face_fraction: dict[Framing, float] = Field(
         default_factory=lambda: {
             Framing.CLOSE_UP: 0.30,
@@ -480,8 +488,23 @@ class ImageQCConfig(_Section):
             Framing.WIDE: 0.03,
         }
     )
-    vision_hard_min: float = 0.30
-    vision_character_hard_min: float = 0.40
+    max_face_fraction: dict[Framing, float] = Field(
+        default_factory=lambda: {
+            Framing.CLOSE_UP: 0.90,
+            Framing.MEDIUM_CLOSE: 0.45,
+            Framing.MEDIUM: 0.25,
+            Framing.WIDE: 0.10,
+        }
+    )
+    broll_max_face_fraction: float = Field(
+        default=0.04,
+        ge=0.0,
+        le=1.0,
+        description="Largest face box allowed on a b-roll cutaway before failing 'no_people'.",
+    )
+    vision_hard_min: float = Field(default=0.50, ge=0.0, le=1.0)
+    vision_spec_hard_min: float = Field(default=0.60, ge=0.0, le=1.0)
+    vision_character_hard_min: float = Field(default=0.40, ge=0.0, le=1.0)
 
 
 class VideoQCConfig(_Section):
@@ -514,8 +537,9 @@ class VideoQCConfig(_Section):
     flicker_good: float = 0.03
     flicker_bad: float = 0.12
     vision_frames: int = 5
-    vision_hard_min: float = 0.30
-    vision_character_hard_min: float = 0.40
+    vision_hard_min: float = Field(default=0.50, ge=0.0, le=1.0)
+    vision_spec_hard_min: float = Field(default=0.60, ge=0.0, le=1.0)
+    vision_character_hard_min: float = Field(default=0.40, ge=0.0, le=1.0)
 
 
 class QCConfig(_Section):
@@ -570,7 +594,7 @@ class QCConfig(_Section):
             "lipsync": 3.0,
             "identity": 2.0,
             "vision_artifacts": 2.0,
-            "vision_spec": 1.0,
+            "vision_spec": 2.0,
             "vision_character": 2.0,
             "temporal": 1.0,
             "sharpness": 0.5,
@@ -589,6 +613,7 @@ class RetryConfig(_Section):
             RetryStrategy.REWRITE_PROMPT,
             RetryStrategy.ADJUST_PARAMS,
         ],
+        min_length=1,
         description="Applied in order from attempt 2 on; the last one repeats.",
     )
     max_generations_per_run: int = Field(default=300, ge=1)

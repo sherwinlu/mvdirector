@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Iterable
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Protocol
@@ -24,7 +25,7 @@ import librosa
 from pydantic import BaseModel
 
 from mvdirector.errors import ConfigError
-from mvdirector.models import LyricLine, TimeSpan
+from mvdirector.models import BOTH_VOICES, LyricLine, TimeSpan, VocalTurn
 from mvdirector.project import Project
 
 log = logging.getLogger(__name__)
@@ -106,27 +107,238 @@ class WhisperTranscriber:
         return Transcript(segments=segments, words=words, language=detected_lang)
 
 
+def _voice_tag_map(turns: list[VocalTurn] | None) -> dict[str, str]:
+    """Map diarized voice ids ('voice_1', 'voice_2', 'both') to human section tags."""
+    if not turns:
+        return {}
+    voices = list(dict.fromkeys(t.voice for t in turns))
+    if len(voices) < 2 and BOTH_VOICES not in voices:
+        return {}
+    solo_voices = [v for v in voices if v != BOTH_VOICES]
+    mapping = {voice: f"Singer {idx}" for idx, voice in enumerate(solo_voices, start=1)}
+    if BOTH_VOICES in voices:
+        mapping[BOTH_VOICES] = "Both"
+    return mapping
+
+
+def segment_speaker_label(start: float, end: float, turns: list[VocalTurn] | None) -> str | None:
+    """Return 'Singer 1' / 'Singer 2' / 'Both' for ``[start, end]`` when multi-voice turns exist."""
+    tag_map = _voice_tag_map(turns)
+    if not tag_map or not turns:
+        return None
+    overlap_by_voice: dict[str, float] = {}
+    for turn in turns:
+        shared = turn.overlap(start, end)
+        if shared > 0:
+            overlap_by_voice[turn.voice] = overlap_by_voice.get(turn.voice, 0.0) + shared
+    if not overlap_by_voice:
+        return None
+    best_voice = max(overlap_by_voice.items(), key=lambda pair: pair[1])[0]
+    return tag_map.get(best_voice)
+
+
 def format_transcript_as_lyrics(
-    segments: list[TranscriptSegment], pause_threshold: float = 3.0
+    segments: list[TranscriptSegment],
+    pause_threshold: float = 3.0,
+    vocal_turns: list[VocalTurn] | None = None,
 ) -> str:
     """Turn timestamped transcript segments into `[Section]`-tagged lyrics text."""
     cleaned = [seg for seg in segments if seg.text.strip()]
     if not cleaned:
         return "[Instrumental]\n"
 
-    sections: list[list[str]] = [[cleaned[0].text.strip()]]
+    first_speaker = segment_speaker_label(cleaned[0].start, cleaned[0].end, vocal_turns)
+    sections: list[tuple[str | None, list[str]]] = [(first_speaker, [cleaned[0].text.strip()])]
     prev_end = cleaned[0].end
     for seg in cleaned[1:]:
-        if seg.start - prev_end >= pause_threshold:
-            sections.append([seg.text.strip()])
+        speaker = segment_speaker_label(seg.start, seg.end, vocal_turns)
+        prev_speaker = sections[-1][0]
+        speaker_changed = (
+            speaker is not None and prev_speaker is not None and speaker != prev_speaker
+        )
+        if seg.start - prev_end >= pause_threshold or speaker_changed:
+            sections.append((speaker, [seg.text.strip()]))
         else:
-            sections[-1].append(seg.text.strip())
+            if prev_speaker is None and speaker is not None:
+                sections[-1] = (speaker, sections[-1][1])
+            sections[-1][1].append(seg.text.strip())
         prev_end = max(prev_end, seg.end)
 
-    blocks = [
-        f"[Section {idx}]\n" + "\n".join(lines) for idx, lines in enumerate(sections, start=1)
-    ]
+    blocks = []
+    for idx, (speaker, lines) in enumerate(sections, start=1):
+        header = f"[Section {idx}: {speaker}]" if speaker else f"[Section {idx}]"
+        blocks.append(f"{header}\n" + "\n".join(lines))
     return "\n\n".join(blocks) + "\n"
+
+
+_STRUCTURAL_SECTION_WORDS = frozenset(
+    {
+        "intro",
+        "verse",
+        "pre-chorus",
+        "prechorus",
+        "pre",
+        "chorus",
+        "post-chorus",
+        "postchorus",
+        "post",
+        "hook",
+        "big",
+        "refrain",
+        "bridge",
+        "outro",
+        "interlude",
+        "instrumental",
+        "solo",
+        "break",
+        "breakdown",
+        "drop",
+        "build",
+        "buildup",
+        "build-up",
+        "tag",
+        "coda",
+        "spoken",
+        "adlib",
+        "ad-lib",
+        "adlibs",
+        "ad-libs",
+        "rap",
+        "fade",
+        "ending",
+        "end",
+        "part",
+        "section",
+        "final",
+        "reprise",
+        "repeat",
+        "repeated",
+        "again",
+        "vamp",
+        "turnaround",
+        "soft",
+        "loud",
+        "quiet",
+        "whisper",
+        "whispered",
+        "acoustic",
+        "heavy",
+        "stripped",
+        "building",
+        "calm",
+        "intense",
+        "acapella",
+        "capella",
+        "fast",
+        "slow",
+        "high",
+        "low",
+        "emotional",
+        "softly",
+        "gently",
+        "out",
+        "in",
+        "up",
+        "down",
+        "lead",
+        "backing",
+        "backup",
+        "vocal",
+        "vocals",
+        "vox",
+    }
+)
+_ENSEMBLE_SECTION_WORDS = frozenset(
+    {"duet", "both", "together", "all", "everyone", "ensemble", "choir", "group", "harmony"}
+)
+_DESIGNATOR_WORDS = frozenset(
+    {"male", "female", "man", "woman", "boy", "girl", "guy", "lady", "he", "she", "him", "her"}
+)
+_NUMBERED_DESIGNATORS = frozenset(
+    {"singer", "voice", "vocalist", "vocal", "vocals", "rapper", "character", "performer"}
+)
+_SINGER_SPLIT = re.compile(r"\s*(?:&|\+|/|\band\b)\s*", flags=re.IGNORECASE)
+_REPEAT_MARKER = re.compile(r"\s*[(\[]?\s*(?:x|×)\s*\d+\s*[)\]]?\s*$", flags=re.IGNORECASE)
+_BRACKETED_CUE = re.compile(r"^(.*?)\s*[(\[]([^()\[\]]+)[)\]]\s*$")
+_DASH_SPLIT = re.compile(r"\s+[-—–]\s+")
+
+
+def _is_structural(words: list[str]) -> bool:
+    core = [w for w in (re.sub(r"^\d+|\d+$", "", w) for w in words) if w]
+    return bool(core) and all(w in _STRUCTURAL_SECTION_WORDS for w in core)
+
+
+def _looks_like_name(text: str) -> bool:
+    return all(w[:1].isupper() for w in text.split())
+
+
+def section_cue(label: str) -> tuple[str, bool]:
+    """Split a section label into its performer cue and whether that cue was explicit."""
+    label = _REPEAT_MARKER.sub("", label.strip())
+    bracketed = _BRACKETED_CUE.match(label)
+    if bracketed:
+        return bracketed.group(2).strip(), True
+    if ":" in label:
+        return label.split(":", 1)[1].strip(), True
+    if _DASH_SPLIT.search(label):
+        lhs, rhs = _DASH_SPLIT.split(label, maxsplit=1)
+        return (rhs if _is_structural(lhs.lower().split()) else lhs).strip(), False
+    return label, False
+
+
+def singers_in_cue(cue: str, *, explicit: bool, cased: bool) -> set[str] | None:
+    """Performer keys named by one section cue, or ``None`` when the cue names an ensemble."""
+    singers: set[str] = set()
+    head = cue.split(",", 1)[0].strip()
+    for raw in _SINGER_SPLIT.split(head):
+        part = _REPEAT_MARKER.sub("", raw.strip())
+        if not part:
+            continue
+        words = part.lower().split()
+        if " ".join(words) in _ENSEMBLE_SECTION_WORDS:
+            return None
+        if len(words) == 2 and words[0] in _NUMBERED_DESIGNATORS and words[1].isdigit():
+            singers.add(f"{words[0]} {words[1]}")
+            continue
+        core = [re.sub(r"^\d+|\d+$", "", w) for w in words]
+        core = [w for w in core if w]
+        if not core:
+            continue
+        if any(w in _STRUCTURAL_SECTION_WORDS for w in core):
+            rest = [w for w in core if w not in _STRUCTURAL_SECTION_WORDS]
+            if rest and all(w in _DESIGNATOR_WORDS for w in rest):
+                singers.add(" ".join(rest))
+            continue
+        if all(w in _DESIGNATOR_WORDS for w in core):
+            singers.add(" ".join(core))
+            continue
+        if len(core) > 3 or any(w.isdigit() for w in words):
+            continue
+        if explicit or (cased and _looks_like_name(part)):
+            singers.add(" ".join(core))
+    return singers
+
+
+def section_singers(label: str | None) -> set[str] | None:
+    """Performer keys named by ``label`` (empty if none, ``None`` for ensemble cues)."""
+    if not label or not label.strip():
+        return set()
+    cleaned = label.strip()
+    cue, explicit = section_cue(cleaned)
+    if not cue:
+        return set()
+    return singers_in_cue(cue, explicit=explicit, cased=cleaned != cleaned.lower())
+
+
+def labels_have_multiple_singers(labels: Iterable[str | None]) -> bool:
+    """True when ``labels`` name two or more distinct singers or an ensemble cue."""
+    singers: set[str] = set()
+    for raw in labels:
+        found = section_singers(raw)
+        if found is None:
+            return True
+        singers |= found
+    return len(singers) >= 2
 
 
 def parse_lyrics(text: str) -> list[LyricLine]:
@@ -199,14 +411,24 @@ def align_lines_to_words(lines: list[LyricLine], words: list[Word]) -> list[Lyri
             word_tokens.append(token)
             token_word.append(index)
 
-    spans: dict[int, list[float]] = {}
+    # Record (start, end, block_size) per matched word on each line so an isolated 1-token
+    # stopword match far across a singer gap cannot stretch a line into another vocalist's turn.
+    matched_words: dict[int, list[tuple[float, float, int]]] = {}
     matcher = SequenceMatcher(a=lyric_tokens, b=word_tokens, autojunk=False)
     for block in matcher.get_matching_blocks():
         for offset in range(block.size):
             line_index = token_line[block.a + offset]
             word = words[token_word[block.b + offset]]
-            span = spans.setdefault(line_index, [word.start, word.end])
-            span[0], span[1] = min(span[0], word.start), max(span[1], word.end)
+            matched_words.setdefault(line_index, []).append((word.start, word.end, block.size))
+
+    spans: dict[int, tuple[float, float]] = {}
+    for line_index, hits in matched_words.items():
+        hits.sort(key=lambda item: item[0])
+        while len(hits) >= 2 and hits[0][2] == 1 and hits[1][0] - hits[0][1] > 3.5:
+            hits = hits[1:]
+        while len(hits) >= 2 and hits[-1][2] == 1 and hits[-1][0] - hits[-2][1] > 3.5:
+            hits = hits[:-1]
+        spans[line_index] = (min(h[0] for h in hits), max(h[1] for h in hits))
 
     aligned = []
     for index, line in enumerate(lines):

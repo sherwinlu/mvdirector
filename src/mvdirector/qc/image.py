@@ -87,7 +87,9 @@ class ImageQC:
             self._sharpness_check(image),
         ]
         if shot.type.shows_singer:
-            checks += self._face_checks(image, shot, reference)
+            checks += self._face_checks(image, shot, manifest, reference)
+        else:
+            checks += self._broll_face_checks(image)
         checks += vision_checks(
             self._vision,
             [path],
@@ -98,8 +100,36 @@ class ImageQC:
             self._cfg.vision_character_hard_min,
             reference_image,
             extra_references=extra_references,
+            spec_hard_min=self._cfg.vision_spec_hard_min,
         )
         return aggregate(checks, self._qc.weights, self._qc.pass_score)
+
+    def _broll_face_checks(self, image: np.ndarray) -> list[CheckResult]:
+        if self._faces is None:
+            return []
+        faces = self._faces.faces(image)
+        biggest = faces[0].height_fraction if faces else 0.0
+        unexpected = biggest >= self._cfg.broll_max_face_fraction
+        return [
+            CheckResult(
+                name="no_people",
+                status=CheckStatus.FAILED if unexpected else CheckStatus.PASSED,
+                hard=True,
+                score=0.0 if unexpected else None,
+                detail=(
+                    f"unexpected face detected in cutaway ({biggest:.0%} of frame height)"
+                    if unexpected
+                    else ""
+                ),
+                fix_hint=(
+                    "Remove all people, faces, and human figures; show only the empty location "
+                    "or object."
+                    if unexpected
+                    else None
+                ),
+                metrics={"broll_face_height_fraction": round(biggest, 4)},
+            )
+        ]
 
     def _sharpness_check(self, image: np.ndarray) -> CheckResult:
         value = sharpness(image)
@@ -115,7 +145,11 @@ class ImageQC:
         )
 
     def _face_checks(
-        self, image: np.ndarray, shot: Shot, reference: IdentityReference | None
+        self,
+        image: np.ndarray,
+        shot: Shot,
+        manifest: Manifest,
+        reference: IdentityReference | None,
     ) -> list[CheckResult]:
         if self._faces is None:
             return [
@@ -133,6 +167,21 @@ class ImageQC:
                     fix_hint="Show the singer facing the camera with the face clearly visible.",
                 )
             ]
+        singing_count = len(manifest.singing_characters(shot))
+        if singing_count >= 2 and len(faces) < 2:
+            return [
+                CheckResult(
+                    name="face_present",
+                    status=CheckStatus.FAILED,
+                    hard=True,
+                    detail="only 1 face detected; shot requires both singers visible",
+                    fix_hint=(
+                        "Show both singers clearly in a medium close-up two-shot with both faces "
+                        "and mouths unobstructed."
+                    ),
+                    metrics={"detected_faces": float(len(faces))},
+                )
+            ]
         scored_faces = (
             [(f, s) for f in faces if (s := reference.similarity(f)) is not None]
             if reference is not None
@@ -141,25 +190,78 @@ class ImageQC:
         singer, similarity = (
             max(scored_faces, key=lambda pair: pair[1]) if scored_faces else (faces[0], None)
         )
-        minimum = self._cfg.min_face_fraction[shot.framing]
-        too_small = singer.height_fraction < minimum
-        framing = CheckResult(
-            name="face_framing",
-            status=CheckStatus.FAILED if too_small else CheckStatus.PASSED,
-            # The mouth must be large enough to animate, so this is hard for lip-sync shots.
-            hard=shot.type is ShotType.LIPSYNC,
-            score=linear_score(singer.height_fraction, minimum * 0.5, minimum),
-            detail=(
-                f"face is {singer.height_fraction:.0%} of frame height; "
-                f"{shot.framing.value} needs at least {minimum:.0%}"
-            )
-            if too_small
-            else "",
-            fix_hint=f"Frame tighter: a true {shot.framing.value.replace('_', ' ')} on the singer."
-            if too_small
-            else None,
-            metrics={"face_height_fraction": round(singer.height_fraction, 4)},
+        minimum = self._cfg.min_face_fraction.get(shot.framing, 0.0)
+        maximum = self._cfg.max_face_fraction.get(shot.framing, 1.0)
+        largest_fraction = (
+            max(singer.height_fraction, faces[0].height_fraction)
+            if singing_count >= 2
+            else singer.height_fraction
         )
+        co_singer_minimum = minimum * 0.75
+        co_singer_small = (
+            singing_count >= 2
+            and min(singer.height_fraction, faces[1].height_fraction) < co_singer_minimum
+        )
+        too_small = singer.height_fraction < minimum if singing_count < 2 else co_singer_small
+        too_large = largest_fraction > maximum
+        if too_large:
+            framing = CheckResult(
+                name="face_framing",
+                status=CheckStatus.FAILED,
+                hard=True,
+                score=linear_score(largest_fraction, maximum * 1.5, maximum),
+                detail=(
+                    f"face is {largest_fraction:.0%} of frame height; "
+                    f"{shot.framing.value} allows at most {maximum:.0%} "
+                    "(subject is too large in frame or vertically squashed)"
+                ),
+                fix_hint=(
+                    f"Pull back to a true {shot.framing.value.replace('_', ' ')} shot with "
+                    "realistic human scale against architecture and natural full-length body "
+                    "proportions."
+                ),
+                metrics={"face_height_fraction": round(largest_fraction, 4)},
+            )
+        elif co_singer_small:
+            smaller = min(singer.height_fraction, faces[1].height_fraction)
+            framing = CheckResult(
+                name="face_framing",
+                status=CheckStatus.FAILED,
+                hard=True,
+                score=linear_score(smaller, co_singer_minimum * 0.5, co_singer_minimum),
+                detail=(
+                    f"co-singer face is {smaller:.0%} of frame height; "
+                    f"{shot.framing.value} two-shot needs at least {co_singer_minimum:.0%}"
+                ),
+                fix_hint=(
+                    "Stage both singers side by side at similar distance in a medium close-up "
+                    "two-shot so both mouths are large enough to lip-sync."
+                ),
+                metrics={
+                    "face_height_fraction": round(singer.height_fraction, 4),
+                    "second_face_height_fraction": round(faces[1].height_fraction, 4),
+                },
+            )
+        else:
+            framing = CheckResult(
+                name="face_framing",
+                status=CheckStatus.FAILED if too_small else CheckStatus.PASSED,
+                # The mouth must be large enough to animate, so this is hard for lip-sync shots.
+                hard=shot.type is ShotType.LIPSYNC,
+                score=linear_score(singer.height_fraction, minimum * 0.5, minimum),
+                detail=(
+                    f"face is {singer.height_fraction:.0%} of frame height; "
+                    f"{shot.framing.value} needs at least {minimum:.0%}"
+                )
+                if too_small
+                else "",
+                fix_hint=(
+                    f"Frame tighter: a true {shot.framing.value.replace('_', ' ')} on the singer."
+                    if too_small
+                    else None
+                ),
+                metrics={"face_height_fraction": round(singer.height_fraction, 4)},
+            )
         present = CheckResult(name="face_present", status=CheckStatus.PASSED, hard=True)
         identity = identity_check(similarity, self._cfg.identity_hard_min, self._cfg.identity_good)
         return [present, framing, identity]

@@ -31,10 +31,17 @@ METRIC_CONFIG: dict[str, tuple[str, bool]] = {
     "similarity": ("qc.image.identity_hard_min / qc.video.identity_hard_min", True),
     "laplacian_variance": ("qc.image.sharpness_bad", True),
     "face_height_fraction": ("qc.image.min_face_fraction[<framing>]", True),
+    "broll_face_height_fraction": ("qc.image.broll_max_face_fraction", False),
     "face_presence": ("qc.video.face_presence_min", True),
     "median_motion": ("qc.video.static_max_motion", True),
     "peak_motion": ("qc.video.jump_cut_threshold", False),
     "p95_motion": ("qc.video.flicker_bad", False),
+    "vision_spec": ("qc.image.vision_spec_hard_min / qc.video.vision_spec_hard_min", True),
+    "vision_artifacts": ("qc.image.vision_hard_min / qc.video.vision_hard_min", True),
+    "vision_character": (
+        "qc.image.vision_character_hard_min / qc.video.vision_character_hard_min",
+        True,
+    ),
 }
 _IGNORED_METRICS = {"width", "height", "duration", "lag_seconds"}
 

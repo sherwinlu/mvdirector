@@ -57,9 +57,14 @@ class QualityGates:
         active = ["dimensions", "sharpness", "duration", "temporal"]
         skipped: list[tuple[str, str]] = []
         if self.face_analyzer is not None:
-            active.extend(["face_present", "face_framing"])
+            active.extend(["face_present", "face_framing", "no_people"])
         else:
-            skipped.append(("face_present, face_framing", f"{self.face_backend} unavailable"))
+            skipped.append(
+                (
+                    "face_present, face_framing, no_people",
+                    f"{self.face_backend} unavailable",
+                )
+            )
         if self.lipsync_scorer is not None or self.mouth_tracker is not None:
             active.extend(["face_presence", "lipsync"])
         else:

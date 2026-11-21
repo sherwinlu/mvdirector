@@ -577,10 +577,19 @@ def upscale(
         False, "--force", help="Upscale the best available clip even if pending review."
     ),
     overwrite: bool = typer.Option(False, help="Re-upscale clips that were already upscaled."),
+    width: int | None = typer.Option(None, help="Override target upscale width (even >= 64)."),
+    height: int | None = typer.Option(None, help="Override target upscale height (even >= 64)."),
 ) -> None:
     """Upscale winning/approved draft clips through the optional 'upscale' workflow."""
     try:
-        paths = api.upscale(project_dir, shot or None, force=force, overwrite=overwrite)
+        paths = api.upscale(
+            project_dir,
+            shot or None,
+            force=force,
+            overwrite=overwrite,
+            width=width,
+            height=height,
+        )
     except MVDError as exc:
         raise _fail(exc) from exc
     if not paths:
@@ -778,11 +787,24 @@ def assemble(
     project_dir: Path = ProjectDir,
     output: Path = typer.Option(None, help="Output file. Defaults to output/<title>.mp4."),
     force: bool = typer.Option(False, help="Build a draft even if shots are unfinished."),
+    draft: bool = typer.Option(
+        False, "--draft", help="Assemble at draft resolution and ignore upscaled clips."
+    ),
+    width: int | None = typer.Option(None, help="Override assembly width (even >= 64)."),
+    height: int | None = typer.Option(None, help="Override assembly height (even >= 64)."),
     review_mode: ReviewMode = ModeOption,
 ) -> None:
     """Join the approved clips and lay the original mix over them."""
     try:
-        result = api.assemble(project_dir, output, force=force, review_mode=review_mode)
+        result = api.assemble(
+            project_dir,
+            output,
+            force=force,
+            review_mode=review_mode,
+            draft=draft,
+            width=width,
+            height=height,
+        )
     except MVDError as exc:
         raise _fail(exc) from exc
     typer.echo(f"Wrote {result}")

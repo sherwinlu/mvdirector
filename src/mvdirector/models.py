@@ -68,6 +68,28 @@ class TimeSpan(StrictModel):
         return max(0.0, min(self.end, end) - max(self.start, start))
 
 
+BOTH_VOICES = "both"
+
+
+class VocalTurn(TimeSpan):
+    """A contiguous vocal phrase attributed to one acoustic voice cluster or simultaneous duet."""
+
+    voice: str = Field(
+        description=(
+            "Acoustic voice id ('voice_1', 'voice_2', ordered low-to-high pitch, or 'both' "
+            "when multiple voices sing simultaneously)."
+        )
+    )
+    median_f0_hz: float | None = Field(
+        default=None, description="Median fundamental frequency in Hz across voiced frames."
+    )
+
+    @field_validator("voice")
+    @classmethod
+    def _check_voice(cls, value: str) -> str:
+        return validate_safe_id(value, "voice id")
+
+
 class LyricLine(StrictModel):
     text: str
     section: str | None = None
@@ -85,6 +107,10 @@ class Analysis(StrictModel):
     bars: list[float] = Field(description="Start time of each bar, in seconds.")
     bar_intensity: list[float] = Field(description="Loudness of each bar, scaled 0-1.")
     vocal_windows: list[TimeSpan]
+    vocal_turns: list[VocalTurn] = Field(
+        default_factory=list,
+        description="Diarized vocal turns grouped by acoustic voice pitch and timbre.",
+    )
     lyric_lines: list[LyricLine] = Field(default_factory=list)
 
     @field_validator("schema_version")
@@ -280,6 +306,13 @@ class AudioSlice(StrictModel):
     start: float
     end: float
     head_handle: float = Field(description="Seconds between slice start and shot start.")
+    mute_spans: list[TimeSpan] = Field(
+        default_factory=list,
+        description=(
+            "Song-timeline spans silenced inside this slice so another singer's voice does not "
+            "bleed into lip-sync."
+        ),
+    )
 
 
 class Shot(StrictModel):
@@ -299,6 +332,13 @@ class Shot(StrictModel):
     characters: list[str] = Field(
         default_factory=list,
         description="All character ids visible in this shot (for duets, two-shots, or bands).",
+    )
+    singers: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Character ids actively singing in this shot (1 for solo A or B, 2+ when singing "
+            "together in unison/harmony; empty when not singing)."
+        ),
     )
     wardrobe: str | None = Field(
         default=None, description="Wardrobe state id worn in the shot's first frame."
@@ -347,7 +387,7 @@ class Shot(StrictModel):
     def _check_character(cls, value: str | None) -> str | None:
         return validate_safe_id(value, "character id") if value is not None else None
 
-    @field_validator("characters")
+    @field_validator("characters", "singers")
     @classmethod
     def _check_characters(cls, value: list[str]) -> list[str]:
         return [validate_safe_id(item, "character id") for item in value]
@@ -708,6 +748,27 @@ class Manifest(StrictModel):
             if resolved and resolved not in ids:
                 ids.append(resolved)
         return [(cid, self.characters[cid], self.shot_wardrobe(shot, cid)) for cid in ids]
+
+    def singing_characters(self, shot: Shot) -> list[tuple[str | None, Character, str | None]]:
+        """Characters actively singing in ``shot`` (1 for solo, 2+ when singing together)."""
+        if shot.type is not ShotType.LIPSYNC:
+            return []
+        if not self.characters:
+            return [(None, self.character, shot.wardrobe)]
+        ids: list[str] = []
+        for cid in shot.singers:
+            resolved = self.resolve_character_id(cid)
+            if resolved and resolved not in ids:
+                ids.append(resolved)
+        if not ids:
+            primary = self.resolve_character_id(shot.character) or self.primary_character_id()
+            if primary:
+                ids.append(primary)
+        return [(cid, self.characters[cid], self.shot_wardrobe(shot, cid)) for cid in ids]
+
+    def active_singer_ids(self, shot: Shot) -> set[str]:
+        """Canonical character ids actively singing in ``shot``."""
+        return {cid for cid, _, _ in self.singing_characters(shot) if cid is not None}
 
     def shot(self, shot_id: str) -> Shot:
         for shot in self.shots:

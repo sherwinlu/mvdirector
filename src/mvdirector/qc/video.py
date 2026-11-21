@@ -101,6 +101,7 @@ class VideoQC:
             self._cfg.vision_character_hard_min,
             reference_image,
             extra_references=extra_references,
+            spec_hard_min=self._cfg.vision_spec_hard_min,
         )
         return aggregate(checks, self._qc.weights, self._qc.pass_score)
 
@@ -238,46 +239,96 @@ class VideoQC:
         if lipsync.is_silent(envelope):
             return [skipped(n, "no vocal in this audio slice") for n in names]
 
-        visible_count = len(manifest.visible_characters(shot))
+        singing_count = len(manifest.singing_characters(shot))
+        needed_singers = min(singing_count, 2) if singing_count >= 2 else 1
+        visible_count = max(len(manifest.visible_characters(shot)), needed_singers)
+        max_faces = min(max(visible_count, 1), 4)
+        multi_capable = False
         if self._lipsync_scorer is not None:
-            result = self._lipsync_scorer.score(
-                frames,
-                fps,
-                mono,
-                sample_rate,
-                self._cfg.lipsync_max_lag_seconds,
-                max_faces=min(max(visible_count, 1), 4),
-            )
+            score_all = getattr(self._lipsync_scorer, "score_all", None)
+            if visible_count > 1 and callable(score_all):
+                measurements = score_all(
+                    frames,
+                    fps,
+                    mono,
+                    sample_rate,
+                    self._cfg.lipsync_max_lag_seconds,
+                    max_faces=max_faces,
+                )
+                multi_capable = True
+            else:
+                measurements = [
+                    self._lipsync_scorer.score(
+                        frames,
+                        fps,
+                        mono,
+                        sample_rate,
+                        self._cfg.lipsync_max_lag_seconds,
+                        max_faces=max_faces,
+                    )
+                ]
         else:
             assert self._mouth is not None
             max_lag = max(1, round(self._cfg.lipsync_max_lag_seconds * fps))
             track_all = getattr(self._mouth, "track_all", None)
             if visible_count > 1 and callable(track_all):
-                series_list = track_all(frames, max_faces=min(visible_count, 4))
+                series_list = track_all(frames, max_faces=max_faces)
+                multi_capable = True
             else:
                 series_list = [self._mouth.track(frames)]
             measurements = [
                 lipsync.measure_sync(series, envelope, max_lag) for series in series_list
             ]
+
+        if needed_singers >= 2 and multi_capable:
+            if len(measurements) < needed_singers:
+                result = lipsync.SyncMeasurement(correlation=0.0, lag_frames=0, face_presence=0.0)
+            else:
+                ordered = sorted(
+                    measurements,
+                    key=lambda m: (
+                        m.face_presence >= self._cfg.face_presence_min,
+                        m.correlation,
+                        m.face_presence,
+                    ),
+                    reverse=True,
+                )
+                result = ordered[needed_singers - 1]
+        else:
             present_measurements = [
                 m for m in measurements if m.face_presence >= self._cfg.face_presence_min
             ]
             if present_measurements:
                 result = max(present_measurements, key=lambda m: (m.correlation, m.face_presence))
-            else:
+            elif measurements:
                 result = max(measurements, key=lambda m: (m.face_presence, m.correlation))
+            else:
+                result = lipsync.SyncMeasurement(correlation=0.0, lag_frames=0, face_presence=0.0)
 
         presence_ok = result.face_presence >= self._cfg.face_presence_min
+        tracked_singers = sum(
+            1 for m in measurements if m.face_presence >= self._cfg.face_presence_min
+        )
+        if presence_ok:
+            presence_detail, presence_hint = "", None
+        elif needed_singers >= 2 and multi_capable:
+            presence_detail = (
+                f"both singers must stay tracked (tracked {tracked_singers} of "
+                f"{needed_singers} singing faces)"
+            )
+            presence_hint = (
+                "Keep both singers facing the camera in a medium close-up two-shot for the whole "
+                "clip; neither singer may turn away."
+            )
+        else:
+            presence_detail = f"face tracked in only {result.face_presence:.0%} of frames"
+            presence_hint = "Keep the singer facing the camera for the whole clip; no turning away."
         presence = CheckResult(
             name="face_presence",
             status=CheckStatus.PASSED if presence_ok else CheckStatus.FAILED,
             hard=True,
-            detail=""
-            if presence_ok
-            else f"face tracked in only {result.face_presence:.0%} of frames",
-            fix_hint=None
-            if presence_ok
-            else "Keep the singer facing the camera for the whole clip; no turning away.",
+            detail=presence_detail,
+            fix_hint=presence_hint,
             metrics={"face_presence": round(result.face_presence, 3)},
         )
         in_sync = result.correlation >= self._cfg.lipsync_min
@@ -289,6 +340,25 @@ class VideoQC:
         }
         if result.confidence is not None:
             sync_metrics["sync_confidence"] = round(result.confidence, 4)
+        if in_sync:
+            sync_detail, sync_hint = "", None
+        elif needed_singers >= 2 and multi_capable:
+            sync_detail = (
+                "both singers must lip-sync together; co-singer mouth movement does not follow "
+                f"the vocal (correlation {result.correlation:.2f})"
+            )
+            sync_hint = (
+                "Both singers must visibly sing together with clear, unobstructed mouth movement "
+                "in time with the vocal."
+            )
+        else:
+            sync_detail = (
+                f"mouth movement does not follow the vocal (correlation {result.correlation:.2f})"
+            )
+            sync_hint = (
+                "Keep the face frontal with the mouth unobstructed, and simplify body and "
+                "camera movement so the mouth can follow the vocal."
+            )
         sync = CheckResult(
             name="lipsync",
             status=CheckStatus.PASSED if in_sync else CheckStatus.FAILED,
@@ -297,15 +367,8 @@ class VideoQC:
             score=linear_score(result.correlation, self._cfg.lipsync_bad, self._cfg.lipsync_good)
             if blocking or in_sync
             else None,
-            detail=""
-            if in_sync
-            else f"mouth movement does not follow the vocal (correlation {result.correlation:.2f})",
-            fix_hint=None
-            if in_sync
-            else (
-                "Keep the face frontal with the mouth unobstructed, and simplify body and "
-                "camera movement so the mouth can follow the vocal."
-            ),
+            detail=sync_detail,
+            fix_hint=sync_hint,
             metrics=sync_metrics,
         )
         return [presence, sync]

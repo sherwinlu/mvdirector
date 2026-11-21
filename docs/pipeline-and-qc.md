@@ -74,7 +74,8 @@ The shot-direction prompt also steers the creative arc: a section arc (restraine
 
 ### Deterministic Rules Enforced in Code
 
-- **Cut points and shot types come from the audio.** Shots cover the song with no gaps and land on bar lines (or vocal phrases when `video.cut_mode: phrases`). Setting `video.dynamic_pacing: true` scales shot length inversely with bar loudness and snaps cuts to lyric section boundaries; when lyric tags name multiple vocalists (`[Verse 1: Elias]`, `[Chorus (Odalie)]`), section snapping is enabled automatically (override with `video.snap_sections: always | never`).
+- **Cut points, voice diarization, and solo vs simultaneous duet staging come from the audio.** Shots cover the song with no gaps and land on bar lines (or vocal phrases when `video.cut_mode: phrases`). `mvd analyze` diarizes multi-singer vocal stems into solo voice clusters (`voice_1`, `voice_2`) and simultaneous harmony/unison turns (`both`) in `Analysis.vocal_turns`, splitting even zero-gap transitions (`solo <-> solo` and `solo <-> both`). When lyric tags name multiple vocalists (`[Verse 1: Elias]`, `[Chorus (Odalie)]`, `[Chorus: Both]`, `[Chorus: Elias & Odalie]`) or `vocal_turns` detects multiple voices, cuts land on vocal transitions rather than snapping across active singing, `Shot.singers` records who is actively singing (widening simultaneous duet shots to `medium_close` two-shots, instructing silent listeners in solo two-shots to keep mouths closed, and requiring two present/synced faces in `ImageQC` and `VideoQC`), and `AudioSlice.mute_spans` silences foreign vocals across handles and solo turns so singers never lip-sync each other's lines. Setting `video.dynamic_pacing: true` also scales shot length inversely with bar loudness and snaps structural sections to bar lines.
+- **Empty-scene `performance` guard:** If the LLM writes an empty landscape/object `still_prompt` on an instrumental `performance` shot without setting `type: broll`, `mvd plan` automatically converts it to `broll` (when within the 2-cutaway run limit) so the singer portrait is not pasted onto an empty establishing shot.
 - **Lip-sync framing:** A shot starts as `lipsync` when enough of it is sung (`video.lipsync_min_vocal_fraction`), before `planning.max_lipsync_share` thins excess sung shots into cutaways. Lip-sync shots get the vocal-stem slice and are never framed wider than `planning.lipsync_widest_framing` (`medium_close` by default).
 - **How much of the song is the singer singing to camera:** `planning.max_lipsync_share` caps it, by screen time. A rough guide from music-video practice: `0.7` for a performance-driven video, `0.45` for a hybrid (the usual commercial mix) and `0.2` for a narrative one. Sung shots over the cap become cutaways: no singer, the vocal plays over an object, place or detail that fits the lyric. The quietest non-chorus/non-hook shots go first (including verses, pre-chorus, bridge or outro); chorus and hook shots and the last sung shot always stay, in a duet each singer keeps at least half of their sung shots on camera, and the singer is never off screen for more than two shots in a row (including when the LLM turns instrumental `performance` shots into `broll`). Cutaways need no face to stay consistent and no lip-sync, so they also cut render time. The default is `0.45`, the hybrid mix; set `null` to keep every sung shot on camera, or `0.7` for a performance-driven video. `mvd plan` logs the resulting share and the number of distinct sets, and warns when an LLM plan has fewer than three sets (on plans with at least three shots).
 - **Pace checks and rule-based framing:** Without an LLM, performance shots and cutaways are framed wide, medium or medium-close by pace, with matching movement notes, and singing shots tighten from `medium_close` to `close_up` as pace rises while keeping a steady camera. `mvd plan` warns when every shot has the same framing or when shot scale runs strongly against the song's intensity (`r < -0.25`).
@@ -148,10 +149,11 @@ A failed **hard** check rejects the attempt outright. Otherwise the attempt pass
 | `dimensions` | yes | Aspect ratio and minimum resolution |
 | `sharpness` | no | Laplacian variance |
 | `face_present` | yes | A face is detected (singer shots; MediaPipe by default) |
-| `face_framing` | lip-sync only | Face height against the minimum for the shot's framing |
+| `face_framing` | lip-sync or oversized: yes | Face height within `[min_face_fraction, max_face_fraction]` for the shot's framing (catches tiny mouths and oversized/squashed foreground figures in wide/medium shots) |
+| `no_people` | yes | Rejects unexpected faces (`>= broll_max_face_fraction`) in `broll` cutaways |
 | `identity` | yes | Face-embedding similarity to the shot's reference sheet (`qc.face_backend: insightface` only; skipped by default in favor of `vision_character`) |
-| `vision_spec` | no | Vision LLM: does the frame match the shot's framing, set, action and production rules? |
-| `vision_artifacts` | yes | Vision LLM: hands, limbs, faces, text, watermarks |
+| `vision_spec` | yes | Vision LLM (`vision_spec_hard_min`): framing, set, environmental scale, action, production rules, and explicit exclusions (`no minute hand`, `no people`) |
+| `vision_artifacts` | yes | Vision LLM (`vision_hard_min`): hands, limbs, faces, anatomical height-to-width / head-to-body proportions, text, watermarks |
 | `vision_character` | yes | Vision LLM, shown the reference sheet: same person, correct costume for the shot's wardrobe state, marks on the correct side (detail expectations scaled by framing) |
 
 **Videos**
@@ -171,8 +173,8 @@ Checks that cannot run (missing extra, wide framing, silent slice) are recorded 
 
 Applied per asset (`retry.strategies`) until one attempt passes or `retry.max_attempts` is exhausted:
 
-1. `new_seed`: same prompt, new seed.
-2. `rewrite_prompt`: the LLM rewrites the prompt from the QC failure reasons and fix hints (or appends hints when LLM is disabled).
+1. `new_seed`: same prompt, new seed (used first on stochastic artifact/sync failures).
+2. `rewrite_prompt`: the LLM rewrites the prompt from the QC failure reasons and fix hints, replacing backfiring `'no <part>'` phrasing with affirmative visual descriptions (jumped to immediately on Attempt 2 when `vision_spec`, `no_people`, or `face_framing` fails).
 3. `adjust_params`: applies `retry.adjust_params` (for example more steps).
 
 When attempts run out, the best-scoring attempt is kept and the shot is queued for review. A failed ComfyUI job counts as an attempt; an unreachable server stops the run without using any. `retry.max_generations_per_run` caps total spend per run.

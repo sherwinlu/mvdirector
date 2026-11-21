@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -17,6 +18,7 @@ from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
+import soundfile as sf
 from PIL import Image
 
 from mvdirector.errors import MediaToolError
@@ -131,6 +133,56 @@ def slice_audio(src: Path, dst: Path, start: float, end: float) -> None:
             str(dst.resolve()),
         ]
     )
+
+
+def mute_audio_spans(
+    wav_path: Path, spans: list[tuple[float, float]], *, fade_seconds: float = 0.015
+) -> None:
+    """Silence relative ``(start, end)`` spans in ``wav_path`` in-place with smooth cosine fades."""
+    if not spans:
+        return
+    info = sf.info(str(wav_path))
+    samples, sr = sf.read(str(wav_path), dtype="float64", always_2d=True)
+    n = len(samples)
+    if n == 0:
+        return
+    mask = np.ones(n, dtype=bool)
+    for rel_start, rel_end in spans:
+        if not (math.isfinite(rel_start) and math.isfinite(rel_end)):
+            continue
+        s = max(0, min(n, int(round(rel_start * sr))))
+        e = max(s, min(n, int(round(rel_end * sr))))
+        if e > s:
+            mask[s:e] = False
+    if mask.all():
+        return
+
+    gain = mask.astype(np.float64)
+    safe_fade = fade_seconds if math.isfinite(fade_seconds) and fade_seconds >= 0.0 else 0.0
+    fade_len = max(1, int(round(safe_fade * sr)))
+    padded = np.concatenate([[True], mask, [True]])
+    starts = np.flatnonzero(padded[:-1] & ~padded[1:])
+    ends = np.flatnonzero(~padded[:-1] & padded[1:])
+    for run_s, run_e in zip(starts.tolist(), ends.tolist()):
+        if run_s > 0:
+            lo = max(0, run_s - fade_len)
+            ramp_down = 0.5 * (1.0 + np.cos(np.linspace(0.0, np.pi, run_s - lo)))
+            gain[lo:run_s] = np.minimum(gain[lo:run_s], ramp_down)
+        if run_e < n:
+            hi = min(n, run_e + fade_len)
+            ramp_up = 0.5 * (1.0 - np.cos(np.linspace(0.0, np.pi, hi - run_e)))
+            gain[run_e:hi] = np.minimum(gain[run_e:hi], ramp_up)
+
+    gated = samples * gain[:, None]
+    fd, tmp_name = tempfile.mkstemp(prefix=".mvd_mute_", suffix=".wav", dir=wav_path.parent)
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        sf.write(str(tmp_path), gated, sr, subtype=info.subtype or "PCM_16")
+        os.replace(tmp_path, wav_path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def audio_to_black_video(

@@ -340,3 +340,69 @@ def test_fallback_reset_restarts_the_strategy_ladder_and_scopes_best_attempt(con
     assert "Sing more clearly." not in shot.video.prompt_override
     # best_attempt picks from the performance pass (5..8), never the earlier lipsync pass (1..4).
     assert shot.video.best_attempt().number == 8
+
+
+def test_prompt_spec_failure_jumps_immediately_to_rewrite_prompt_on_attempt_two(config, manifest):
+    llm = RewritingLLM()
+    policy = RetryPolicy(config.retry, config.seed, llm)
+    shot = manifest.shots[0]
+    shot.type = ShotType.BROLL
+    shot.still_prompt = "Grandfather clock, no minute hand."
+
+    p1 = policy.prepare(shot, AssetKind.STILL)
+    assert p1.strategy is RetryStrategy.INITIAL
+    shot.still.attempts.append(
+        Attempt(
+            number=1,
+            strategy=p1.strategy,
+            seed=p1.seed,
+            prompt=shot.still_prompt,
+            path="s001_a01.png",
+            qc=QCReport(
+                passed=False,
+                score=0.72,
+                checks=[
+                    CheckResult(
+                        name="vision_spec",
+                        status=CheckStatus.FAILED,
+                        hard=True,
+                        score=0.2,
+                        detail="clock has a minute hand",
+                        fix_hint="Show only one short hour hand on a bare center pin.",
+                    )
+                ],
+            ),
+        )
+    )
+
+    # Attempt 2 rewrites immediately rather than wasting a seed on 'no minute hand'.
+    p2 = policy.prepare(shot, AssetKind.STILL)
+    assert p2.strategy is RetryStrategy.REWRITE_PROMPT
+    assert shot.still.prompt_override.startswith("Rewritten:")
+    shot.still.attempts.append(
+        Attempt(
+            number=2,
+            strategy=p2.strategy,
+            seed=p2.seed,
+            prompt=shot.still.prompt_override,
+            path="s001_a02.png",
+            qc=_report(False, 0.3, hint="still noisy"),
+        )
+    )
+
+    # Subsequent attempts try NEW_SEED and ADJUST_PARAMS on the rewritten prompt.
+    p3 = policy.prepare(shot, AssetKind.STILL)
+    assert p3.strategy is RetryStrategy.NEW_SEED
+    assert shot.still.prompt_override.startswith("Rewritten:")
+    shot.still.attempts.append(
+        Attempt(
+            number=3,
+            strategy=p3.strategy,
+            seed=p3.seed,
+            prompt=shot.still.prompt_override,
+            path="s001_a03.png",
+            qc=_report(False, 0.3),
+        )
+    )
+    p4 = policy.prepare(shot, AssetKind.STILL)
+    assert p4.strategy is RetryStrategy.ADJUST_PARAMS

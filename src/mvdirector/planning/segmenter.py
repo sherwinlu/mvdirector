@@ -15,8 +15,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from mvdirector.audio.lyrics import section_singers
 from mvdirector.config import VideoConfig
-from mvdirector.models import Analysis, ShotType
+from mvdirector.models import BOTH_VOICES, Analysis, ShotType, TimeSpan, VocalTurn
 
 _VALID_BAR_STEPS = (16, 8, 4, 2, 1)
 _HIGH_INTENSITY_THRESHOLD = 0.80
@@ -32,6 +33,7 @@ class Segment:
     lyrics: str
     intensity: float
     section: str | None = None
+    voice: str | None = None
 
     @property
     def duration(self) -> float:
@@ -69,13 +71,78 @@ def _step_for_intensity(intensity: float, allowed_steps: list[int]) -> int:
     return min(allowed_steps, key=lambda n: abs(n - target))
 
 
-def _section_bar_indices(analysis: Analysis, bars: list[float]) -> set[int]:
+def _singer_handoff_windows(analysis: Analysis) -> list[tuple[float, float]]:
+    """Non-bleeding (gap_start, gap_end) handoff windows whenever the active singer changes."""
+    duration = analysis.duration
+    windows: list[tuple[float, float]] = []
+    for prev_t, next_t in zip(analysis.vocal_turns[:-1], analysis.vocal_turns[1:]):
+        if prev_t.voice == next_t.voice:
+            continue
+        if next_t.start < prev_t.end - 0.15:
+            if 0.0 < next_t.start < duration:
+                windows.append((next_t.start, next_t.start))
+            if abs(prev_t.end - next_t.end) > 0.15 and 0.0 < prev_t.end < duration:
+                windows.append((prev_t.end, prev_t.end))
+            continue
+        gap_s = min(prev_t.end, next_t.start)
+        gap_e = max(prev_t.end, next_t.start)
+        if 0.0 < 0.5 * (gap_s + gap_e) < duration:
+            windows.append((gap_s, gap_e))
+
+    prev_singers: set[str] | None | object = False
+    prev_end = 0.0
+    timed_lines = sorted(
+        (ln for ln in analysis.lyric_lines if ln.start is not None and ln.end is not None),
+        key=lambda ln: ln.start,  # type: ignore[arg-type, return-value]
+    )
+    for line in timed_lines:
+        curr = section_singers(line.section)
+        has_explicit = curr is None or bool(curr)
+        if not has_explicit:
+            continue
+        if prev_singers is not False and curr != prev_singers:
+            l_start = float(line.start)  # type: ignore[arg-type]
+            gap_s = min(prev_end, l_start)
+            gap_e = max(prev_end, l_start)
+            mid = 0.5 * (gap_s + gap_e)
+            if 0.0 < mid < duration and not any(
+                abs(0.5 * (a + b) - mid) <= 1.0 for a, b in windows
+            ):
+                windows.append((gap_s, gap_e))
+        prev_singers = curr
+        prev_end = float(line.end)  # type: ignore[arg-type]
+
+    windows.sort(key=lambda pair: 0.5 * (pair[0] + pair[1]))
+    return windows
+
+
+def _pick_handoff_cut(
+    gap_start: float, gap_end: float, bars: list[float], beats: list[float]
+) -> float:
+    """Cut inside a singer-handoff gap, snapping to a bar or beat only if it avoids vocal bleed."""
+    mid = 0.5 * (gap_start + gap_end)
+    bars_in_gap = [b for b in bars if gap_start - 0.05 <= b <= gap_end + 0.05]
+    if bars_in_gap:
+        best_bar = min(bars_in_gap, key=lambda b: abs(b - mid))
+        return round(best_bar, 3)
+    beats_in_gap = [bt for bt in beats if gap_start - 0.03 <= bt <= gap_end + 0.03]
+    if beats_in_gap:
+        best_beat = min(beats_in_gap, key=lambda bt: abs(bt - mid))
+        return round(best_beat, 3)
+    return round(mid, 3)
+
+
+def _section_bar_indices(
+    analysis: Analysis, bars: list[float], *, exclude_near: list[float] | None = None
+) -> set[int]:
     """Bar indices where a new song section begins, snapped to the nearest bar line."""
     if not bars:
         return set()
     bar_arr = np.asarray(bars, dtype=np.float64)
     indices: set[int] = set()
     for start_time, _ in section_timeline(analysis):
+        if exclude_near and any(abs(start_time - h) <= 1.2 for h in exclude_near):
+            continue
         idx = int(np.argmin(np.abs(bar_arr - start_time)))
         if 0 < idx < len(bars):
             indices.add(idx)
@@ -121,6 +188,19 @@ def cut_points(
     multi-character songs).
     """
     duration, bars = analysis.duration, analysis.bars
+    voices = {t.voice for t in analysis.vocal_turns}
+    use_handoffs = (
+        snap_sections or video.cut_mode == "phrases" or len(voices) >= 2 or BOTH_VOICES in voices
+    )
+    handoff_cuts = (
+        [
+            cut
+            for gs, ge in _singer_handoff_windows(analysis)
+            if 0.0 < (cut := _pick_handoff_cut(gs, ge, bars, analysis.beats)) < duration
+        ]
+        if use_handoffs
+        else []
+    )
     points = [0.0]
     if video.cut_mode == "phrases":
         points = _phrase_points(analysis, bars)
@@ -129,7 +209,7 @@ def cut_points(
         allowed_steps = _allowed_bar_steps(bar_length, video)
         bars_per_shot = allowed_steps[0]
 
-        if not video.dynamic_pacing and not snap_sections:
+        if not video.dynamic_pacing and not snap_sections and not handoff_cuts:
             points += [b for b in bars[::bars_per_shot] if 0.0 < b < duration]
         else:
             intensities = analysis.bar_intensity
@@ -139,7 +219,7 @@ def cut_points(
                 and (max(intensities[: len(bars)]) - min(intensities[: len(bars)]))
                 >= _MIN_INTENSITY_SPREAD
             )
-            section_bars = _section_bar_indices(analysis, bars)
+            section_bars = _section_bar_indices(analysis, bars, exclude_near=handoff_cuts)
             idx = 0
             num_bars = len(bars)
             while idx < num_bars:
@@ -167,14 +247,25 @@ def cut_points(
                         next_idx = candidate
                         break
                 idx = next_idx
-    if points[-1] != duration:
+    if handoff_cuts:
+        points = sorted({round(p, 3) for p in [*points, *handoff_cuts, 0.0, duration]})
+    elif points[-1] != duration:
         points.append(duration)
 
-    # Drop boundaries that would leave a sliver (typically a pickup before bar one).
+    protected = {round(c, 3) for c in handoff_cuts}
+    # Drop boundaries that would leave a sliver; prefer keeping singer-handoff cuts over bar cuts.
     merged = [points[0]]
     for point in points[1:-1]:
+        r_point = round(point, 3)
         if point - merged[-1] >= video.min_clip_seconds:
             merged.append(point)
+        elif (
+            r_point in protected
+            and len(merged) > 1
+            and round(merged[-1], 3) not in protected
+            and point - merged[-2] >= video.min_clip_seconds
+        ):
+            merged[-1] = point
     if len(merged) > 1 and duration - merged[-1] < video.min_clip_seconds:
         merged.pop()
     merged.append(duration)
@@ -212,6 +303,53 @@ def section_at(timeline: list[tuple[float, str]], time: float) -> str | None:
     return current
 
 
+def voice_activity_in_span(turns: list[VocalTurn], start: float, end: float) -> dict[str, float]:
+    """Seconds of solo ('voice_1', 'voice_2') and duet ('both') singing in ``[start, end]``."""
+    clipped = [
+        (max(start, t.start), min(end, t.end), t.voice)
+        for t in turns
+        if min(end, t.end) > max(start, t.start)
+    ]
+    if not clipped:
+        return {}
+    edges = sorted({s for s, _, _ in clipped} | {e for _, e, _ in clipped})
+    totals: dict[str, float] = {}
+    for a, b in zip(edges[:-1], edges[1:]):
+        if b - a <= 1e-9:
+            continue
+        mid = 0.5 * (a + b)
+        active = {v for s, e, v in clipped if s <= mid <= e}
+        if not active:
+            continue
+        voice = BOTH_VOICES if (BOTH_VOICES in active or len(active) >= 2) else next(iter(active))
+        totals[voice] = totals.get(voice, 0.0) + (b - a)
+    return totals
+
+
+def dominant_voice(turns: list[VocalTurn], start: float, end: float) -> str | None:
+    """Dominant vocal state ('voice_1', 'voice_2', or 'both') inside ``[start, end]``."""
+    totals = voice_activity_in_span(turns, start, end)
+    if not totals:
+        return None
+    best_voice, best_seconds = max(totals.items(), key=lambda pair: pair[1])
+    return best_voice if best_seconds >= 0.05 else None
+
+
+def _section_between(
+    analysis: Analysis, timeline: list[tuple[float, str]], start: float, end: float
+) -> str | None:
+    """Section of lyric lines sung in ``[start, end]``, else the timeline section at midpoint."""
+    totals: dict[str, float] = {}
+    for line in analysis.lyric_lines:
+        if line.section and line.start is not None and line.end is not None:
+            shared = TimeSpan(start=line.start, end=line.end).overlap(start, end)
+            if shared > 0:
+                totals[line.section] = totals.get(line.section, 0.0) + shared
+    if totals:
+        return max(totals.items(), key=lambda pair: pair[1])[0]
+    return section_at(timeline, (start + end) / 2)
+
+
 def segment(
     analysis: Analysis, video: VideoConfig, *, snap_sections: bool = False
 ) -> list[Segment]:
@@ -228,7 +366,8 @@ def segment(
                 type=ShotType.LIPSYNC if is_lipsync else ShotType.PERFORMANCE,
                 lyrics=_lyrics_between(analysis, start, end),
                 intensity=_intensity_between(analysis, start, end),
-                section=section_at(timeline, (start + end) / 2),
+                section=_section_between(analysis, timeline, start, end),
+                voice=dominant_voice(analysis.vocal_turns, start, end),
             )
         )
     return segments

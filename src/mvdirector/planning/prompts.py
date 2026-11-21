@@ -10,6 +10,8 @@ prompt lives next to its code in ``qc/vision.py``.
 
 from __future__ import annotations
 
+import re
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from mvdirector.models import Character, Framing, Manifest, Shot, ShotType
@@ -38,10 +40,10 @@ cutaways. Write the visual bible that every shot will follow.
     describe a real, identifiable person.
   - wardrobe: that person's costume states in the order they appear in the song. Each has a short
     id (lowercase letters, digits and underscores) and a complete description of everything worn
-    in that state, including fabric texture, weave, and natural drape. State explicitly what is
-    absent compared with their previous state (for example 'no cape'). Only add a new state when
-    clothing actually changes—never for poses, props, or rooms. Use one state if their costume
-    never changes.
+    in that state, including fabric texture, weave, and natural drape. State what is absent
+    compared with their previous state AND describe what is visibly there instead (for example
+    'bare shoulders, no cape'). Only add a new state when clothing actually changes—never for
+    poses, props, or rooms. Use one state if their costume never changes.
   - invariants: optional short phrase listing signature accessories or visual details that must
     survive across every costume change (e.g. 'glowing cyan hoop earrings in both ears'). It is
     added to every still of this character, so never put anything here that a costume change
@@ -59,8 +61,9 @@ cutaways. Write the visual bible that every shot will follow.
   a stripped, altered, or nested variant of it.
 - props: 0 to 3 recurring hero objects central to the story or choreography (e.g. a glowing
   disc, vintage guitar, helmet). Each has id (short lowercase identifier), name, sections, and a
-  description with approximate scale in centimeters, finish, and explicit negative exclusions
-  (e.g. 'no center hub, no spokes').
+  description with approximate scale in centimeters, finish, and affirmative descriptions of its
+  visible structure alongside any exclusions (e.g. 'smooth unbroken solid center face, no center
+  hub, no spokes' rather than bare 'no X' phrases alone, since image models attend to named nouns).
 - rules: 4 to 10 short rules that every shot follows (camera language, physical camera placement,
   continuity, effects, how much of the video shows the performers). For duets or groups, write
   rules that apply across the cast rather than locking every shot to a single character. Only
@@ -72,11 +75,20 @@ you are given, choose the creative details.
 Rules:
 - Return exactly one entry per shot id you were given.
 - character: the id of the primary character on camera in this shot (from CHARACTERS, when given).
-  On 'lipsync' shots, 'character' MUST be the vocalist singing that shot's section/lyrics, and
-  both still_prompt and motion_prompt must focus on that vocalist singing. Use null on 'broll'.
-- characters: list of all character ids visible in the frame (primary 'character' first). On
+  On 'lipsync' shots, follow the shot's vocal cue:
+  * vocal='solo' singer='<id>': 'character' MUST be that single vocalist, and ONLY that vocalist
+    sings in still_prompt and motion_prompt. If a second character appears in a medium_close
+    reaction two-shot, describe the second character listening or reacting with mouth closed, never
+    singing.
+  * vocal='together' singers=[...]: BOTH listed vocalists sing simultaneously in unison or harmony.
+    Use framing medium_close (never close_up, which fits only one face), include all singing ids in
+    'characters', and stage both vocalists together with both faces and mouths unobstructed and
+    actively singing.
+  Use null on 'broll'.
+- characters: list of all character ids visible in the frame (primary 'character' first). On solo
   close_up shots, include only [character]. On medium_close, medium, or wide shots that show a
-  duet interaction, two-shot, or band/group performance, list every character visible in the frame.
+  simultaneous duet, reaction two-shot, or band/group performance, list every character visible in
+  the frame.
 - setting: use the exact name of one set from the visual bible, chosen for the shot's song
   section. Follow each set's sections and movement notes.
 - props: list of hero prop ids from PROPS visible in this shot (empty list when none appear).
@@ -87,16 +99,24 @@ Rules:
 - 'lipsync' shots show the active singer singing the given lyrics. Use framing close_up or
   medium_close (never medium or wide) so the singer's mouth is clearly visible and unobstructed
   (no hands, microphones, hair or foreground objects across the mouth).
-- Shots given as 'performance' have no vocals. Keep them as 'performance' (performer on camera,
-  not singing) or change them to 'broll' (no performer) where a cutaway serves the song, without
-  putting more than two 'broll' shots in a row.
+- Shots given as 'performance' have no vocals. Keep them as 'performance' (performer visibly on
+  camera, not singing) or change them to 'broll' (no performer) where a cutaway serves the song,
+  without putting more than two 'broll' shots in a row. Never leave type as 'performance' if
+  still_prompt describes only an empty landscape, building, or object with no performer in frame:
+  any shot with no performer MUST be 'broll'.
 - Shots given as 'broll' are cutaways: the vocal plays over them and no performer is shown. Keep
   them 'broll', with character and wardrobe null, and show what the lyric is about (an object, a
   place, light, weather, or an architectural detail), never a face or performer. Still give
   every shot a framing (close_up, medium_close, medium or wide): never null, even on a cutaway.
-- Match detail to shot size. Small details (identifying marks, jewelry, cuffs, props, screen
-  content) belong in close_up or medium_close shots only. In medium and wide shots, describe pose,
-  silhouette and action, not fine detail.
+- Match detail to shot size on BOTH singer shots and 'broll' cutaways. Small details (identifying
+  marks, jewelry, cuffs, clock hands, inscriptions, small props, screen content) belong in
+  close_up or medium_close shots only; never ask for tiny altered object parts in a wide shot. In
+  medium and wide shots, describe pose, silhouette, scale against architecture, and action, not
+  fine detail.
+- State absences affirmatively: image models often draw nouns named after 'no' (e.g. 'no minute
+  hand' draws a minute hand). Whenever a part is missing or excluded, describe what IS visibly
+  present in its place (e.g. 'clock dial displaying only a single short hour hand on a bare brass
+  center pin' instead of bare 'no minute hand').
 - Physical camera placement: always position the camera in open floor space at normal human
   standing or seated height on the clear side of any furniture. Never place the lens inside,
   below, level with, or passing through tables, walls, or solid objects, and never slice or
@@ -141,17 +161,26 @@ Rules:
 
 REWRITE_SYSTEM = """You fix prompts for an AI image or video model after a quality check
 rejected the result. Rewrite the prompt so the listed problems are less likely, keeping the
-shot's intent, framing and setting. Prefer simplifying (hands out of frame, calmer pose,
-camera in open floor space clear of furniture, plainer background) over piling on instructions.
+shot's intent, framing and setting.
+- Prefer simplifying (hands out of frame, calmer pose, camera in open floor space clear of
+  furniture, plainer background) over piling on instructions.
+- Replace negative 'no <part>' phrasing that backfired: image models attend to named nouns and
+  draw them anyway. Remove the forbidden noun and describe the visible state affirmatively (for
+  example, rewrite 'grandfather clock, no minute hand' as 'close-up of the tarnished brass
+  clock dial displaying only one single short hour hand on an empty center pin').
+- Fix body proportions and environmental scale explicitly: if a person looked vertically squashed,
+  stubby-legged, stiffly pasted, or giant against buildings, specify natural full-length human
+  proportions (~7.5 heads tall, normal leg-to-torso ratio), an organic in-scene pose, and concrete
+  scale against doors, windows, or architecture.
 Return the new prompt only, in the 'prompt' field."""
 
 BRIEF_SYSTEM = """You are a music video writer and Suno song producer. Given a short video
 concept, optional target duration, and musical/visual vibe, write:
 
 - lyrics: Suno-ready lyrics structured with [Section] headers ([Intro], [Verse], [Pre-Chorus],
-  [Chorus], [Bridge], [Outro]; for duets, tag performer sections like [Verse 1: Name]). Keep line
-  counts concise for the requested duration. Put ONLY sung lines or sung adlibs in (parentheses);
-  never put unspoken SFX or stage directions in parentheses.
+  [Chorus], [Bridge], [Outro]; for duets, tag solo sections like [Verse 1: Name] and simultaneous
+  sections like [Chorus: Both]). Keep line counts concise for the requested duration. Put ONLY sung
+  lines or sung adlibs in (parentheses); never put unspoken SFX or stage directions in parentheses.
 - suno_style: one dense Suno Custom Mode style prompt specifying genre, vocal register and
   phrasing, key instruments, BPM, rhythm feel, and stereo production polish.
 - visual_direction: a short creative brief covering the performer look, key costume states,
@@ -163,7 +192,8 @@ transcript and a compact audio summary (duration, BPM, vocal coverage, energy ar
 
 - lyrics: the transcribed words organized under [Section] headers ([Intro], [Verse 1],
   [Pre-Chorus], [Chorus], [Verse 2], [Bridge], [Outro]; for duets or alternating vocalists, tag
-  sections like [Verse 1: Singer 1]). Strictly preserve the actual sung words from the transcript
+  solo sections like [Verse 1: Singer 1] and simultaneous duet sections like [Chorus: Both]).
+  Strictly preserve the actual sung words from the transcript
   so word-level audio alignment for lip-sync stays accurate—fix only capitalization, punctuation,
   and line breaks, and never invent new verses or rewrite sung words (keep "kind of" as "kind of"
   and contractions as sung, and fix a word only when the transcript is plainly a mishearing).
@@ -321,6 +351,78 @@ CAMERA_PLACEMENT_NOTE = (
     "Camera positioned in open floor space at human eye height; no solid furniture intersecting "
     "or occluding the subject."
 )
+_FRAMING_SCALE_NOTE = {
+    Framing.CLOSE_UP: CAMERA_PLACEMENT_NOTE,
+    Framing.MEDIUM_CLOSE: (
+        "Camera positioned in open floor space at human eye height; chest-up medium close-up "
+        "with natural head-to-shoulder proportions and no solid furniture intersecting or "
+        "occluding the subject."
+    ),
+    Framing.MEDIUM: (
+        "Camera positioned in open floor space at human eye height; waist-up or knee-up medium "
+        "framing with natural human height-to-width proportions, relaxed natural posture (do not "
+        "copy the stiff studio pose of the reference portrait), and no solid furniture "
+        "intersecting or occluding the subject."
+    ),
+    Framing.WIDE: (
+        "True wide environmental framing: scale the performer to realistic human size relative to "
+        "doors, windows, and architecture (occupying roughly one-quarter to one-half of frame "
+        "height, never towering over buildings), with natural elongated full-body proportions "
+        "(~7.5 heads tall, normal leg-to-torso ratio, never vertically squashed) and a natural "
+        "in-scene pose rather than the stiff frontal pose of the reference portrait."
+    ),
+}
+_ABSTRACT_NEGATION_HEADS = frozenset(
+    {
+        "doubt",
+        "escape",
+        "fear",
+        "longer",
+        "matter",
+        "mercy",
+        "more",
+        "need",
+        "one",
+        "other",
+        "place",
+        "promise",
+        "promises",
+        "reason",
+        "regret",
+        "rest",
+        "return",
+        "rush",
+        "sleep",
+        "sound",
+        "time",
+        "tomorrow",
+        "turning",
+        "use",
+        "way",
+        "wonder",
+    }
+)
+_EXCLUSION_RE = re.compile(
+    r"\b(?:no|without(?:\s+(?:a|an|any))?)\s+"
+    r"([a-z][a-z0-9-]*(?:\s+[a-z][a-z0-9-]*){0,2}?)"
+    r"(?=[,.;:!?)]|\s+(?:and|or|in|on|at|with|across|over|under|near|by|from|that|which|while)\b|$)",
+    flags=re.IGNORECASE,
+)
+
+
+def extract_negative_exclusions(prompt: str) -> list[str]:
+    """Extract concrete forbidden objects/parts ('no minute hand' -> 'minute hand') from prose."""
+    found: list[str] = []
+    for match in _EXCLUSION_RE.finditer(prompt):
+        phrase = " ".join(match.group(1).lower().split())
+        head = phrase.split()[0] if phrase else ""
+        if not head or head in _ABSTRACT_NEGATION_HEADS:
+            continue
+        if phrase not in found:
+            found.append(phrase)
+    return found
+
+
 _FRAMING_LABEL = {
     Framing.CLOSE_UP: "close-up",
     Framing.MEDIUM_CLOSE: "medium close-up",
@@ -566,6 +668,14 @@ def prop_prompt(manifest: Manifest, prop_query: str) -> str:
     ).replace("  ", " ")
 
 
+def join_names(names: Sequence[str]) -> str:
+    """Format 1, 2, or 3+ display names cleanly ('A', 'A and B', 'A, B, and C')."""
+    items = [n for n in names if n]
+    if len(items) <= 2:
+        return " and ".join(items)
+    return f"{', '.join(items[:-1])}, and {items[-1]}"
+
+
 def _sentence(text: str) -> str:
     """``text`` ended with a full stop, unless it already ends a sentence."""
     text = text.strip()
@@ -626,11 +736,35 @@ def compose_still_prompt(
             for prop in resolved_props:
                 if prop.description:
                     parts.append(f"Hero prop ({prop.name}): {prop.description}")
+    visible = manifest.visible_characters(shot) if shot.type.shows_singer else []
+    singing = manifest.singing_characters(shot)
+    singing_ids = {cid for cid, _, _ in singing if cid is not None}
     if shot.type is ShotType.LIPSYNC:
-        parts.append("Face clearly visible, mouth unobstructed.")
+        if len(singing) >= 2:
+            names = join_names([c.name or cid or "performer" for cid, c, _ in singing])
+            prefix = "Both" if len(singing) == 2 else "All singers (" + names + ")"
+            together_line = (
+                f"Both {names} singing together, both faces clearly visible and "
+                "mouths unobstructed."
+                if len(singing) == 2
+                else f"{prefix} singing together, faces clearly visible and mouths unobstructed."
+            )
+            parts.append(together_line)
+        elif len(visible) > 1 and len(singing) == 1:
+            solo_id, solo_char, _ = singing[0]
+            solo_label = solo_char.name or solo_id or "lead"
+            listeners = [c.name or cid or "performer" for cid, c, _ in visible if cid != solo_id]
+            listener_text = join_names(listeners)
+            verb = "listen" if len(listeners) > 1 else "listens"
+            mouth_noun = "mouths" if len(listeners) > 1 else "mouth"
+            parts.append(
+                f"Face clearly visible, mouth unobstructed. Only {solo_label} is singing; "
+                f"{listener_text} {verb} with {mouth_noun} closed."
+            )
+        else:
+            parts.append("Face clearly visible, mouth unobstructed.")
     if shot.type.shows_singer:
-        parts.append(CAMERA_PLACEMENT_NOTE)
-        visible = manifest.visible_characters(shot)
+        parts.append(_FRAMING_SCALE_NOTE.get(shot.framing, CAMERA_PLACEMENT_NOTE))
         if len(visible) == 1:
             char_id, character, state_id = visible[0]
             if look := _look(character, state_id):
@@ -647,7 +781,12 @@ def compose_still_prompt(
             for sec_id, sec_char, sec_state in visible[1:]:
                 if look := _look(sec_char, sec_state):
                     sec_label = sec_char.name or sec_id or "performer"
-                    parts.append(f"Also in frame ({sec_label}): {look}")
+                    role_prefix = (
+                        f"Co-singer in frame ({sec_label})"
+                        if sec_id in singing_ids
+                        else f"Also in frame ({sec_label})"
+                    )
+                    parts.append(f"{role_prefix}: {look}")
     parts.append(_style_line(bible.style, bible.palette, bible.lighting))
     return " ".join(part.strip() for part in parts if part.strip())
 
@@ -684,15 +823,34 @@ def compose_motion_prompt(
             "character, wardrobe, and location consistent across every cut."
         )
     if shot.type is ShotType.LIPSYNC:
-        if has_audio_video and reference_notation == "tags":
+        target_audio = (
+            "in time with the vocal in @video1"
+            if (has_audio_video and reference_notation == "tags")
+            else "in time with the vocal"
+        )
+        singing = manifest.singing_characters(shot)
+        visible = manifest.visible_characters(shot)
+        if len(singing) >= 2:
+            names = join_names([c.name or cid or "performer" for cid, c, _ in singing])
+            lead = f"Both {names}" if len(singing) == 2 else names
+            parts.append(f"{lead} sing together with clear, natural mouth movement {target_audio}.")
+        elif len(singing) == 1 and len(visible) > 1:
+            solo_id, solo_char, _ = singing[0]
+            solo_label = solo_char.name or solo_id or "The singer"
+            listeners = [c.name or cid or "performer" for cid, c, _ in visible if cid != solo_id]
+            listener_text = join_names(listeners)
+            verb = "listen" if len(listeners) > 1 else "listens"
+            mouth_noun = "mouths" if len(listeners) > 1 else "mouth"
             parts.append(
-                "The singer sings with clear, natural mouth movement in time with the vocal "
-                "in @video1."
+                f"{solo_label} sings with clear, natural mouth movement {target_audio} while "
+                f"{listener_text} {verb} with {mouth_noun} closed, not singing."
             )
+        elif len(singing) == 1 and len(manifest.characters) > 1 and singing[0][0] is not None:
+            solo_id, solo_char, _ = singing[0]
+            solo_label = solo_char.name or solo_id or "The singer"
+            parts.append(f"{solo_label} sings with clear, natural mouth movement {target_audio}.")
         else:
-            parts.append(
-                "The singer sings with clear, natural mouth movement in time with the vocal."
-            )
+            parts.append(f"The singer sings with clear, natural mouth movement {target_audio}.")
         lyrics = " ".join(shot.lyrics.split())
         if include_lyrics and lyrics:
             parts.append(f'The song lyrics are: "{lyrics}".')

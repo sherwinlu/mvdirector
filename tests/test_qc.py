@@ -292,7 +292,7 @@ def test_quality_gates_fail_closed_by_default_and_report_summary_when_skipped(mo
     active, skipped_checks = gates.check_summary()
     assert active == ["dimensions", "sharpness", "duration", "temporal"]
     skipped_map = dict(skipped_checks)
-    assert "mediapipe unavailable" in skipped_map["face_present, face_framing"]
+    assert "mediapipe unavailable" in skipped_map["face_present, face_framing, no_people"]
     assert "mediapipe unavailable" in skipped_map["face_presence, lipsync"]
     assert "llm.enabled is false" in skipped_map["vision_spec, vision_artifacts, vision_character"]
 

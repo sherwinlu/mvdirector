@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pytest
 from PIL import Image
@@ -330,18 +332,20 @@ def test_draft_assemble_and_target_resolution_upscale(
         mvd_api.assemble(project, force=True, draft=True)
 
 
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
+
 def test_cli_exposes_draft_and_size_flags_on_assemble_and_upscale():
-    from typer.testing import CliRunner
-
-    from mvdirector.cli import app
-
+    # Typer styles help with Rich when it detects CI (GITHUB_ACTIONS), so compare plain text.
     runner = CliRunner()
     assemble_help = runner.invoke(app, ["assemble", "--help"])
     assert assemble_help.exit_code == 0
+    assemble_text = _ANSI_ESCAPE.sub("", assemble_help.output)
     for flag in ("--draft", "--width", "--height"):
-        assert flag in assemble_help.output
+        assert flag in assemble_text
 
     upscale_help = runner.invoke(app, ["upscale", "--help"])
     assert upscale_help.exit_code == 0
+    upscale_text = _ANSI_ESCAPE.sub("", upscale_help.output)
     for flag in ("--width", "--height"):
-        assert flag in upscale_help.output
+        assert flag in upscale_text

@@ -4,12 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/). While the version is 0.x, a minor release may still change the public API; every such change is listed here.
 
-## [Unreleased]
+## [0.4.0] - 2026-11-20
 
 ### Added
 - `mvd prepare [AUDIO]` (and `api.prepare`): start from a single `.mp3` or `.wav` file. It writes `inputs/mix.wav`, separates `inputs/vocals.wav` (and `inputs/drums.wav` when `inputs.drums` is set) with Demucs, transcribes the vocals with faster-whisper, and infers `[Section]`-tagged `inputs/lyrics.txt` and a lip-sync-ready `inputs/style.md` from the lyrics and the audio's tempo and energy (an LLM when enabled, otherwise a rule-based fallback). It refuses to replace existing files without `--overwrite`.
-- `prepare:` config section (`stem_model`, `stem_device`, `whisper_model`, `whisper_language`) and the `stems` extra (`pip install -e ".[stems,align]"`).
+- `prepare:` config section (`stem_model`, `stem_device`, `whisper_model`, `whisper_language`, `whisper_multilingual`) and the `stems` extra (`pip install -e ".[stems,align]"`).
 - `Transcriber` / `WhisperTranscriber` and `StemSeparator` / `DemucsSeparator` extension points.
+- Neural lip-sync scoring via `qc.lipsync_backend: stable_syncnet` (ByteDance LatentSync `stable_syncnet.pt` + MediaPipe Face Detector, `syncnet` extra).
+- Solo vs. simultaneous duet diarization (`Analysis.vocal_turns`, `Shot.singers`, `AudioSlice.mute_spans`) with vocal-handoff cut placement, cosine-faded foreign-voice muting (`media.mute_audio_spans`), and two-face simultaneous duet QC.
+- Image proportion, architectural scale, and negative-exclusion QC (`ImageQCConfig.max_face_fraction`, `broll_max_face_fraction` / `no_people`, hard `vision_spec` check, `extract_negative_exclusions`, and automatic prompt-rewrite escalation).
+- `--draft`, `--width`, and `--height` flags on `mvd assemble`, and `--width` / `--height` on `mvd upscale`.
+- Multilingual and non-English song support: Unicode/CJK/Hangul/Indic/Thai/Arabic lyric tokenization and alignment, per-segment `prepare.whisper_multilingual`, multilingual `[Section]` / duet / hook recognition with UTF-8 BOM and RTL bidi stripping, English visual prompt directives, and collision-safe non-ASCII IDs, set plate slugs, and output filenames.
 
 ### Fixed
 - Tempo detection folds half-time and double-time readings into 70-160 BPM (a slow blues no longer reads as 185 BPM), keeping the beat grid consistent. This changes `analysis.json` bars for songs whose tempo was outside that range; re-run `mvd analyze` and `mvd plan --overwrite` to pick it up.
@@ -18,7 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Changed
 - `llm.timeout_seconds` now defaults to 600 (was 180) so local models on a busy GPU do not time out.
 - Behaviour change: the language model now runs locally by default (`llm.provider: ollama`, `llm.model: gemma3:12b`), so no API key is needed. To keep using Claude, set `llm.provider: anthropic` and name a model. A config that sets `provider: anthropic` without a `model` is now rejected, like the other cloud providers. Projects from the earlier template name both `provider` and `model` and are unaffected; a `project.yaml` that left `provider` out relied on the old default and must add `provider: anthropic`.
-- The Whisper model size and language used by `mvd analyze` now follow `prepare.whisper_model` and `prepare.whisper_language` (defaults unchanged: `small`, auto-detect).
+- The Whisper model size, language, and multilingual mode used by `mvd analyze` now follow `prepare.whisper_model`, `prepare.whisper_language`, and `prepare.whisper_multilingual` (defaults unchanged: `small`, auto-detect, single-language).
 
 ## [0.3.1] - 2026-11-19
 

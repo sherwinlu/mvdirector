@@ -882,9 +882,9 @@ def approve(
     """Approve shots (or chapters in mix mode), or accept an exhausted still."""
 
     def _apply(manifest: Manifest, project: Project) -> None:
-        targets = _resolve_target_shots(manifest, shot_ids, chapters) or []
-        if not targets:
+        if shot_ids is None and chapters is None:
             raise MVDError("Pass at least one shot id or --chapter to approve.")
+        targets = _resolve_target_shots(manifest, shot_ids, chapters) or []
         if still:
             for sid in targets:
                 review_policy.accept_still(manifest, sid)

@@ -515,3 +515,58 @@ def test_non_ascii_ids_character_matching_plates_and_titles() -> None:
     assert "in English" in prompts.BRIEF_SYSTEM
     assert "in English" in prompts.INFER_FROM_LYRICS_SYSTEM
     assert planner._is_hook_section("サビ")
+
+
+def test_bom_bidi_marks_structural_dashes_diacritics_and_quoted_lyrics() -> None:
+    from mvdirector.config import VideoConfig
+    from mvdirector.planning import previz as previz_mod
+
+    # UTF-8 BOM and RTL bidi marks around [Section] headers are stripped cleanly
+    rtl_lines = parse_lyrics("\ufeff\u200f[مقطع 1]\u200f\nحبيبي يا نور\n")
+    assert len(rtl_lines) == 1
+    assert rtl_lines[0].section == "مقطع 1"
+    assert rtl_lines[0].text == "حبيبي يا نور"
+
+    # Compound hyphenated tags, arbitrary lettered メロ, and mood dashes do not trigger duets
+    assert not labels_have_multiple_singers(
+        [
+            "Verso 1 - Acústico",
+            "Pre-Refrain",
+            "Post-Estribillo",
+            "Coro - Fuerte",
+            "1番Eメロ",
+            "主歌一",
+        ]
+    )
+    # Designators and ensembles after a structural dash still match
+    assert section_singers("Verso 1 - Mujer") == {"female"}
+    assert section_singers("Coro - Ambos") is None
+    assert labels_have_multiple_singers(["Elias - breathless", "Odalie - soft"])
+
+    # Bidirectional diacritic matching between section headers/prompts and character definitions
+    diacritic_chars = {
+        "jose": Character(name="Jose", appearance="baritone"),
+        "s2": Character(name="Chloé", appearance="soprano"),
+    }
+    assert planner._characters_in_text("Verso 1: José", diacritic_chars) == ["jose"]
+    assert planner._characters_in_text("Chloe sings on the balcony.", diacritic_chars) == ["s2"]
+
+    # Quoted multilingual lyrics inside compose_motion_prompt do not produce broken nested quotes
+    shot = Shot(
+        id="s001",
+        index=0,
+        start=0.0,
+        end=4.0,
+        type=ShotType.LIPSYNC,
+        lyrics='Dijo "adiós" / 「さよなら」',
+        still_prompt="Close-up.",
+        motion_prompt="Sings.",
+        audio_slice=AudioSlice(path="a.wav", start=0.0, end=4.0, head_handle=0.0),
+        num_frames=97,
+    )
+    manifest = Manifest(title="Song", duration=4.0, fps=24, shots=[shot])
+    motion = prompts.compose_motion_prompt(
+        manifest, shot, video_config=VideoConfig(motion_include_lyrics=True)
+    )
+    assert """The song lyrics are: "Dijo 'adiós' / 「さよなら」".""" in motion
+    assert "in English" in previz_mod.PREVIZ_SYSTEM

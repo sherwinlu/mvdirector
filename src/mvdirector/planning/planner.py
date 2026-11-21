@@ -557,7 +557,11 @@ class _Wardrobe:
 def _character_tokens(cid: str, char: Character) -> list[str]:
     tokens = [cid.strip()]
     if char.name and char.name.strip():
-        tokens.append(char.name.strip())
+        clean_name = unicodedata.normalize("NFC", char.name.strip())
+        tokens.append(clean_name)
+        folded_name = ascii_fold(clean_name).strip()
+        if folded_name and folded_name != clean_name:
+            tokens.append(folded_name)
     return list(dict.fromkeys(t for t in tokens if len(t) >= 2 or not char.name))
 
 
@@ -598,15 +602,26 @@ def _characters_in_text(
     """
     if not text or not characters:
         return []
+    folded_text: str | None = None
     found: list[tuple[int, str]] = []
     for cid, char in characters.items():
         positions: list[int] = []
         for token in _character_tokens(cid, char):
             pattern, kind = _character_token_pattern(token)
+            matched_token = False
             for match in pattern.finditer(text):
                 if proper_noun_only and not _is_proper_token_match(match.group(0), kind):
                     continue
                 positions.append(match.start())
+                matched_token = True
+            if not matched_token and kind == "cased" and token.isascii():
+                if folded_text is None:
+                    folded_text = ascii_fold(text)
+                if folded_text != text:
+                    for match in pattern.finditer(folded_text):
+                        if proper_noun_only and not _is_proper_token_match(match.group(0), kind):
+                            continue
+                        positions.append(match.start())
         if positions:
             found.append((min(positions), cid))
     found.sort(key=lambda item: item[0])

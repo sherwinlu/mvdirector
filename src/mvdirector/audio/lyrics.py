@@ -33,13 +33,14 @@ log = logging.getLogger(__name__)
 
 # Square or CJK lenticular brackets mark a section. Parenthesised lines are sung adlibs.
 _SECTION_TAG = re.compile(r"^\s*(?:\[([^\]]+)\]|［([^］]+)］|【([^】]+)】)\s*$")
+_BIDI_AND_BOM = (
+    "\ufeff\u200b\u200c\u200d\u200e\u200f\u061c"
+    "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+)
 _IGNORED_TOKEN_CHARS = str.maketrans(
     {
         "\u0640": None,  # Arabic tatweel (sung vocal elongation)
-        "\u200b": None,
-        "\u200c": None,
-        "\u200d": None,
-        "\ufeff": None,
+        **{ch: None for ch in _BIDI_AND_BOM},
         "\u2018": "'",
         "\u2019": "'",
         "\u02bc": "'",
@@ -129,6 +130,8 @@ class WhisperTranscriber:
                     )
                 )
             for w in seg.words or []:
+                if not (getattr(w, "word", None) or "").strip():
+                    continue
                 words.append(
                     Word(
                         word=w.word,
@@ -217,10 +220,13 @@ _STRUCTURAL_SECTION_WORDS = frozenset(
         "pre-chorus",
         "prechorus",
         "pre",
+        "pré",
         "chorus",
         "post-chorus",
         "postchorus",
         "post",
+        "pós",
+        "pos",
         "hook",
         "big",
         "refrain",
@@ -406,6 +412,7 @@ _STRUCTURAL_SECTION_WORDS = frozenset(
         "후주",
         "랩",
         "내레이션",
+        "마지막",
         # Arabic & Hindi
         "مقدمة",
         "مقطع",
@@ -523,7 +530,10 @@ _FOREIGN_NUMBERED_DESIGNATORS = frozenset(
 )
 _NUMBERED_DESIGNATORS = _ENGLISH_NUMBERED_DESIGNATORS | _FOREIGN_NUMBERED_DESIGNATORS
 _COMPACT_NUMBERED_RE = re.compile(r"^([^\W\d_]+)(\d+)$")
-_SECTION_ORDINAL_RE = re.compile(r"^(?:第?[0-9一二三四五六七八九十]+番?|\d+)|\d+$")
+_SECTION_ORDINAL_RE = re.compile(
+    r"^(?:第?[0-9一二三四五六七八九十]+番?|\d+)|[0-9一二三四五六七八九十]+$"
+)
+_JP_MELO_RE = re.compile(r"^[a-z]メロ$")
 _SINGER_SPLIT = re.compile(
     r"\s*(?:&|\+|/|・|、|\b(?:and|y|e|et|und|и)\b)\s*",
     flags=re.IGNORECASE,
@@ -556,7 +566,20 @@ def is_hook_section(section: str | None) -> bool:
 
 
 def _strip_section_affixes(word: str) -> str:
-    return _SECTION_ORDINAL_RE.sub("", word)
+    stripped = _SECTION_ORDINAL_RE.sub("", word)
+    return "メロ" if _JP_MELO_RE.match(stripped) else stripped
+
+
+def _is_word_structural(word: str) -> bool:
+    stripped = _strip_section_affixes(word)
+    if not stripped:
+        return False
+    if stripped in _STRUCTURAL_SECTION_WORDS:
+        return True
+    if "-" in stripped:
+        parts = [_strip_section_affixes(p) for p in stripped.split("-") if p]
+        return bool(parts) and all(p in _STRUCTURAL_SECTION_WORDS for p in parts)
+    return False
 
 
 def _canonical_designator(words: list[str]) -> str:
@@ -568,30 +591,43 @@ def _canonical_designator(words: list[str]) -> str:
 
 
 def _is_structural(words: list[str]) -> bool:
-    core = [w for w in (_strip_section_affixes(w) for w in words) if w]
-    return bool(core) and all(w in _STRUCTURAL_SECTION_WORDS for w in core)
+    core = [w for w in words if _strip_section_affixes(w)]
+    return bool(core) and all(_is_word_structural(w) for w in core)
 
 
 def _looks_like_name(text: str) -> bool:
     return all(w[:1].isupper() for w in text.split())
 
 
-def section_cue(label: str) -> tuple[str, bool]:
-    """Split a section label into its performer cue and whether that cue was explicit."""
-    norm = unicodedata.normalize("NFKC", label.strip())
+def _split_section_cue(label: str) -> tuple[str, bool, bool]:
+    """Return ``(cue, explicit, after_structural_dash)`` for ``label``."""
+    norm = unicodedata.normalize("NFKC", label.strip().strip(_BIDI_AND_BOM))
     norm = _REPEAT_MARKER.sub("", norm)
     bracketed = _BRACKETED_CUE.match(norm)
     if bracketed:
-        return bracketed.group(2).strip(), True
+        return bracketed.group(2).strip(), True, False
     if ":" in norm:
-        return norm.split(":", 1)[1].strip(), True
+        return norm.split(":", 1)[1].strip(), True, False
     if _DASH_SPLIT.search(norm):
         lhs, rhs = _DASH_SPLIT.split(norm, maxsplit=1)
-        return (rhs if _is_structural(lhs.casefold().split()) else lhs).strip(), False
-    return norm, False
+        lhs_structural = _is_structural(lhs.casefold().split())
+        return (rhs if lhs_structural else lhs).strip(), False, lhs_structural
+    return norm, False, False
 
 
-def singers_in_cue(cue: str, *, explicit: bool, cased: bool) -> set[str] | None:
+def section_cue(label: str) -> tuple[str, bool]:
+    """Split a section label into its performer cue and whether that cue was explicit."""
+    cue, explicit, _ = _split_section_cue(label)
+    return cue, explicit
+
+
+def singers_in_cue(
+    cue: str,
+    *,
+    explicit: bool,
+    cased: bool,
+    allow_bare_names: bool = True,
+) -> set[str] | None:
     """Performer keys named by one section cue, or ``None`` when the cue names an ensemble."""
     singers: set[str] = set()
     head = cue.split(",", 1)[0].strip()
@@ -620,8 +656,12 @@ def singers_in_cue(cue: str, *, explicit: bool, cased: bool) -> set[str] | None:
         core = [w for w in core if w]
         if not core:
             continue
-        if any(w in _STRUCTURAL_SECTION_WORDS for w in core):
-            rest = [w for w in core if w not in _STRUCTURAL_SECTION_WORDS]
+        if any(_is_word_structural(w) for w in words):
+            rest = [
+                _strip_section_affixes(w)
+                for w in words
+                if not _is_word_structural(w) and _strip_section_affixes(w)
+            ]
             if rest and all(w in _DESIGNATOR_WORDS for w in rest):
                 singers.add(_canonical_designator(rest))
             continue
@@ -630,7 +670,7 @@ def singers_in_cue(cue: str, *, explicit: bool, cased: bool) -> set[str] | None:
             continue
         if len(core) > 3 or any(w.isdigit() for w in words):
             continue
-        if explicit or (cased and _looks_like_name(part)):
+        if explicit or (allow_bare_names and cased and _looks_like_name(part)):
             singers.add(" ".join(core))
     return singers
 
@@ -639,11 +679,16 @@ def section_singers(label: str | None) -> set[str] | None:
     """Performer keys named by ``label`` (empty if none, ``None`` for ensemble cues)."""
     if not label or not label.strip():
         return set()
-    cleaned = unicodedata.normalize("NFKC", label.strip())
-    cue, explicit = section_cue(cleaned)
+    cleaned = unicodedata.normalize("NFKC", label.strip().strip(_BIDI_AND_BOM))
+    cue, explicit, after_structural_dash = _split_section_cue(cleaned)
     if not cue:
         return set()
-    return singers_in_cue(cue, explicit=explicit, cased=cleaned != cleaned.casefold())
+    return singers_in_cue(
+        cue,
+        explicit=explicit,
+        cased=cleaned != cleaned.casefold(),
+        allow_bare_names=not after_structural_dash,
+    )
 
 
 def labels_have_multiple_singers(labels: Iterable[str | None]) -> bool:
@@ -664,16 +709,19 @@ def parse_lyrics(text: str) -> list[LyricLine]:
     """
     lines: list[LyricLine] = []
     section: str | None = None
-    for raw in text.splitlines():
+    for raw in text.lstrip("\ufeff").splitlines():
         stripped = raw.strip()
         if not stripped:
             continue
-        tag = _SECTION_TAG.match(stripped)
+        cleaned_tag_line = stripped.strip(_BIDI_AND_BOM).strip()
+        if not cleaned_tag_line:
+            continue
+        tag = _SECTION_TAG.match(cleaned_tag_line)
         if tag:
             matched = next((g for g in tag.groups() if g is not None), "")
-            section = matched.strip() or None
+            section = matched.strip().strip(_BIDI_AND_BOM).strip() or None
             continue
-        lines.append(LyricLine(text=stripped, section=section))
+        lines.append(LyricLine(text=stripped.strip("\ufeff"), section=section))
     return lines
 
 
@@ -748,7 +796,7 @@ def load_or_transcribe_words(project: Project) -> list[Word]:
     inputs = project.config.inputs
     if inputs.word_timestamps:
         raw = json.loads(
-            project.input_path(inputs.word_timestamps, "word_timestamps").read_text("utf-8")
+            project.input_path(inputs.word_timestamps, "word_timestamps").read_text("utf-8-sig")
         )
         return [Word.model_validate(item) for item in raw]
     prepare_cfg = project.config.prepare

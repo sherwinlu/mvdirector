@@ -862,7 +862,7 @@ def compose_motion_prompt(
             parts.append(f"{solo_label} sings with clear, natural mouth movement {target_audio}.")
         else:
             parts.append(f"The singer sings with clear, natural mouth movement {target_audio}.")
-        lyrics = " ".join(shot.lyrics.split())
+        lyrics = " ".join(shot.lyrics.replace('"', "'").split())
         if include_lyrics and lyrics:
             parts.append(f'The song lyrics are: "{lyrics}".')
     if single_take and not shot.allow_cuts:

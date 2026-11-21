@@ -544,7 +544,9 @@ def analyze_project(project: Project) -> Analysis:
         "Found %d vocal windows covering %.1fs", len(windows), sum(w.duration for w in windows)
     )
 
-    lines = lyrics_mod.parse_lyrics(project.input_path(inputs.lyrics, "lyrics").read_text("utf-8"))
+    lines = lyrics_mod.parse_lyrics(
+        project.input_path(inputs.lyrics, "lyrics").read_text("utf-8-sig")
+    )
     words = lyrics_mod.load_or_transcribe_words(project)
     if words:
         lines = lyrics_mod.align_lines_to_words(lines, words)

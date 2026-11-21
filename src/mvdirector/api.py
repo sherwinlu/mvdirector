@@ -300,8 +300,8 @@ def plan(project_dir: ProjectRef, overwrite: bool = False) -> tuple[Project, Man
         manifest = build_manifest(
             project.config,
             project.load_analysis(),
-            project.input_path(inputs.lyrics, "lyrics").read_text("utf-8"),
-            project.input_path(inputs.style, "style").read_text("utf-8"),
+            project.input_path(inputs.lyrics, "lyrics").read_text("utf-8-sig"),
+            project.input_path(inputs.style, "style").read_text("utf-8-sig"),
             build_llm(project.config.llm),
         )
         project.save_manifest(manifest)

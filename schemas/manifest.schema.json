@@ -358,6 +358,124 @@
       "title": "Framing",
       "type": "string"
     },
+    "MixChapter": {
+      "additionalProperties": false,
+      "description": "One track segment in a long-form mix, holding its visual theme and loop shot ids.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "index": {
+          "minimum": 0,
+          "title": "Index",
+          "type": "integer"
+        },
+        "start": {
+          "minimum": 0.0,
+          "title": "Start",
+          "type": "number"
+        },
+        "end": {
+          "exclusiveMinimum": 0.0,
+          "title": "End",
+          "type": "number"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "artist": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Artist"
+        },
+        "bpm": {
+          "exclusiveMinimum": 0.0,
+          "title": "Bpm",
+          "type": "number"
+        },
+        "downbeat_offset": {
+          "default": 0.0,
+          "minimum": 0.0,
+          "title": "Downbeat Offset",
+          "type": "number"
+        },
+        "energy": {
+          "default": 0.5,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Energy",
+          "type": "number"
+        },
+        "mood_tags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Mood Tags",
+          "type": "array"
+        },
+        "genre_tags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Genre Tags",
+          "type": "array"
+        },
+        "environment": {
+          "default": "",
+          "title": "Environment",
+          "type": "string"
+        },
+        "palette": {
+          "default": "",
+          "title": "Palette",
+          "type": "string"
+        },
+        "lighting": {
+          "default": "",
+          "title": "Lighting",
+          "type": "string"
+        },
+        "motion_style": {
+          "default": "",
+          "title": "Motion Style",
+          "type": "string"
+        },
+        "shot_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Shot Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "index",
+        "start",
+        "end",
+        "title",
+        "bpm"
+      ],
+      "title": "MixChapter",
+      "type": "object"
+    },
+    "ProjectMode": {
+      "enum": [
+        "standard",
+        "mix"
+      ],
+      "title": "ProjectMode",
+      "type": "string"
+    },
     "PropDesign": {
       "additionalProperties": false,
       "properties": {
@@ -656,6 +774,19 @@
           "description": "Song section this shot falls in, from the lyric tags.",
           "title": "Section"
         },
+        "chapter_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Parent chapter id when planned in long-form mix mode.",
+          "title": "Chapter Id"
+        },
         "setting": {
           "default": "",
           "description": "Name of a set in the visual bible.",
@@ -916,6 +1047,10 @@
       "title": "Schema Version",
       "type": "integer"
     },
+    "mode": {
+      "$ref": "#/$defs/ProjectMode",
+      "default": "standard"
+    },
     "title": {
       "title": "Title",
       "type": "string"
@@ -949,6 +1084,14 @@
     },
     "visual_bible": {
       "$ref": "#/$defs/VisualBible"
+    },
+    "chapters": {
+      "description": "Track segments and visual themes when mode is 'mix'.",
+      "items": {
+        "$ref": "#/$defs/MixChapter"
+      },
+      "title": "Chapters",
+      "type": "array"
     },
     "shots": {
       "items": {

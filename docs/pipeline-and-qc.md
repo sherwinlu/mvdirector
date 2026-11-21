@@ -14,6 +14,7 @@ my-song/
     plates/             set plate candidates and locked <set>.png
     props/              hero prop candidates and locked <prop>.png
     previz/             3D camera-blocking plans (*.plan.json) and rendered MP4s
+    segments/           cached per-chapter rendered MP4s and JSON stamps (when `mode: mix`)
     audio_slices/       per-shot vocal slices (and black-screen audio_video MP4s)
     stills/             s001_a01.png ... (shot id, attempt number)
     videos/             s001_a01.mp4 ... (and upscaled clips from `mvd upscale`)
@@ -204,3 +205,13 @@ Set `review.mode` in `project.yaml` or pass `--review-mode light|strict`. QC and
 The `light`-mode sample contains every close-up (`closeup_rate`), a share of other shots (`other_rate`), every shot that needed a retry, and every shot that passed narrowly. Rejecting a shot escalates its shot type: all other shots of that type are queued too. Switching modes never discards a decision you have made.
 
 In `mvd review` (or with `mvd approve` / `mvd reject --note "..."`), you can approve a shot, redo its video, or redo its still and video. Your note becomes direction for the next attempt. For a still that ran out of attempts, `mvd approve --still` accepts the best one so its video can be generated.
+
+---
+
+## Long-Form Mix Mode (`mode: mix`)
+
+For 30-to-90+ minute continuous DJ or background mixes, initialize or configure the project in mix mode (`mvd init --mode mix <dir>` or `mode: mix` in `project.yaml`):
+
+- **Tracklist & cue ingestion (`inputs.tracklist` or `--tracklist`):** Supports JSON/YAML (including WeaveShift setlist exports), `.cue` sheets, and plain-text timestamp lists (`00:00 Artist - Title`), or falls back to `mix.default_segment_seconds` (240s) chapters snapped to low-energy mix dips.
+- **Windowed analysis & per-chapter visual themes:** `mvd analyze` measures per-chapter BPM, downbeat offset, and normalized energy in bounded memory without requiring vocal stems or lyrics. `mvd plan` assigns 1 uninhabited visual environment (`MixChapter`) and `mix.clips_per_segment` (2–3) loopable `broll` units per chapter (`t2i` + `i2v` when `mix.visual_source: clips`, or `t2i` hero stills with camera drift when `mix.visual_source: stills`).
+- **Seamless circular loops, HUD, & incremental segment caching:** `mvd assemble` crossfades each chapter's loop units into a circular cycle (`mix.xfade_seconds`), applies optional BPM/downbeat-synced subtle visual pulse (`mix.beat_pulse`), composites an anti-aliased track title/watermark/spectrum HUD card (`mix.hud`), and caches each rendered chapter under `assets/segments/<chapter_id>.mp4` (+ `.mp4.json` input stamp). Re-running `mvd assemble` (or targeting `--chapter ch03`) stream-copies unchanged chapters in seconds, embeds MP4 chapter markers, and writes a YouTube-ready `<output>.chapters.txt` sidecar.

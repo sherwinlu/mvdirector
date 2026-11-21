@@ -21,6 +21,7 @@ from mvdirector.project import Project
 
 # The names a generation is saved under: ``s012_a03.mp4``, ``s012_a03_upscaled.mp4``.
 _GENERATION_NAME = re.compile(r"[\w-]+_a\d{2,}(_upscaled)?\.(png|mp4)")
+_SEGMENT_CACHE_NAME = re.compile(r"[\w-]+(_draft)?\.(mp4|mp4\.json|loop\.mp4|hud\.png)")
 _GENERATION_FOLDERS = ("assets/stills", "assets/videos")
 
 
@@ -62,6 +63,22 @@ def plan_cleanup(project: Project, manifest: Manifest) -> CleanupPlan:
                 and p not in kept
                 and p not in plan.superseded
             )
+    seg_root = project.segments_dir
+    if seg_root.is_dir():
+        active_segments = {
+            path
+            for ch in manifest.chapters
+            for draft in (False, True)
+            for path in (
+                project.segment_video_path(ch.id, draft=draft),
+                project.segment_stamp_path(ch.id, draft=draft),
+            )
+        }
+        plan.orphaned += sorted(
+            p
+            for p in seg_root.iterdir()
+            if p.is_file() and _SEGMENT_CACHE_NAME.fullmatch(p.name) and p not in active_segments
+        )
     plan.size_bytes = sum(path.stat().st_size for path in plan.files)
     return plan
 

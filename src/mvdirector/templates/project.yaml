@@ -5,6 +5,7 @@
 # MVD_ALLOWED_ENV_VARS) via ${NAME} or ${NAME:-fallback}.
 
 title: My Song
+mode: standard        # standard (single-track music video) | mix (30-90+ min continuous mix)
 seed: 1234            # base seed; every attempt's seed is derived from it
 auto_tune: true       # auto-adjust default transcription, pacing, and lip-sync values per track
 
@@ -15,6 +16,7 @@ inputs:
   lyrics: inputs/lyrics.txt
   style: inputs/style.md
   word_timestamps: null          # optional JSON [{word, start, end}], skips transcription
+  tracklist: null                # optional cue sheet / WeaveShift tracklist (.json, .yaml, .cue, .txt) for mode: mix
 
 prepare:
   stem_model: htdemucs           # Demucs model for `mvd prepare` stem separation
@@ -45,6 +47,22 @@ video:
   motion_no_subtitles: true      # prevent video models from rendering karaoke subtitles
   motion_no_music: true          # tell audio-video models not to hallucinate background music
   motion_include_lyrics: false   # set true for prompt-driven lip-sync models (e.g. Seedance)
+
+mix:                             # used when mode: mix (30-90+ minute continuous mixes)
+  default_segment_seconds: 240.0 # fallback 4-min chapters when inputs.tracklist is null
+  visual_source: clips           # clips (t2i + i2v loops) | stills (t2i hero stills + camera motion)
+  clips_per_segment: 3           # 2-3 loopable visual units generated per track chapter
+  clip_seconds: 6.0              # target loop clip duration in seconds (4.0..8.0)
+  xfade_seconds: 1.0             # crossfade overlap inside each chapter's seamless loop cycle
+  chapter_fade_seconds: 0.75     # fade-in / fade-out duration at chapter boundaries
+  beat_pulse: 0.35               # BPM/downbeat-synced subtle visual pulse strength (0..1)
+  chapters_sidecar: true         # write YouTube-compatible <output>.chapters.txt during assemble
+  hud:
+    enabled: true
+    show_title: true
+    watermark: ""
+    show_spectrum: true
+    position: bottom_left        # bottom_left | bottom_right | top_left | top_right
 
 comfy:
   base_url: ${COMFY_URL:-http://127.0.0.1:8188}   # e.g. https://<pod-id>-8188.proxy.runpod.net

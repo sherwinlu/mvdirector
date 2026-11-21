@@ -627,10 +627,14 @@ class ShotRunner:
             self._project.config.inputs,
             self._project.config.video.lipsync_audio_source,
         )
+        use_vocals = source == "vocals" and (
+            shot.type is ShotType.LIPSYNC
+            or bool(inputs.vocals and self._project.path(inputs.vocals).is_file())
+        )
+        chosen_rel = inputs.vocals if use_vocals else inputs.mix
+        chosen_label = "vocals" if use_vocals else "mix"
         try:
-            source_path = self._project.input_path(
-                inputs.vocals if source == "vocals" else inputs.mix, source
-            )
+            source_path = self._project.input_path(chosen_rel, chosen_label)
         except ConfigError:
             if path.is_file():
                 return path  # the source audio is gone; keep the slice that was already cut

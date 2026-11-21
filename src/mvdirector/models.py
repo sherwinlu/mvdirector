@@ -62,6 +62,11 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ProjectMode(str, Enum):
+    STANDARD = "standard"
+    MIX = "mix"
+
+
 # --------------------------------------------------------------------------- analysis
 
 
@@ -107,6 +112,41 @@ class LyricLine(StrictModel):
     end: float | None = None
     # "aligned" = from word timestamps, "estimated" = spread over vocal activity.
     timing_source: Literal["aligned", "estimated", "none"] = "none"
+
+
+class AnalyzedChapter(StrictModel):
+    """Per-track or fixed-interval segment measured during long-form mix audio analysis."""
+
+    id: str
+    index: int = Field(ge=0)
+    start: float = Field(ge=0.0, allow_inf_nan=False)
+    end: float = Field(gt=0.0, allow_inf_nan=False)
+    title: str
+    artist: str | None = None
+    bpm: float = Field(gt=0.0, allow_inf_nan=False)
+    downbeat_offset: float = Field(default=0.0, ge=0.0, allow_inf_nan=False)
+    energy: float = Field(default=0.5, ge=0.0, le=1.0, allow_inf_nan=False)
+    mood_tags: list[str] = Field(default_factory=list)
+    genre_tags: list[str] = Field(default_factory=list)
+    theme_prompt: str | None = None
+    clip_prompts: list[str] = Field(default_factory=list)
+
+    @field_validator("id")
+    @classmethod
+    def _check_id(cls, value: str) -> str:
+        return validate_safe_id(value, "chapter id")
+
+    @model_validator(mode="after")
+    def _check_span(self) -> AnalyzedChapter:
+        if self.end <= self.start:
+            raise ValueError(
+                f"Chapter '{self.id}' end ({self.end}) must exceed start ({self.start})"
+            )
+        return self
+
+    @property
+    def duration(self) -> float:
+        return max(0.0, self.end - self.start)
 
 
 VocalMode = Literal["solo", "duet", "group", "instrumental"]
@@ -201,6 +241,10 @@ class Analysis(StrictModel):
     track_profile: TrackProfile | None = Field(
         default=None,
         description="Detected musical/vocal/language profile used for automatic parameter tuning.",
+    )
+    chapters: list[AnalyzedChapter] = Field(
+        default_factory=list,
+        description="Per-track segments measured in long-form mix mode.",
     )
 
     @field_validator("schema_version")
@@ -415,6 +459,9 @@ class Shot(StrictModel):
     section: str | None = Field(
         default=None, description="Song section this shot falls in, from the lyric tags."
     )
+    chapter_id: str | None = Field(
+        default=None, description="Parent chapter id when planned in long-form mix mode."
+    )
     setting: str = Field(default="", description="Name of a set in the visual bible.")
     character: str | None = Field(
         default=None, description="Primary character id on camera / singing in this shot."
@@ -471,6 +518,11 @@ class Shot(StrictModel):
     @classmethod
     def _check_id(cls, value: str) -> str:
         return validate_safe_id(value, "shot id")
+
+    @field_validator("chapter_id")
+    @classmethod
+    def _check_chapter_id(cls, value: str | None) -> str | None:
+        return validate_safe_id(value, "chapter id") if value is not None else None
 
     @field_validator("character")
     @classmethod
@@ -719,8 +771,52 @@ class VisualBible(StrictModel):
         return resolved
 
 
+class MixChapter(StrictModel):
+    """One track segment in a long-form mix, holding its visual theme and loop shot ids."""
+
+    id: str
+    index: int = Field(ge=0)
+    start: float = Field(ge=0.0, allow_inf_nan=False)
+    end: float = Field(gt=0.0, allow_inf_nan=False)
+    title: str
+    artist: str | None = None
+    bpm: float = Field(gt=0.0, allow_inf_nan=False)
+    downbeat_offset: float = Field(default=0.0, ge=0.0, allow_inf_nan=False)
+    energy: float = Field(default=0.5, ge=0.0, le=1.0, allow_inf_nan=False)
+    mood_tags: list[str] = Field(default_factory=list)
+    genre_tags: list[str] = Field(default_factory=list)
+    environment: str = ""
+    palette: str = ""
+    lighting: str = ""
+    motion_style: str = ""
+    shot_ids: list[str] = Field(default_factory=list)
+
+    @field_validator("id")
+    @classmethod
+    def _check_id(cls, value: str) -> str:
+        return validate_safe_id(value, "chapter id")
+
+    @field_validator("shot_ids")
+    @classmethod
+    def _check_shot_ids(cls, value: list[str]) -> list[str]:
+        return [validate_safe_id(item, "shot id") for item in value]
+
+    @model_validator(mode="after")
+    def _check_span(self) -> MixChapter:
+        if self.end <= self.start:
+            raise ValueError(
+                f"Chapter '{self.id}' end ({self.end}) must exceed start ({self.start})"
+            )
+        return self
+
+    @property
+    def duration(self) -> float:
+        return max(0.0, self.end - self.start)
+
+
 class Manifest(StrictModel):
     schema_version: int = MANIFEST_SCHEMA_VERSION
+    mode: ProjectMode = ProjectMode.STANDARD
     title: str
     duration: float
     fps: int
@@ -732,6 +828,10 @@ class Manifest(StrictModel):
         description="Named characters/performers (for duets, bands, or ensembles), keyed by id.",
     )
     visual_bible: VisualBible = Field(default_factory=VisualBible)
+    chapters: list[MixChapter] = Field(
+        default_factory=list,
+        description="Track segments and visual themes when mode is 'mix'.",
+    )
     shots: list[Shot] = Field(default_factory=list)
     escalated_types: list[ShotType] = Field(
         default_factory=list,
@@ -883,3 +983,26 @@ class Manifest(StrictModel):
             if shot.id == shot_id:
                 return shot
         raise KeyError(f"No shot with id {shot_id!r}")
+
+    def chapter(self, chapter_id: str) -> MixChapter:
+        for ch in self.chapters:
+            if ch.id == chapter_id:
+                return ch
+        raise KeyError(f"No chapter with id {chapter_id!r}")
+
+    def find_chapter(self, chapter_id: str | None) -> MixChapter | None:
+        if not chapter_id:
+            return None
+        return next((ch for ch in self.chapters if ch.id == chapter_id), None)
+
+    def shots_for_chapters(self, chapter_ids: Collection[str]) -> list[str]:
+        """Resolve chapter ids to ordered unique shot ids, raising KeyError on unknown ids."""
+        selected: list[str] = []
+        seen: set[str] = set()
+        for cid in chapter_ids:
+            chapter = self.chapter(cid)
+            for sid in chapter.shot_ids:
+                if sid not in seen:
+                    seen.add(sid)
+                    selected.append(sid)
+        return selected

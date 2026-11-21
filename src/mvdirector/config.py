@@ -21,7 +21,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from mvdirector.errors import ConfigError
-from mvdirector.models import Framing, RetryStrategy
+from mvdirector.models import Framing, ProjectMode, RetryStrategy
 
 CONFIG_FILENAME = "project.yaml"
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -117,6 +117,12 @@ class InputsConfig(_Section):
     word_timestamps: str | None = Field(
         default=None,
         description="Optional JSON list of {word, start, end}; skips transcription.",
+    )
+    tracklist: str | None = Field(
+        default=None,
+        description=(
+            "Optional cue sheet or tracklist (.json, .yaml, .cue, or .txt) used when mode is 'mix'."
+        ),
     )
 
 
@@ -673,8 +679,86 @@ class ReviewConfig(_Section):
     near_threshold_margin: float = 0.05
 
 
+class MixHudConfig(_Section):
+    enabled: bool = True
+    show_title: bool = True
+    watermark: str = ""
+    show_spectrum: bool = True
+    position: Literal["bottom_left", "bottom_right", "top_left", "top_right"] = "bottom_left"
+
+
+class MixConfig(_Section):
+    default_segment_seconds: float = Field(
+        default=240.0,
+        ge=30.0,
+        le=1800.0,
+        allow_inf_nan=False,
+        description="Fallback chapter length in seconds when inputs.tracklist is not provided.",
+    )
+    visual_source: Literal["clips", "stills"] = Field(
+        default="clips",
+        description=(
+            "'clips' generates short loopable t2i+i2v clips per chapter; 'stills' generates only "
+            "high-res t2i hero stills and animates them with camera drift and beat pulse."
+        ),
+    )
+    clips_per_segment: int = Field(
+        default=3,
+        ge=1,
+        le=6,
+        description="Number of loopable visual units generated per track chapter.",
+    )
+    clip_seconds: float = Field(
+        default=6.0,
+        ge=4.0,
+        le=8.0,
+        allow_inf_nan=False,
+        description="Target duration in seconds for each generated loop unit.",
+    )
+    xfade_seconds: float = Field(
+        default=1.0,
+        ge=0.25,
+        le=3.0,
+        allow_inf_nan=False,
+        description="Crossfade overlap in seconds inside each chapter's seamless loop cycle.",
+    )
+    chapter_fade_seconds: float = Field(
+        default=0.75,
+        ge=0.0,
+        le=5.0,
+        allow_inf_nan=False,
+        description="Fade-in and fade-out duration in seconds at chapter boundaries.",
+    )
+    beat_pulse: float = Field(
+        default=0.35,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+        description="Strength of BPM/downbeat-synced subtle visual pulse (0 disables).",
+    )
+    chapters_sidecar: bool = Field(
+        default=True,
+        description="Write a YouTube-compatible <output>.chapters.txt sidecar during assembly.",
+    )
+    hud: MixHudConfig = Field(default_factory=MixHudConfig)
+
+    @model_validator(mode="after")
+    def _check_xfade(self) -> MixConfig:
+        if self.xfade_seconds * 2.0 >= self.clip_seconds:
+            raise ValueError(
+                f"mix.xfade_seconds ({self.xfade_seconds}) must be less than half of "
+                f"mix.clip_seconds ({self.clip_seconds}) so loop strides stay positive."
+            )
+        return self
+
+
 class ProjectConfig(_Section):
     title: str = "Untitled"
+    mode: ProjectMode = Field(
+        default=ProjectMode.STANDARD,
+        description="Pipeline mode: 'standard' (single-track narrative/lip-sync) or 'mix' "
+        "(30-90+ minute continuous mixes with per-chapter themes and loop caching).",
+    )
     seed: int = 1234
     auto_tune: bool = Field(
         default=True,
@@ -686,6 +770,7 @@ class ProjectConfig(_Section):
     inputs: InputsConfig = Field(default_factory=InputsConfig)
     prepare: PrepareConfig = Field(default_factory=PrepareConfig)
     video: VideoConfig = Field(default_factory=VideoConfig)
+    mix: MixConfig = Field(default_factory=MixConfig)
     comfy: ComfyConfig = Field(default_factory=ComfyConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     planning: PlanningConfig = Field(default_factory=PlanningConfig)

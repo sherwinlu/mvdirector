@@ -26,18 +26,19 @@ from pathlib import Path
 
 from mvdirector import assemble as assemble_mod
 from mvdirector import calibrate as calibrate_mod
-from mvdirector import media
+from mvdirector import media, mix_assemble
 from mvdirector import report as report_mod
 from mvdirector import tuning as tuning_mod
 from mvdirector.audio.analysis import analyze_project
 from mvdirector.audio.lyrics import Transcriber
+from mvdirector.audio.mix_analysis import analyze_mix_project
 from mvdirector.audio.prepare import PrepareResult, prepare_project
 from mvdirector.audio.stems import StemSeparator
 from mvdirector.cleanup import CleanupPlan, apply_cleanup, plan_cleanup
 from mvdirector.comfy.client import ComfyClient
 from mvdirector.comfy.provider import ComfyEndpointProvider, StaticComfyProvider
 from mvdirector.config import CONFIG_FILENAME, ReviewMode
-from mvdirector.errors import BudgetExceeded, LLMError, MVDError
+from mvdirector.errors import BudgetExceeded, ConfigError, LLMError, MVDError
 from mvdirector.generation import plates as plates_mod
 from mvdirector.generation import previz as previz_mod
 from mvdirector.generation import props as props_mod
@@ -47,8 +48,16 @@ from mvdirector.generation.preflight import check_assets
 from mvdirector.generation.runner import RunBudget, RunEvent, ShotRunner, load_templates
 from mvdirector.llm import LLMClient, build_llm
 from mvdirector.llm.check import LLMCheckResult, ping_llm, run_llm_check
-from mvdirector.models import Analysis, AssetKind, Manifest, ReferenceSet, TrackProfile
+from mvdirector.models import (
+    Analysis,
+    AssetKind,
+    Manifest,
+    ProjectMode,
+    ReferenceSet,
+    TrackProfile,
+)
 from mvdirector.planning.brief import ensure_writable, generate_brief, write_brief
+from mvdirector.planning.mix_planner import build_mix_manifest
 from mvdirector.planning.planner import build_manifest
 from mvdirector.project import Project
 from mvdirector.qc.factory import build_quality_gates
@@ -133,10 +142,56 @@ def open_project(
     return project
 
 
+def _with_mode(project: Project, mode: ProjectMode | None) -> Project:
+    if mode is not None and project.config.mode != mode:
+        config = project.config.model_copy(deep=True)
+        config.mode = mode
+        return Project(project.root, config, state=project.state, storage=project.storage)
+    return project
+
+
+def _resolve_tracklist_arg(project: Project, tracklist: Path | None) -> Path | None:
+    if tracklist is None:
+        return None
+    if tracklist.is_file():
+        return tracklist
+    if not tracklist.is_absolute():
+        return project.path(tracklist)
+    return tracklist
+
+
 # --- setup ------------------------------------------------------------------------------------
 
+_STARTER_MIX_TRACKLIST = {
+    "title": "My Mix",
+    "source": "weaveshift",
+    "tracks": [
+        {
+            "start": "00:00",
+            "title": "Opening Horizon",
+            "bpm": 122.0,
+            "mood_tags": ["atmospheric", "deep"],
+            "genre_tags": ["melodic house"],
+        },
+        {
+            "start": "04:00",
+            "title": "Kinetic Pulse",
+            "bpm": 126.0,
+            "mood_tags": ["driving", "hypnotic"],
+            "genre_tags": ["progressive techno"],
+        },
+        {
+            "start": "08:00",
+            "title": "Afterglow Drift",
+            "bpm": 124.0,
+            "mood_tags": ["warm", "expansive"],
+            "genre_tags": ["electronica"],
+        },
+    ],
+}
 
-def init_project(directory: Path) -> Path:
+
+def init_project(directory: Path, *, mode: ProjectMode = ProjectMode.STANDARD) -> Path:
     """Create a project folder with a starter config and workflow binding examples."""
     if (directory / CONFIG_FILENAME).exists():
         raise MVDError(f"{directory} already contains {CONFIG_FILENAME}")
@@ -145,6 +200,16 @@ def init_project(directory: Path) -> Path:
         shutil.copytree(source, directory, dirs_exist_ok=True)
     for folder in ("inputs", "assets", "output"):
         (directory / folder).mkdir(exist_ok=True)
+    if mode is ProjectMode.MIX:
+        cfg_file = directory / CONFIG_FILENAME
+        cfg_text = cfg_file.read_text(encoding="utf-8")
+        cfg_text = cfg_text.replace("mode: standard", "mode: mix", 1)
+        cfg_text = cfg_text.replace("tracklist: null", "tracklist: inputs/tracklist.json", 1)
+        cfg_file.write_text(cfg_text, encoding="utf-8")
+        tracklist_file = directory / "inputs" / "tracklist.json"
+        tracklist_file.write_text(
+            json.dumps(_STARTER_MIX_TRACKLIST, indent=2) + "\n", encoding="utf-8"
+        )
     return directory
 
 
@@ -175,7 +240,11 @@ def validate_project(
 
     for tool in ("ffmpeg", "ffprobe"):
         attempt(tool, partial(media.require_tool, tool))
-    for name in project.config.comfy.workflows:
+    if project.config.mode is ProjectMode.MIX:
+        workflow_names = ["t2i"] if project.config.mix.visual_source == "stills" else ["t2i", "i2v"]
+    else:
+        workflow_names = list(project.config.comfy.workflows)
+    for name in workflow_names:
         attempt(f"workflow '{name}'", partial(load_templates, project, [name]))
 
     def ping() -> None:
@@ -267,9 +336,24 @@ class TuneResult:
     report: str
 
 
-def analyze(project_dir: ProjectRef, *, apply_tuning: bool = False) -> tuple[Project, Analysis]:
-    """Analyze the audio: beats, bars, vocal activity, lyric timing, and track profile."""
-    project = open_project(project_dir)
+def analyze(
+    project_dir: ProjectRef,
+    *,
+    apply_tuning: bool = False,
+    mode: ProjectMode | None = None,
+    tracklist: Path | None = None,
+) -> tuple[Project, Analysis]:
+    """Analyze the audio: beats, bars, vocal activity, lyric timing, profile, or mix chapters."""
+    project = _with_mode(open_project(project_dir), mode)
+    resolved_tracklist = _resolve_tracklist_arg(project, tracklist)
+    if project.config.mode is ProjectMode.MIX:
+        analysis = analyze_mix_project(project, tracklist_override=resolved_tracklist)
+        project.save_analysis(analysis)
+        return project, analysis
+    if resolved_tracklist is not None:
+        raise ConfigError(
+            "--tracklist requires mix mode (--mode mix or mode: mix in project.yaml)."
+        )
     analysis = analyze_project(project)
     if apply_tuning:
         with project.run_lock():
@@ -352,20 +436,49 @@ def brief(
     return BriefResult(lyrics_path, style_path, generated.suno_style)
 
 
-def plan(project_dir: ProjectRef, overwrite: bool = False) -> tuple[Project, Manifest]:
-    """Create the shot manifest from the analysis, lyrics and style brief."""
-    project = open_project(project_dir)
+def plan(
+    project_dir: ProjectRef,
+    overwrite: bool = False,
+    *,
+    mode: ProjectMode | None = None,
+    tracklist: Path | None = None,
+) -> tuple[Project, Manifest]:
+    """Create the shot manifest from the analysis, lyrics/tracklist and style brief."""
+    project = _with_mode(open_project(project_dir), mode)
     with project.run_lock():
         if project.state.has_manifest() and not overwrite:
             raise MVDError("manifest.json already exists. Pass --overwrite to replace it.")
         inputs = project.config.inputs
-        manifest = build_manifest(
-            project.config,
-            project.load_analysis(),
-            project.input_path(inputs.lyrics, "lyrics").read_text("utf-8-sig"),
-            project.input_path(inputs.style, "style").read_text("utf-8-sig"),
-            build_llm(project.config.llm),
-        )
+        if project.config.mode is ProjectMode.MIX:
+            resolved_tracklist = _resolve_tracklist_arg(project, tracklist)
+            if resolved_tracklist is not None:
+                analysis = analyze_mix_project(project, tracklist_override=resolved_tracklist)
+                project.save_analysis(analysis)
+            else:
+                analysis = project.load_analysis()
+            style_text = ""
+            if inputs.style:
+                style_path = project.path(inputs.style)
+                if style_path.is_file():
+                    style_text = style_path.read_text("utf-8-sig")
+            manifest = build_mix_manifest(
+                project.config,
+                analysis,
+                style_text,
+                build_llm(project.config.llm),
+            )
+        else:
+            if tracklist is not None:
+                raise ConfigError(
+                    "--tracklist requires mix mode (--mode mix or mode: mix in project.yaml)."
+                )
+            manifest = build_manifest(
+                project.config,
+                project.load_analysis(),
+                project.input_path(inputs.lyrics, "lyrics").read_text("utf-8-sig"),
+                project.input_path(inputs.style, "style").read_text("utf-8-sig"),
+                build_llm(project.config.llm),
+            )
         project.save_manifest(manifest)
     return project, manifest
 
@@ -570,6 +683,27 @@ class GenerateResult:
     budget_message: str | None = None
 
 
+def _resolve_target_shots(
+    manifest: Manifest,
+    shots: list[str] | None,
+    chapters: list[str] | None,
+) -> list[str] | None:
+    if chapters is None:
+        return list(shots) if shots is not None else None
+    if manifest.mode is not ProjectMode.MIX:
+        raise MVDError("--chapter is only supported on mix-mode projects.")
+    try:
+        chapter_shots = manifest.shots_for_chapters(chapters)
+    except KeyError as exc:
+        raise MVDError(str(exc)) from exc
+    if shots is None:
+        return chapter_shots
+    combined = list(shots)
+    seen = set(combined)
+    combined.extend(sid for sid in chapter_shots if sid not in seen)
+    return combined
+
+
 def generate(
     project_dir: ProjectRef,
     kinds: list[AssetKind],
@@ -579,6 +713,8 @@ def generate(
     draft: bool = False,
     observer: Observer | None = None,
     comfy_provider: ComfyEndpointProvider | None = None,
+    *,
+    chapters: list[str] | None = None,
 ) -> GenerateResult:
     """Generate and quality-check stills and/or videos, retrying failures automatically.
 
@@ -596,12 +732,27 @@ def generate(
 
     project = open_project(project_dir, review_mode)
     manifest = project.load_manifest()
+    selected_shots = _resolve_target_shots(manifest, shots, chapters)
+
+    effective_kinds = list(kinds)
+    if manifest.mode is ProjectMode.MIX and project.config.mix.visual_source == "stills":
+        if effective_kinds == [AssetKind.VIDEO]:
+            raise MVDError(
+                "mix.visual_source is 'stills'; set mix.visual_source: clips in project.yaml "
+                "to generate video clips."
+            )
+        effective_kinds = [k for k in effective_kinds if k is not AssetKind.VIDEO]
+
     llm = build_llm(project.config.llm)
-    names = ["still", "t2i"] if AssetKind.STILL in kinds else []
-    names += ["lipsync", "i2v"] if AssetKind.VIDEO in kinds else []
+    if manifest.mode is ProjectMode.MIX:
+        names = ["t2i"] if AssetKind.STILL in effective_kinds else []
+        names += ["i2v"] if AssetKind.VIDEO in effective_kinds else []
+    else:
+        names = ["still", "t2i"] if AssetKind.STILL in effective_kinds else []
+        names += ["lipsync", "i2v"] if AssetKind.VIDEO in effective_kinds else []
     templates = load_templates(project, names)
-    if AssetKind.STILL in kinds:
-        ready = check_assets(project, manifest, templates, shots)
+    if AssetKind.STILL in effective_kinds and manifest.mode is not ProjectMode.MIX:
+        ready = check_assets(project, manifest, templates, selected_shots)
         for warning in ready.warnings:
             emit(RunEvent("warning", message=f"Warning: {warning}"))
         if skip_preflight:
@@ -633,6 +784,7 @@ def generate(
         budget = RunBudget(project.config.retry.max_generations_per_run)
         with project.run_lock(), _lease(project, comfy_provider) as comfy:
             manifest = result.manifest = project.load_manifest()
+            locked_shots = _resolve_target_shots(manifest, shots, chapters)
             comfy.ping()
             runner = ShotRunner(
                 project,
@@ -646,7 +798,7 @@ def generate(
                 draft=draft,
             )
             try:
-                runner.run(kinds, shots)
+                runner.run(effective_kinds, locked_shots)
             except BudgetExceeded as exc:
                 result.budget_message = str(exc)
             finally:
@@ -720,10 +872,28 @@ def load_status(
     return project, manifest
 
 
-def approve(project_dir: ProjectRef, shot_ids: list[str], still: bool = False) -> None:
-    """Approve shots, or accept an exhausted still so its video can be generated."""
-    decide = review_policy.accept_still if still else review_policy.approve
-    _decide(project_dir, lambda manifest, _: [decide(manifest, s) for s in shot_ids])
+def approve(
+    project_dir: ProjectRef,
+    shot_ids: list[str] | None = None,
+    still: bool = False,
+    *,
+    chapters: list[str] | None = None,
+) -> None:
+    """Approve shots (or chapters in mix mode), or accept an exhausted still."""
+
+    def _apply(manifest: Manifest, project: Project) -> None:
+        if shot_ids is None and chapters is None:
+            raise MVDError("Pass at least one shot id or --chapter to approve.")
+        targets = _resolve_target_shots(manifest, shot_ids, chapters) or []
+        if still:
+            for sid in targets:
+                review_policy.accept_still(manifest, sid)
+        else:
+            stills_only = review_policy.uses_stills_only(manifest, project.config)
+            for sid in targets:
+                review_policy.approve(manifest, sid, stills_only=stills_only)
+
+    _decide(project_dir, _apply)
 
 
 def reject(
@@ -785,16 +955,33 @@ def assemble(
     draft: bool = False,
     width: int | None = None,
     height: int | None = None,
+    chapters: list[str] | None = None,
+    rebuild_cache: bool = False,
 ) -> Path:
-    """Join the approved clips and lay the original mix over them."""
+    """Join the approved clips (or cached mix chapters) and lay the original mix over them."""
     project = open_project(project_dir, review_mode)
     manifest = project.load_manifest()
     safe_title = _safe_title(manifest.title)
     suffix = "_draft" if (force or draft) else ""
     target = output or project.output_dir / f"{safe_title}{suffix}.mp4"
-    result = assemble_mod.assemble(
-        project, manifest, target, force=force, draft=draft, width=width, height=height
-    )
+    if manifest.mode is ProjectMode.MIX:
+        result = mix_assemble.assemble_mix(
+            project,
+            manifest,
+            target,
+            force=force,
+            draft=draft,
+            width=width,
+            height=height,
+            chapters=chapters,
+            rebuild_cache=rebuild_cache,
+        )
+    else:
+        if chapters is not None or rebuild_cache:
+            raise MVDError("--chapter and --rebuild-cache are only supported on mix-mode projects.")
+        result = assemble_mod.assemble(
+            project, manifest, target, force=force, draft=draft, width=width, height=height
+        )
     project.storage.push()  # the final cut is not referenced by the manifest
     return result
 

@@ -55,12 +55,12 @@ pip install -c constraints.txt -e ".[qc,align,ui,dev]"      # add "anthropic" to
 ollama pull gemma3:12b                                      # default local LLM, see docs/setup.md for cloud providers
 export COMFY_URL=https://<pod-id>-8188.proxy.runpod.net     # or http://127.0.0.1:8188
 
-mvd init projects/my-song
+mvd init projects/my-song                    # or `mvd init --mode mix projects/my-mix` for 30-90+ min continuous mixes
 cd projects/my-song
 ```
 
-1. Put the Suno files in `inputs/`: `mix.wav`, `vocals.wav` (optionally a drum stem), `inputs/lyrics.txt` (`[Section]` tags and `(adlibs)`), and `inputs/style.md` — or run `mvd brief --idea "..."` before generating a song, or start from a single `.mp3`/`.wav` file with `mvd prepare /path/to/song.mp3` (requires the `stems` and `align` extras).
-2. Edit `project.yaml` (title, resolution, LLM provider/model, and `video:` timing settings matching your ComfyUI workflow).
+1. Put the Suno files in `inputs/`: `mix.wav`, `vocals.wav` (optionally a drum stem), `inputs/lyrics.txt` (`[Section]` tags and `(adlibs)`), and `inputs/style.md` — or run `mvd brief --idea "..."` before generating a song, or start from a single `.mp3`/`.wav` file with `mvd prepare /path/to/song.mp3` (requires the `stems` and `align` extras). For `mode: mix`, supply `inputs/mix.wav` and an optional `inputs/tracklist.json` (`.yaml`, `.cue`, or `.txt`).
+2. Edit `project.yaml` (title, mode, resolution, LLM provider/model, and `video:` / `mix:` settings matching your ComfyUI workflow). With `auto_tune: true` (default), `mvd prepare`, `mvd analyze`, and `mvd plan` automatically tune default transcription, pacing, and lip-sync parameters for your track (`mvd tune [--apply]` previews or writes them to `project.yaml`).
 3. Export and bind your ComfyUI workflows under `workflows/` (see `workflows/README.md` and [Workflows & Model Bindings](docs/workflows.md)).
 
 ```bash
@@ -91,7 +91,7 @@ mvd assemble                                              # output/<title>.mp4
 
 - [Installation, Docker & Language Models](docs/setup.md) — Python extras, commercial licensing (`mediapipe` vs `insightface`), Docker Compose profiles & RunPod image, Apple Silicon setup, and configuring/testing LLM providers (`anthropic`, `openai`, `gemini`, `ollama`, `openai_compatible`).
 - [ComfyUI Workflows & Model Bindings](docs/workflows.md) — Mapping `.api.json` + `.bindings.json`, `reference_notation` (`prose` vs `tags`), `audio_video` black-screen wrapper, model-family `video:` settings table, paid cloud API nodes, and `${ENV}` allowlist.
-- [Pipeline, Assets, Quality Checks & Review](docs/pipeline-and-qc.md) — Project layout, `mvd brief`, visual bible & deterministic rules, reference sheets & turnaround videos, derived/embedded set plates & hero props, 3D blocking previz, `--draft` & `mvd upscale`, `allow_cuts` montage, QC gates, retry ladder, calibration, and `light`/`strict` review.
+- [Pipeline, Assets, Quality Checks & Review](docs/pipeline-and-qc.md) — Project layout, `mvd prepare`, `mvd brief`, track auto-tuning (`mvd tune`), visual bible & deterministic rules, reference sheets & turnaround videos, derived/embedded set plates & hero props, 3D blocking previz, `--draft` & `mvd upscale`, `allow_cuts` montage, QC gates, retry ladder, calibration, `light`/`strict` review, and Long-Form Mix Mode (`mode: mix`).
 - [Using mvdirector as a library](docs/library.md) — `mvdirector.api`, the public surface, and the `StateStore`, `AssetStorage` and `ComfyEndpointProvider` extension points.
 - [Architecture, Development & Limitations](docs/architecture.md) — Source code map, manifest & event-stream conventions, dev commands (`pytest`, `ruff`, `mypy`, `mvd schema`), extension points, and known limitations.
 - [Changelog](CHANGELOG.md) — Versioned release notes and upgrade history.

@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/). While the version is 0.x, a minor release may still change the public API; every such change is listed here.
 
+## [0.5.0] - 2026-11-20
+
+### Added
+- **Track profiling & automatic parameter tuning (`mvd tune`, `mvd analyze --tune`, `auto_tune: true`):**
+  - `mvdirector.tuning` (`profile_track`, `recommend_adjustments`, `tune_prepare_config`, `tune_config_for_planning`, `apply_adjustments_to_yaml`) and `api.tune` / `TuneResult` inspect `inputs/lyrics.txt`, `inputs/style.md` (stripping Suno negative `-tag` exclusions), audio dynamics, vocal turns, and aligned syllable rates to populate `Analysis.track_profile` (`TrackProfile`).
+  - Automatically detects languages & code-switching, vocal mode (`solo`, `duet`, `group`, `instrumental`), rap/fast-flow density, EDM drops/vocal chops, extreme/processed vocals, and non-4/4 or free-time meter cues, tuning default `prepare.whisper_*`, `video.beats_per_bar`, `video.cut_mode`, `video.dynamic_pacing`, `video.lipsync_min_vocal_fraction`, and `planning.max_lipsync_share` values at runtime while preserving user-customized settings unless `--force` is passed.
+  - Comment-preserving in-place `project.yaml` updates via `mvd tune --apply` and `mvd analyze --tune`.
+- **Long-Form Mix Mode (`mode: mix`, `mvd init --mode mix`):**
+  - `ProjectMode.MIX`, `inputs.tracklist` / `--tracklist` ingestion (`mvdirector.audio.tracklist`) supporting JSON/YAML (including WeaveShift setlist exports), `.cue` sheets, plain-text timestamp lists (`00:00 Artist - Title`), or fixed-interval `mix.default_segment_seconds` chapters snapped to low-energy mix dips.
+  - Windowed, bounded-memory per-chapter audio analysis (`mvdirector.audio.mix_analysis` -> `Analysis.chapters` / `AnalyzedChapter`) measuring per-chapter BPM, downbeat phase, and normalized energy across 30-to-90+ minute mixes without requiring vocal stems or lyrics.
+  - Per-chapter visual theme planning (`mvdirector.planning.mix_planner` -> `Manifest.chapters` / `MixChapter`) generating 1 uninhabited visual environment and `mix.clips_per_segment` (2–3) loopable `broll` units per chapter (`mix.visual_source: clips` for `t2i`+`i2v` loops or `stills` for `t2i` hero stills with camera drift).
+  - Seamless circular loop synthesis, BPM/downbeat-synced visual pulse (`mix.beat_pulse`), Pillow-rendered RGBA track-title/watermark/spectrum HUD cards (`mix.hud`), incremental per-chapter MP4 segment caching (`assets/segments/<chapter_id>.mp4` + `.mp4.json` input stamps, cleaned by `mvd clean`), FFmpeg stream-copy muxing with embedded MP4 chapter markers, and YouTube-ready `<output>.chapters.txt` sidecars (`mvdirector.mix_assemble`).
+  - `--chapter` / `-C` targeting across `mvd stills`, `mvd videos`, `mvd run`, `mvd approve`, and `mvd assemble` (plus `--rebuild-cache`), and chapter-grouped review in `mvd review`.
+
+### Changed
+- Updated `schemas/analysis.schema.json` and `schemas/manifest.schema.json` with `TrackProfile`, `AnalyzedChapter`, `ProjectMode`, `MixChapter`, and `Shot.chapter_id`.
+- `ProjectConfig.auto_tune` defaults to `true`, applying track-appropriate parameter defaults automatically during `mvd prepare`, `mvd analyze`, and `mvd plan` without overriding custom user settings.
+
 ## [0.4.0] - 2026-11-20
 
 ### Added

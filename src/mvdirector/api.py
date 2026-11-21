@@ -298,14 +298,10 @@ def tune(
     """Profile track characteristics from lyrics, style, and analysis, and tune project.yaml."""
     project = open_project(project_dir, pull=False)
     lyrics_text, style_text = tuning_mod.read_optional_project_inputs(project)
-    analysis: Analysis | None = None
-    if project.analysis_path.is_file():
-        analysis = project.load_analysis()
-    else:
-        try:
-            analysis = project.load_analysis()
-        except MVDError:
-            analysis = None
+    try:
+        analysis: Analysis | None = project.load_analysis()
+    except MVDError:
+        analysis = None
     profile = tuning_mod.profile_track(
         lyrics_text=lyrics_text,
         style_text=style_text,
@@ -313,14 +309,19 @@ def tune(
         analysis=analysis,
     )
     adjustments = tuning_mod.recommend_adjustments(project.config, profile, force=force)
+    wrote_yaml = False
     if apply and any(adj.applied for adj in adjustments):
         with project.run_lock():
-            tuning_mod.apply_adjustments_to_yaml(project.root / CONFIG_FILENAME, adjustments)
-    report = tuning_mod.render_tune_report(profile, adjustments, applied_to_yaml=apply)
+            project = open_project(project_dir, pull=False)
+            adjustments = tuning_mod.recommend_adjustments(project.config, profile, force=force)
+            if any(adj.applied for adj in adjustments):
+                tuning_mod.apply_adjustments_to_yaml(project.root / CONFIG_FILENAME, adjustments)
+                wrote_yaml = True
+    report = tuning_mod.render_tune_report(profile, adjustments, applied_to_yaml=wrote_yaml)
     return TuneResult(
         profile=profile,
         adjustments=adjustments,
-        applied_to_yaml=apply,
+        applied_to_yaml=wrote_yaml,
         report=report,
     )
 

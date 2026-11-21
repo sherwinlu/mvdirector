@@ -385,11 +385,12 @@ def detect_languages(
     if not sung_text.strip() and clean_title.casefold() not in _STARTER_TITLES:
         title_scripts = _script_languages(clean_title)
         if title_scripts:
-            title_script_hint = True
-            if re.search(r"[A-Za-z]{2,}", clean_title):
+            has_latin_title = bool(re.search(r"[A-Za-z]{2,}", clean_title))
+            if has_latin_title:
                 add_lang("en")
             for code in title_scripts:
                 add_lang(code)
+            title_script_hint = len(title_scripts) > 1 or has_latin_title
 
     if transcript_language:
         add_lang(transcript_language)
@@ -924,12 +925,24 @@ def _update_yaml_scalar(text: str, section: str, field: str, formatted_val: str)
             lines[idx] = f"{indent}{field}: {formatted_val}{comment_part}{newline}"
             return "".join(lines)
 
-    # Field is absent from an existing section: insert right after its last indented line.
+    # Field is absent from an existing section: insert right after its last direct-child line
+    # (or section header if empty), never in the middle of a nested block.
     insert_at = sec_start + 1
+    in_nested = False
     for idx in range(sec_start + 1, sec_end):
-        stripped = lines[idx].strip()
-        if stripped and not stripped.startswith("#"):
+        raw_line = lines[idx]
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            if in_nested:
+                insert_at = idx + 1
+            continue
+        leading = raw_line[: len(raw_line) - len(raw_line.lstrip(" \t"))]
+        if len(leading) == len(indent):
             insert_at = idx + 1
+            in_nested = stripped.endswith(":")
+        elif len(leading) > len(indent):
+            insert_at = idx + 1
+            in_nested = True
     if insert_at - 1 < len(lines) and not lines[insert_at - 1].endswith("\n"):
         lines[insert_at - 1] += "\n"
     lines.insert(insert_at, f"{indent}{field}: {formatted_val}\n")
@@ -950,6 +963,32 @@ def apply_adjustments_to_yaml(yaml_path: Path, adjustments: list[Adjustment]) ->
         raise ConfigError(f"{yaml_path} is not valid YAML: {exc}") from exc
     if not isinstance(parsed_before, dict):
         raise ConfigError(f"{yaml_path} must hold a YAML mapping at top level.")
+
+    # When an English-only Whisper model (e.g. 'small.en') is kept while tuning sets a
+    # non-English language or multilingual flag, upgrade the model to avoid an invalid config.
+    write_keys = {adj.key for adj in to_write}
+    if "prepare.whisper_model" not in write_keys:
+        prep_before = parsed_before.get("prepare")
+        cur_model = prep_before.get("whisper_model") if isinstance(prep_before, dict) else None
+        needs_multilingual_model = any(
+            (adj.key == "prepare.whisper_multilingual" and adj.recommended is True)
+            or (adj.key == "prepare.whisper_language" and adj.recommended not in (None, "en"))
+            for adj in to_write
+        )
+        if (
+            needs_multilingual_model
+            and isinstance(cur_model, str)
+            and cur_model.lower().endswith(".en")
+        ):
+            to_write.append(
+                Adjustment(
+                    key="prepare.whisper_model",
+                    current=cur_model,
+                    recommended="large-v3-turbo",
+                    reason="replace English-only '*.en' model for non-English / multilingual audio",
+                    applied=True,
+                )
+            )
 
     updated_text = text
     for adj in to_write:
@@ -973,9 +1012,12 @@ def apply_adjustments_to_yaml(yaml_path: Path, adjustments: list[Adjustment]) ->
         parsed_after = yaml.safe_load(updated_text) or {}
     except yaml.YAMLError as exc:
         raise ConfigError(f"Updated {yaml_path} failed YAML validation: {exc}") from exc
+    if not isinstance(parsed_after, dict):
+        raise ConfigError(f"Updated {yaml_path} must hold a YAML mapping at top level.")
     for adj in to_write:
         section, field = adj.key.split(".", 1)
-        actual = (parsed_after.get(section) or {}).get(field)
+        sec_after = parsed_after.get(section)
+        actual = sec_after.get(field) if isinstance(sec_after, dict) else None
         if actual != adj.recommended:
             raise ConfigError(
                 f"Failed to update {adj.key} in {yaml_path}: "

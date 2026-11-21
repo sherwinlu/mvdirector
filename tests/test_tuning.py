@@ -23,6 +23,7 @@ from mvdirector.audio.analysis import analyze_project
 from mvdirector.audio.prepare import prepare_project
 from mvdirector.audio.stems import StemResult
 from mvdirector.config import ProjectConfig, load_config
+from mvdirector.errors import ConfigError
 from mvdirector.models import Analysis, LyricLine, ShotType, TimeSpan, TrackProfile
 from mvdirector.planning.planner import build_manifest
 from mvdirector.project import Project
@@ -370,3 +371,109 @@ def test_cli_analyze_with_tune_flag_persists_profile_and_config(project: Project
     saved_analysis = project.load_analysis()
     assert saved_analysis.track_profile is not None
     assert saved_analysis.track_profile.multilingual is True
+
+
+def test_yaml_update_avoids_nested_block_corruption_and_english_only_model_conflict(
+    tmp_path: Path,
+) -> None:
+    # 1. Inserting a missing scalar into a section that ends with a nested mapping (or list)
+    # must append at the section level rather than inside the nested mapping.
+    yaml_with_nested = tmp_path / "nested.yaml"
+    yaml_with_nested.write_text(
+        "title: Nested Section Test\n"
+        "comfy:\n"
+        "  base_url: http://127.0.0.1:8188\n"
+        "  headers:\n"
+        "    Authorization: Bearer token\n"
+        "video:\n"
+        "  fps: 24\n",
+        encoding="utf-8",
+    )
+    adj_nested = [
+        tuning.Adjustment(
+            key="comfy.request_timeout",
+            current=60.0,
+            recommended=45.0,
+            reason="shorten timeout",
+            applied=True,
+        ),
+        tuning.Adjustment(
+            key="video.dynamic_pacing",
+            current=False,
+            recommended=True,
+            reason="drop pacing",
+            applied=True,
+        ),
+    ]
+    tuning.apply_adjustments_to_yaml(yaml_with_nested, adj_nested)
+    cfg_nested = load_config(yaml_with_nested)
+    assert cfg_nested.comfy.request_timeout == 45.0
+    assert cfg_nested.comfy.headers == {"Authorization": "Bearer token"}
+    assert cfg_nested.video.dynamic_pacing is True
+
+    # 2. If `prepare.whisper_model` is an English-only `*.en` model in project.yaml and only
+    # `prepare.whisper_language` or `prepare.whisper_multilingual` is passed to apply_adjustments,
+    # it automatically upgrades `whisper_model` so validation never crashes.
+    en_yaml = tmp_path / "en_model.yaml"
+    en_yaml.write_text(
+        "title: Spanish Track\nprepare:\n  whisper_model: base.en\n",
+        encoding="utf-8",
+    )
+    only_lang_adj = [
+        tuning.Adjustment(
+            key="prepare.whisper_language",
+            current=None,
+            recommended="es",
+            reason="lock Spanish",
+            applied=True,
+        )
+    ]
+    written = tuning.apply_adjustments_to_yaml(en_yaml, only_lang_adj)
+    assert {a.key for a in written} == {"prepare.whisper_language", "prepare.whisper_model"}
+    cfg_en = load_config(en_yaml)
+    assert cfg_en.prepare.whisper_language == "es"
+    assert cfg_en.prepare.whisper_model == "large-v3-turbo"
+
+
+def test_monolingual_non_latin_title_hint_does_not_force_multilingual() -> None:
+    # A pure Japanese title with no Latin letters and starter/empty lyrics should be detected
+    # as monolingual 'ja', not multilingual.
+    langs, multi = tuning.detect_languages(title_hint="真夜中の雨")
+    assert langs == ["ja"]
+    assert multi is False
+
+    # A mixed English + Korean title with starter/empty lyrics is multilingual.
+    langs_bi, multi_bi = tuning.detect_languages(title_hint="Midnight Rain (밤비)")
+    assert set(langs_bi) == {"en", "ko"}
+    assert multi_bi is True
+
+
+def test_adversarial_and_stress_inputs_for_track_profiling(tmp_path: Path) -> None:
+    # Oversized style/lyrics with YAML injection tokens, bidi control chars, and regex edge cases.
+    huge_lyrics = "\n".join(
+        [
+            f"[Verse {i} – Whispered, 3/4]\n" + ("Je marche dans la nuit avec toi " * 15)
+            for i in range(250)
+        ]
+    )
+    adversarial_style = (
+        "Dark synthpop, bilingual French and English, -trap, -male vocals, "
+        "${AWS_SECRET_ACCESS_KEY}, \u202e[Chorus: Piano]\u202c; # yaml: : { [ ] }"
+    )
+    profile = tuning.profile_track(
+        lyrics_text=huge_lyrics,
+        style_text=adversarial_style,
+        title_hint="Adversarial: *alias &anchor",
+    )
+    assert set(profile.languages) == {"en", "fr"}
+    assert profile.multilingual is True
+    assert profile.beats_per_bar_hint == 3
+    assert profile.vocal_mode == "solo"
+
+    # Path traversal in config.inputs.lyrics must be rejected cleanly by Project.path
+    proj_dir = tmp_path / "sec_proj"
+    api_mod.init_project(proj_dir)
+    proj = Project.open(proj_dir)
+    proj.config.inputs.lyrics = "../../etc/passwd"
+    with pytest.raises(ConfigError):
+        tuning.read_optional_project_inputs(proj)

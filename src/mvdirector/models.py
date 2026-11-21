@@ -13,6 +13,7 @@ be moved between machines.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Collection
 from datetime import datetime, timezone
 from enum import Enum
@@ -31,6 +32,15 @@ from pydantic import (
 ANALYSIS_SCHEMA_VERSION = 1
 MANIFEST_SCHEMA_VERSION = 1
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+
+def ascii_fold(value: str) -> str:
+    """Fold Latin diacritics to ASCII (e.g. 'José' -> 'Jose') via NFKD decomposition."""
+    return "".join(
+        ch
+        for ch in unicodedata.normalize("NFKD", value)
+        if not unicodedata.category(ch).startswith("M")
+    )
 
 
 def validate_safe_id(value: str, label: str = "id") -> str:
@@ -593,18 +603,26 @@ class VisualBible(StrictModel):
     )
 
     def find_set(self, name: str) -> SetDesign | None:
-        """Look a set up by name, ignoring case and surrounding space."""
-        wanted = name.strip().lower()
-        return next((s for s in self.settings if s.name.strip().lower() == wanted), None)
+        """Look a set up by name, ignoring case, Unicode normalization and surrounding space."""
+        wanted = unicodedata.normalize("NFKC", name).strip().casefold()
+        return next(
+            (
+                s
+                for s in self.settings
+                if unicodedata.normalize("NFKC", s.name).strip().casefold() == wanted
+            ),
+            None,
+        )
 
     def find_prop(self, query: str) -> PropDesign | None:
-        """Look a prop up by id or name, ignoring case and surrounding space."""
-        wanted = query.strip().lower()
+        """Look a prop up by id or name, ignoring case, Unicode normalization and space."""
+        wanted = unicodedata.normalize("NFKC", query).strip().casefold()
         return next(
             (
                 p
                 for p in self.props
-                if p.id.strip().lower() == wanted or p.name.strip().lower() == wanted
+                if unicodedata.normalize("NFKC", p.id).strip().casefold() == wanted
+                or unicodedata.normalize("NFKC", p.name).strip().casefold() == wanted
             ),
             None,
         )
@@ -679,7 +697,7 @@ class Manifest(StrictModel):
 
     @staticmethod
     def _norm_slug(value: str) -> str:
-        return re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
+        return re.sub(r"[^a-z0-9]+", "_", ascii_fold(value).strip().lower()).strip("_")
 
     def resolve_character_id(self, char_id: str | None) -> str | None:
         """Resolve a character key or display name to its canonical id in ``characters``."""
@@ -687,31 +705,41 @@ class Manifest(StrictModel):
             return None
         if char_id is None:
             return self.primary_character_id()
-        cleaned = char_id.strip()
+        cleaned = unicodedata.normalize("NFKC", char_id).strip()
         if not cleaned:
             return None
         if cleaned in self.characters:
             return cleaned
-        wanted = cleaned.lower()
+        wanted = cleaned.casefold()
         for key, char in self.characters.items():
-            if key.lower() == wanted or (char.name and char.name.strip().lower() == wanted):
+            char_name = unicodedata.normalize("NFKC", char.name).strip().casefold()
+            if key.casefold() == wanted or (char_name and char_name == wanted):
                 return key
         wanted_slug = self._norm_slug(cleaned)
-        if not wanted_slug:
-            return None
-        for key, char in self.characters.items():
-            if self._norm_slug(key) == wanted_slug or (
-                char.name and self._norm_slug(char.name) == wanted_slug
-            ):
-                return key
-        if len(wanted_slug) >= 2:
-            token_matches = [
+        if wanted_slug:
+            for key, char in self.characters.items():
+                if self._norm_slug(key) == wanted_slug or (
+                    char.name and self._norm_slug(char.name) == wanted_slug
+                ):
+                    return key
+            if len(wanted_slug) >= 2:
+                token_matches = [
+                    key
+                    for key, char in self.characters.items()
+                    if char.name
+                    and wanted_slug in re.findall(r"[a-z0-9]+", ascii_fold(char.name).lower())
+                ]
+                if len(token_matches) == 1:
+                    return token_matches[0]
+        if len(wanted) >= 2:
+            unicode_matches = [
                 key
                 for key, char in self.characters.items()
-                if char.name and wanted_slug in re.findall(r"[a-z0-9]+", char.name.lower())
+                if char.name
+                and wanted in unicodedata.normalize("NFKC", char.name).casefold().split()
             ]
-            if len(token_matches) == 1:
-                return token_matches[0]
+            if len(unicode_matches) == 1:
+                return unicode_matches[0]
         return None
 
     def character_for(self, char_id: str | None = None) -> Character:

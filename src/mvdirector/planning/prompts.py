@@ -21,15 +21,19 @@ if TYPE_CHECKING:
 
 BIBLE_SYSTEM = """You are the director of a music video that balances performer shots with
 cutaways. Write the visual bible that every shot will follow.
+Write every field in English even when the lyrics or style brief are in another language or mix
+languages, because downstream image and video models take English prompts. Every 'id' field MUST
+use ASCII lowercase letters, digits, and underscores only (romanize non-Latin names for ids, such
+as id='sakura' with name='さくら').
 
 - concept: two to four sentences on the idea that ties the video together.
 - characters: every distinct singer, vocalist, or on-camera band/group member indicated by the
   style brief, section headers, or lyrics (one entry for a solo track; two for a duet; one per
   member or named character for a band, group, or theatrical piece). Every singer or recurring
   performer MUST have their own entry in 'characters' with:
-  - id: short lowercase identifier (letters, digits and underscores, e.g. 'elias', 'odalie',
-    'lead_vocal', 'guitarist').
-  - name: display name or role (e.g. 'Elias', 'Odalie').
+  - id: short ASCII lowercase identifier (letters, digits and underscores, e.g. 'elias', 'odalie',
+    'sakura', 'lead_vocal', 'guitarist').
+  - name: display name or role (e.g. 'Elias', 'Odalie', 'Sakura').
   - appearance: one dense paragraph on that person's PERMANENT physical look: age range, gender
     presentation, face shape, skin tone, natural skin texture (visible pores, subtle natural
     unevenness, real facial asymmetry), eyes, brows, nose, lips, hair (cut, length, parting,
@@ -147,12 +151,14 @@ Rules:
   on lipsync shots.
 - Aim for one striking, printable frame in every 30 seconds: strong symmetry, a silhouette, or a
   single bright light against dark.
-- still_prompt: describes the first frame only: framing, physical camera placement in open space,
-  who is in frame, pose, action, camera angle. It is sent to an image-edit model together with a
-  reference portrait of the primary singer, and the set and character descriptions are added
-  automatically, so do not repeat full physical descriptions.
-- motion_prompt: what happens in the clip: performance, body movement, and physical camera
-  operation (describe handheld physics such as subtle operator breathing sway, small weight
+- still_prompt: in English, describes the first frame only: framing, physical camera placement in
+  open space, who is in frame, pose, action, camera angle. Translate imagery from non-English or
+  multi-language lyrics into concrete English visual descriptions rather than quoting raw lyrics.
+  It is sent to an image-edit model together with a reference portrait of the primary singer, and
+  the set and character descriptions are added automatically, so do not repeat full physical
+  descriptions.
+- motion_prompt: in English, what happens in the clip: performance, body movement, and physical
+  camera operation (describe handheld physics such as subtle operator breathing sway, small weight
   shifts, and soft starts and stops rather than bare labels). Keep camera moves gentle and stable
   on lipsync shots so the singing mouth stays clearly tracked. Every shot MUST remain a single
   continuous take with no internal cuts and no subtitles or on-screen text. For shots 4.0 seconds
@@ -160,8 +166,8 @@ Rules:
   timestamped sub-beats covering the shot duration (e.g. '0-2.0s: ... 2.0-4.0s: ...')."""
 
 REWRITE_SYSTEM = """You fix prompts for an AI image or video model after a quality check
-rejected the result. Rewrite the prompt so the listed problems are less likely, keeping the
-shot's intent, framing and setting.
+rejected the result. Rewrite the prompt in English so the listed problems are less likely, keeping
+the shot's intent, framing and setting.
 - Prefer simplifying (hands out of frame, calmer pose, camera in open floor space clear of
   furniture, plainer background) over piling on instructions.
 - Replace negative 'no <part>' phrasing that backfired: image models attend to named nouns and
@@ -177,38 +183,43 @@ Return the new prompt only, in the 'prompt' field."""
 BRIEF_SYSTEM = """You are a music video writer and Suno song producer. Given a short video
 concept, optional target duration, and musical/visual vibe, write:
 
-- lyrics: Suno-ready lyrics structured with [Section] headers ([Intro], [Verse], [Pre-Chorus],
-  [Chorus], [Bridge], [Outro]; for duets, tag solo sections like [Verse 1: Name] and simultaneous
-  sections like [Chorus: Both]). Keep line counts concise for the requested duration. Put ONLY sung
-  lines or sung adlibs in (parentheses); never put unspoken SFX or stage directions in parentheses.
-- suno_style: one dense Suno Custom Mode style prompt specifying genre, vocal register and
-  phrasing, key instruments, BPM, rhythm feel, and stereo production polish.
-- visual_direction: a short creative brief covering the performer look, key costume states,
-  locations, lighting, palette, and story beats for mvdirector's visual bible."""
+- lyrics: Suno-ready lyrics in the language(s) requested by the concept or vibe (matching the
+  concept's language if none is named, and mixing languages naturally when requested), structured
+  with English [Section] headers ([Intro], [Verse], [Pre-Chorus], [Chorus], [Bridge], [Outro]; for
+  duets, tag solo sections like [Verse 1: Name] and simultaneous sections like [Chorus: Both]).
+  Keep line counts concise for the requested duration. Put ONLY sung lines or sung adlibs in
+  (parentheses); never put unspoken SFX or stage directions in parentheses.
+- suno_style: one dense Suno Custom Mode style prompt in English specifying genre, vocal
+  language(s), vocal register and phrasing, key instruments, BPM, rhythm feel, and stereo
+  production polish.
+- visual_direction: a short creative brief in English covering the performer look, key costume
+  states, locations, lighting, palette, and story beats for mvdirector's visual bible."""
 
 INFER_FROM_LYRICS_SYSTEM = """You are a music video director and producer preparing a project from
 a finished audio track with no existing lyrics file or style brief. Given a timestamped vocal
 transcript and a compact audio summary (duration, BPM, vocal coverage, energy arc), return:
 
-- lyrics: the transcribed words organized under [Section] headers ([Intro], [Verse 1],
+- lyrics: the transcribed words organized under English [Section] headers ([Intro], [Verse 1],
   [Pre-Chorus], [Chorus], [Verse 2], [Bridge], [Outro]; for duets or alternating vocalists, tag
   solo sections like [Verse 1: Singer 1] and simultaneous duet sections like [Chorus: Both]).
-  Strictly preserve the actual sung words from the transcript
+  Strictly preserve the actual sung words, original language(s), and script(s) from the transcript
+  (never translate non-English or code-switching lyrics into another language)
   so word-level audio alignment for lip-sync stays accurate—fix only capitalization, punctuation,
   and line breaks, and never invent new verses or rewrite sung words (keep "kind of" as "kind of"
   and contractions as sung, and fix a word only when the transcript is plainly a mishearing).
   Put ONLY sung adlibs in (parentheses); never put unspoken SFX or stage directions in
   parentheses. If the track is instrumental with no transcribed words, return "[Instrumental]".
-- music_style: a concise musical style description inferred from the lyrics' tone, structure,
-  tempo, and energy arc (genre, vocal register/delivery, rhythm feel, and production mood).
-- visual_direction: a concrete creative brief for mvdirector's visual bible inferred from the
-  lyrics' themes, imagery, persona, and emotional arc. Cover the singer/performer's look and
+- music_style: a concise musical style description in English inferred from the lyrics' tone,
+  language(s), structure, tempo, and energy arc (genre, vocal language and register/delivery,
+  rhythm feel, and production mood).
+- visual_direction: a concrete creative brief in English for mvdirector's visual bible inferred from
+  the lyrics' themes, imagery, persona, and emotional arc. Cover the singer/performer's look and
   costume arc, 3 to 5 concrete locations/sets grounded in the lyrical imagery, lighting, color
   palette, and story beats. Explicitly design for on-camera lip-synced singing performance during
   vocal hooks and key verses (clear, well-lit, unobstructed face and mouth with no masks or
   foreground obstructions) intercut with atmospheric/narrative cutaways inspired by the lyrics.
-  Write music_style and visual_direction as plain prose without markdown (no asterisks, headings
-  or bullet syntax). Do not quote a BPM figure; describe the tempo feel in words."""
+  Write music_style and visual_direction as plain English prose without markdown (no asterisks,
+  headings or bullet syntax). Do not quote a BPM figure; describe the tempo feel in words."""
 
 PERFORMANCE_MOTION = (
     "The singer moves with the music, mouth closed, not singing. Slow, steady camera drift."
@@ -851,7 +862,7 @@ def compose_motion_prompt(
             parts.append(f"{solo_label} sings with clear, natural mouth movement {target_audio}.")
         else:
             parts.append(f"The singer sings with clear, natural mouth movement {target_audio}.")
-        lyrics = " ".join(shot.lyrics.split())
+        lyrics = " ".join(shot.lyrics.replace('"', "'").split())
         if include_lyrics and lyrics:
             parts.append(f'The song lyrics are: "{lyrics}".')
     if single_take and not shot.allow_cuts:

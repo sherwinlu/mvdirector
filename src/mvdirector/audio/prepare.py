@@ -192,7 +192,11 @@ def _build_inference_prompt(transcript: Transcript, summary: AudioSummary) -> st
         f"VOCAL COVERAGE: {int(round(summary.vocal_fraction * 100))}% "
         f"({len(summary.vocal_windows)} vocal windows)",
     ]
-    if transcript.language:
+    if transcript.multilingual and transcript.language:
+        header.append(f"DETECTED LANGUAGE: multilingual (primary: {transcript.language})")
+    elif transcript.multilingual:
+        header.append("DETECTED LANGUAGE: multilingual")
+    elif transcript.language:
         header.append(f"DETECTED LANGUAGE: {transcript.language}")
     if summary.energy_arc:
         header.append("ENERGY ARC: " + ", ".join(summary.energy_arc))
@@ -225,10 +229,16 @@ def _build_inference_prompt(transcript: Transcript, summary: AudioSummary) -> st
 
 def lyric_fidelity(lyrics: str, transcript: Transcript) -> float:
     """Share (0-1) of words that the lyrics and the transcript have in common, in order."""
-    sung = tokenize(" ".join(seg.text for seg in transcript.segments))
-    written = tokenize(" ".join(line.text for line in parse_lyrics(lyrics)))
+    raw_sung = " ".join(seg.text for seg in transcript.segments).strip()
+    raw_written = " ".join(line.text for line in parse_lyrics(lyrics)).strip()
+    sung = tokenize(raw_sung)
+    written = tokenize(raw_written)
     if not sung and not written:
-        return 1.0
+        if not raw_sung and not raw_written:
+            return 1.0
+        return SequenceMatcher(
+            a="".join(raw_sung.split()), b="".join(raw_written.split()), autojunk=False
+        ).ratio()
     return SequenceMatcher(a=sung, b=written, autojunk=False).ratio()
 
 
@@ -398,7 +408,9 @@ def prepare_project(
     )
 
     trans = transcriber or WhisperTranscriber(
-        model_size=prepare_cfg.whisper_model, language=prepare_cfg.whisper_language
+        model_size=prepare_cfg.whisper_model,
+        language=prepare_cfg.whisper_language,
+        multilingual=prepare_cfg.whisper_multilingual,
     )
     transcript = trans.transcribe(vocals_path)
     if not transcript.words:

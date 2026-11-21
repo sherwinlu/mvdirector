@@ -11,8 +11,10 @@ workflow as an image, so the layout, lighting and color grade stay fixed.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
+import unicodedata
 from pathlib import Path
 
 from PIL import UnidentifiedImageError
@@ -21,7 +23,7 @@ from mvdirector.comfy.client import ComfyClient
 from mvdirector.comfy.workflow import WorkflowTemplate
 from mvdirector.errors import ConfigError
 from mvdirector.generation.candidates import load_rgb_candidate, render_candidate_batch
-from mvdirector.models import Manifest, SetDesign
+from mvdirector.models import Manifest, SetDesign, ascii_fold
 from mvdirector.planning import prompts
 from mvdirector.project import Project
 
@@ -29,8 +31,13 @@ log = logging.getLogger(__name__)
 
 
 def plate_slug(name: str) -> str:
-    """A filename-safe version of a set name."""
-    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "set"
+    """A collision-safe ASCII filename stem for a set name across any script."""
+    cleaned = unicodedata.normalize("NFKC", name).strip()
+    stem = re.sub(r"[^a-z0-9]+", "_", ascii_fold(cleaned).lower()).strip("_") or "set"
+    if all(ord(ch) < 128 for ch in cleaned):
+        return stem
+    digest = hashlib.sha256(cleaned.casefold().encode("utf-8")).hexdigest()[:6]
+    return f"{stem}_{digest}"
 
 
 def _find_set(manifest: Manifest, name: str) -> SetDesign:

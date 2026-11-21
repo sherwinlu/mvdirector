@@ -63,7 +63,7 @@ def _is_starter_file(path: Path, template_name: str) -> bool:
         starter = (
             resources.files("mvdirector") / "templates" / "inputs" / template_name
         ).read_text(encoding="utf-8")
-        current = path.read_text(encoding="utf-8")
+        current = path.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError):
         return False
     return current.strip() == starter.strip()

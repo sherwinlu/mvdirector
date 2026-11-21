@@ -37,8 +37,8 @@ Rules:
   no sudden jumps, and never place the camera inside or passing through solid objects.
 - Give the primary singer a dark charcoal color (around [38, 42, 52]) and any secondary figures
   or extras a lighter neutral grey (around [155, 160, 170]) so the stand-in mapping is clear.
-- Write a concise 'stand_in_mapping' sentence explaining which colored blocks represent the real
-  subjects, extras, and props."""
+- Write a concise 'stand_in_mapping' sentence in English explaining which colored blocks represent
+  the real subjects, extras, and props."""
 
 
 class _PrevizBase(BaseModel):

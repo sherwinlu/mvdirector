@@ -10,15 +10,23 @@ a rule-based director fills the same fields so the pipeline still runs end to en
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import statistics
+import unicodedata
 from collections import Counter
 from collections.abc import Callable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from mvdirector.audio.lyrics import labels_have_multiple_singers, parse_lyrics, section_singers
+from mvdirector.audio.lyrics import (
+    is_hook_section,
+    is_syllabic_char,
+    labels_have_multiple_singers,
+    parse_lyrics,
+    section_singers,
+)
 from mvdirector.config import ProjectConfig
 from mvdirector.errors import LLMError
 from mvdirector.llm import LLMClient, text_block
@@ -37,6 +45,7 @@ from mvdirector.models import (
     TimeSpan,
     VisualBible,
     WardrobeState,
+    ascii_fold,
     validate_safe_id,
 )
 from mvdirector.planning import prompts
@@ -50,10 +59,6 @@ from mvdirector.planning.segmenter import (
 log = logging.getLogger(__name__)
 
 _LIPSYNC_FRAMINGS = [Framing.CLOSE_UP, Framing.MEDIUM_CLOSE]
-# Sections whose sung shots stay on camera when the singing share is capped.
-# Pre-chorus and post-chorus are excluded so only actual chorus/hook sections stay protected.
-_NON_HOOK_CHORUS_RE = re.compile(r"\b(?:pre|post)[\s-]?chorus\b", re.IGNORECASE)
-_HOOK_SECTION_RE = re.compile(r"\b(?:chorus|hook)\b", re.IGNORECASE)
 # Most cutaways in a row before the singer has to come back.
 _MAX_CUTAWAY_RUN = 2
 _SHARE_EPS = 1e-9
@@ -90,11 +95,22 @@ class _Reply(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
 
-def _slug_id(value: object, label: str = "id") -> str:
+def _slug_id(value: object, label: str = "id", prefix: str = "id") -> str:
     if isinstance(value, str):
-        slug = re.sub(r"[^a-z0-9_-]+", "_", value.strip().lower()).strip("_-")
-        if slug and slug[0].isalnum():
-            return slug
+        cleaned = unicodedata.normalize("NFKC", value).strip()
+        if (
+            cleaned
+            and cleaned[0].isalnum()
+            and ".." not in cleaned
+            and "/" not in cleaned
+            and "\\" not in cleaned
+        ):
+            folded = ascii_fold(cleaned).lower()
+            slug = re.sub(r"[^a-z0-9_-]+", "_", folded).strip("_-")
+            if slug and slug[0].isalnum():
+                return slug
+            digest = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:6]
+            return f"{prefix}_{digest}"
     return validate_safe_id(str(value), label)
 
 
@@ -105,7 +121,7 @@ class WardrobeReply(_Reply):
     @field_validator("id", mode="before")
     @classmethod
     def _check_id(cls, value: object) -> str:
-        return validate_safe_id(str(value), "wardrobe state id")
+        return _slug_id(value, "wardrobe state id", "state")
 
 
 class CharacterReply(_Reply):
@@ -118,7 +134,7 @@ class CharacterReply(_Reply):
     @field_validator("id", mode="before")
     @classmethod
     def _check_id(cls, value: object) -> str:
-        return _slug_id(value, "character id")
+        return _slug_id(value, "character id", "char")
 
 
 class SetReply(_Reply):
@@ -138,7 +154,7 @@ class PropReply(_Reply):
     @field_validator("id", mode="before")
     @classmethod
     def _check_id(cls, value: object) -> str:
-        return _slug_id(value, "prop id")
+        return _slug_id(value, "prop id", "prop")
 
 
 class BibleReply(_Reply):
@@ -375,10 +391,7 @@ def _timed_shots(
     return shots
 
 
-def _is_hook_section(section: str | None) -> bool:
-    """True for chorus/hook sections, excluding pre-chorus and post-chorus."""
-    cleaned = _NON_HOOK_CHORUS_RE.sub("", section or "")
-    return bool(_HOOK_SECTION_RE.search(cleaned))
+_is_hook_section = is_hook_section
 
 
 def _cutaway_run(shots: list[Shot], position: int) -> int:
@@ -544,7 +557,11 @@ class _Wardrobe:
 def _character_tokens(cid: str, char: Character) -> list[str]:
     tokens = [cid.strip()]
     if char.name and char.name.strip():
-        tokens.append(char.name.strip())
+        clean_name = unicodedata.normalize("NFC", char.name.strip())
+        tokens.append(clean_name)
+        folded_name = ascii_fold(clean_name).strip()
+        if folded_name and folded_name != clean_name:
+            tokens.append(folded_name)
     return list(dict.fromkeys(t for t in tokens if len(t) >= 2 or not char.name))
 
 
@@ -554,25 +571,57 @@ def _section_singer(shot: Shot, characters: dict[str, Character]) -> str | None:
     return named[0] if len(named) == 1 else None
 
 
+def _character_token_pattern(token: str) -> tuple[re.Pattern[str], str]:
+    """Return ``(regex, kind)`` with ``kind`` in ``('cased', 'unicameral', 'numeric')``."""
+    has_alpha = any(ch.isalpha() for ch in token)
+    if not has_alpha:
+        return re.compile(rf"\b{re.escape(token)}\b"), "numeric"
+    if token.upper() != token.lower():
+        return re.compile(rf"\b{re.escape(token)}\b", flags=re.IGNORECASE), "cased"
+    if any(is_syllabic_char(ch) for ch in token):
+        return re.compile(rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])"), "unicameral"
+    return re.compile(rf"\b{re.escape(token)}\b"), "unicameral"
+
+
+def _is_proper_token_match(match_text: str, kind: str) -> bool:
+    if kind == "numeric":
+        return False
+    if kind == "cased":
+        return match_text[0].isupper()
+    return True
+
+
 def _characters_in_text(
     text: str | None, characters: dict[str, Character], *, proper_noun_only: bool = False
 ) -> list[str]:
     """Character ids mentioned by id or name in ``text``, in order of appearance.
 
-    When ``proper_noun_only`` is true, only capitalized occurrences match so common words
-    matching a character name (such as "grace" or "dawn") are left alone in prose prompts.
+    When ``proper_noun_only`` is true, cased scripts require a capital initial so common words
+    matching a character name (such as "grace" or "dawn") are left alone in prose prompts, numeric
+    ids are ignored in prose, and unicameral script names (such as CJK or Hangul) match directly.
     """
     if not text or not characters:
         return []
+    folded_text: str | None = None
     found: list[tuple[int, str]] = []
     for cid, char in characters.items():
         positions: list[int] = []
         for token in _character_tokens(cid, char):
-            pattern = re.compile(rf"\b{re.escape(token)}\b", flags=re.IGNORECASE)
+            pattern, kind = _character_token_pattern(token)
+            matched_token = False
             for match in pattern.finditer(text):
-                if proper_noun_only and not match.group(0)[0].isupper():
+                if proper_noun_only and not _is_proper_token_match(match.group(0), kind):
                     continue
                 positions.append(match.start())
+                matched_token = True
+            if not matched_token and kind == "cased" and token.isascii():
+                if folded_text is None:
+                    folded_text = ascii_fold(text)
+                if folded_text != text:
+                    for match in pattern.finditer(folded_text):
+                        if proper_noun_only and not _is_proper_token_match(match.group(0), kind):
+                            continue
+                        positions.append(match.start())
         if positions:
             found.append((min(positions), cid))
     found.sort(key=lambda item: item[0])
@@ -588,13 +637,16 @@ def _fix_mismatched_singer_prompt(
         return
     target = characters[primary_id].name or primary_id
 
-    def _replace_if_proper(match: re.Match[str]) -> str:
-        return target if match.group(0)[0].isupper() else match.group(0)
-
     for wrong_id in mentioned:
         wrong_char = characters[wrong_id]
         for token in _character_tokens(wrong_id, wrong_char):
-            pattern = re.compile(rf"\b{re.escape(token)}\b", flags=re.IGNORECASE)
+            pattern, kind = _character_token_pattern(token)
+
+            def _replace_if_proper(match: re.Match[str], token_kind: str = kind) -> str:
+                return (
+                    target if _is_proper_token_match(match.group(0), token_kind) else match.group(0)
+                )
+
             shot.still_prompt = pattern.sub(_replace_if_proper, shot.still_prompt)
             shot.motion_prompt = pattern.sub(_replace_if_proper, shot.motion_prompt)
 
@@ -1322,9 +1374,10 @@ def _resolve_set(bible: VisualBible, name: str, shot_id: str) -> str:
     exact = bible.find_set(name)
     if exact is not None:
         return exact.name
-    wanted = name.strip().lower()
+    wanted = unicodedata.normalize("NFKC", name).strip().casefold()
     for candidate in bible.settings:
-        if wanted and (wanted in candidate.name.lower() or candidate.name.lower() in wanted):
+        cand_norm = unicodedata.normalize("NFKC", candidate.name).casefold()
+        if wanted and (wanted in cand_norm or cand_norm in wanted):
             return candidate.name
     log.warning(
         "%s: setting %r is not a set in the bible; using %r", shot_id, name, bible.settings[0].name

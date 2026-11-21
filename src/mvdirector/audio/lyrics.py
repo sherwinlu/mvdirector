@@ -241,6 +241,18 @@ _STRUCTURAL_SECTION_WORDS = frozenset(
         "build",
         "buildup",
         "build-up",
+        "rebuild",
+        "re-build",
+        "cooldown",
+        "cool-down",
+        "climax",
+        "pause",
+        "stop",
+        "silence",
+        "scream",
+        "chant",
+        "melody",
+        "melodic",
         "tag",
         "coda",
         "spoken",
@@ -556,11 +568,93 @@ _HOOK_SECTION_RE = re.compile(
 )
 
 
+_HYPHEN_TRANS = str.maketrans({"\u2010": "-", "\u2011": "-", "\u2212": "-"})
+_NON_SINGER_CUE_WORDS = frozenset(
+    {
+        # Languages often noted in Suno section headers (e.g. "[Chorus: English, then Mandarin]")
+        "english",
+        "french",
+        "spanish",
+        "mandarin",
+        "cantonese",
+        "chinese",
+        "korean",
+        "japanese",
+        "indonesian",
+        "malay",
+        "portuguese",
+        "italian",
+        "german",
+        "tagalog",
+        "filipino",
+        "arabic",
+        "hindi",
+        "russian",
+        # Instruments, arrangement, and vocal delivery cues (e.g. "[Breakdown: Piano, airy pad]")
+        "piano",
+        "guitar",
+        "drums",
+        "strings",
+        "pads",
+        "synth",
+        "synths",
+        "supersaw",
+        "supersaws",
+        "arpeggio",
+        "bass",
+        "kick",
+        "snare",
+        "riser",
+        "percussion",
+        "cello",
+        "violin",
+        "horns",
+        "brass",
+        "sub",
+        "explosive",
+        "tender",
+        "husky",
+        "raw",
+        "pleading",
+        "restrained",
+        "sparse",
+        "fragile",
+        "very",
+        "bare",
+        "rising",
+        "full",
+        "production",
+        "energy",
+        "volume",
+        "maximum",
+        "biggest",
+        "atmospheric",
+        "filtered",
+        "stacked",
+        "harmonies",
+        "echoes",
+        "half-spoken",
+        "half-time",
+        "modern",
+        "hybrid",
+        "camera",
+        "shutter",
+        "only",
+        "begins",
+        "returns",
+        "continue",
+        "swell",
+        "slows",
+        "tempo",
+    }
+)
+
+
 def is_hook_section(section: str | None) -> bool:
     """True for chorus/hook sections across languages, excluding pre-chorus and post-chorus."""
     if not section:
         return False
-    norm = unicodedata.normalize("NFKC", section)
+    norm = unicodedata.normalize("NFKC", section).translate(_HYPHEN_TRANS)
     cleaned = _NON_HOOK_CHORUS_RE.sub("", norm)
     return bool(_HOOK_SECTION_RE.search(cleaned))
 
@@ -601,7 +695,9 @@ def _looks_like_name(text: str) -> bool:
 
 def _split_section_cue(label: str) -> tuple[str, bool, bool]:
     """Return ``(cue, explicit, after_structural_dash)`` for ``label``."""
-    norm = unicodedata.normalize("NFKC", label.strip().strip(_BIDI_AND_BOM))
+    norm = unicodedata.normalize("NFKC", label.strip().strip(_BIDI_AND_BOM)).translate(
+        _HYPHEN_TRANS
+    )
     norm = _REPEAT_MARKER.sub("", norm)
     bracketed = _BRACKETED_CUE.match(norm)
     if bracketed:
@@ -621,6 +717,10 @@ def section_cue(label: str) -> tuple[str, bool]:
     return cue, explicit
 
 
+def _has_bicameral_letters(text: str) -> bool:
+    return any(ch.isalpha() and ch.casefold() != ch.upper() for ch in text)
+
+
 def singers_in_cue(
     cue: str,
     *,
@@ -636,7 +736,8 @@ def singers_in_cue(
         if not part:
             continue
         words = part.casefold().split()
-        if " ".join(words) in _ENSEMBLE_SECTION_WORDS:
+        joined = " ".join(words)
+        if joined in _ENSEMBLE_SECTION_WORDS or joined in ("call and response",):
             return None
         if len(words) == 1:
             compact = _COMPACT_NUMBERED_RE.match(words[0])
@@ -648,7 +749,11 @@ def singers_in_cue(
                 )
                 singers.add(f"{role} {compact.group(2)}")
                 continue
-        if len(words) == 2 and words[0] in _NUMBERED_DESIGNATORS and words[1].isdigit():
+        if (
+            len(words) == 2
+            and words[0] in _NUMBERED_DESIGNATORS
+            and (words[1].isdigit() or (len(words[1]) == 1 and words[1].isalpha()))
+        ):
             role = words[0] if words[0] in _ENGLISH_NUMBERED_DESIGNATORS else "singer"
             singers.add(f"{role} {words[1]}")
             continue
@@ -668,9 +773,17 @@ def singers_in_cue(
         if all(w in _DESIGNATOR_WORDS for w in core):
             singers.add(_canonical_designator(core))
             continue
+        if any(w in _NON_SINGER_CUE_WORDS for w in core):
+            continue
         if len(core) > 3 or any(w.isdigit() for w in words):
             continue
-        if explicit or (allow_bare_names and cased and _looks_like_name(part)):
+        if explicit:
+            # In a mixed-case header like "[Bridge: bare percussion]", lowercase Latin phrases are
+            # stage directions rather than proper names; unicameral scripts (CJK/Kana/Hangul) pass.
+            if cased and _has_bicameral_letters(part) and not _looks_like_name(part):
+                continue
+            singers.add(" ".join(core))
+        elif allow_bare_names and cased and _looks_like_name(part):
             singers.add(" ".join(core))
     return singers
 
@@ -679,7 +792,9 @@ def section_singers(label: str | None) -> set[str] | None:
     """Performer keys named by ``label`` (empty if none, ``None`` for ensemble cues)."""
     if not label or not label.strip():
         return set()
-    cleaned = unicodedata.normalize("NFKC", label.strip().strip(_BIDI_AND_BOM))
+    cleaned = unicodedata.normalize("NFKC", label.strip().strip(_BIDI_AND_BOM)).translate(
+        _HYPHEN_TRANS
+    )
     cue, explicit, after_structural_dash = _split_section_cue(cleaned)
     if not cue:
         return set()
@@ -689,6 +804,22 @@ def section_singers(label: str | None) -> set[str] | None:
         cased=cleaned != cleaned.casefold(),
         allow_bare_names=not after_structural_dash,
     )
+
+
+def extract_section_tags(text: str) -> list[str]:
+    """Return every ``[Section]`` header in ``text`` in order, including empty/instrumental ones."""
+    tags: list[str] = []
+    for raw in text.lstrip("\ufeff").splitlines():
+        cleaned = raw.strip().strip(_BIDI_AND_BOM).strip()
+        if not cleaned:
+            continue
+        match = _SECTION_TAG.match(cleaned)
+        if match:
+            tag = next((g for g in match.groups() if g is not None), "").strip()
+            tag = tag.strip(_BIDI_AND_BOM).strip()
+            if tag:
+                tags.append(tag)
+    return tags
 
 
 def labels_have_multiple_singers(labels: Iterable[str | None]) -> bool:
@@ -800,6 +931,20 @@ def load_or_transcribe_words(project: Project) -> list[Word]:
         )
         return [Word.model_validate(item) for item in raw]
     prepare_cfg = project.config.prepare
+    if project.config.auto_tune:
+        from mvdirector import tuning as tuning_mod
+
+        lyrics_text, style_text = tuning_mod.read_optional_project_inputs(project)
+        prepare_cfg, whisper_adjustments = tuning_mod.tune_prepare_config(
+            project.config,
+            lyrics_text=lyrics_text,
+            style_text=style_text,
+            title_hint=project.config.title,
+        )
+        for adj in whisper_adjustments:
+            log.info(
+                "Auto-tuned %s: %r -> %r (%s)", adj.key, adj.current, adj.recommended, adj.reason
+            )
     vocals_path = project.input_path(inputs.vocals, "vocals")
     transcriber = WhisperTranscriber(
         model_size=prepare_cfg.whisper_model,

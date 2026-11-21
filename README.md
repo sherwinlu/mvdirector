@@ -36,7 +36,8 @@ Everything revolves around one file, `manifest.json`. Each stage reads it, does 
 |---|---|---|
 | Prepare *(optional)* | `mvd prepare <audio>` | From a single `.mp3` or `.wav` file: transcodes `inputs/mix.wav`, separates `inputs/vocals.wav` (Demucs), transcribes lyrics, and infers `[Section]`-tagged `inputs/lyrics.txt` + lip-sync-ready `inputs/style.md`. |
 | Brief *(optional)* | `mvd brief` | Drafts `inputs/lyrics.txt` and `inputs/style.md` from an `--idea` prompt. |
-| Analyze | `mvd analyze` | Tempo, beats, bars, per-bar loudness, vocal activity, lyric timing (`analysis.json`). |
+| Analyze | `mvd analyze [--tune]` | Tempo, beats, bars, per-bar loudness, vocal activity, lyric timing, and `track_profile` (`analysis.json`); `--tune` persists track-specific settings to `project.yaml`. |
+| Tune *(optional)* | `mvd tune [--apply]` | Inspects lyrics, style cues, and `analysis.json` to preview or write recommended transcription, pacing, and lip-sync adjustments into `project.yaml` (`auto_tune: true` applies them automatically at runtime). |
 | Plan | `mvd plan` | Deterministic bar/phrase cuts + LLM visual bible (characters, wardrobes, sets, props, rules) and shot direction (`manifest.json`). |
 | Reference | `mvd reference generate`, `lock`, `video`, `lock-video` | Locks 4-panel character sheets (`row`/`grid`/`columns`, `white`/`grey`), derived character variants (`--from-character`), and optional silent turnaround reference videos. |
 | Plates & Props | `mvd plates ...`, `mvd props ...` | Locks empty set plates (including `--from-set`, `--style-ref`, `--embed-set`) and recurring hero props. |

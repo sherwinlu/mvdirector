@@ -16,6 +16,7 @@ from pathlib import Path
 
 import numpy as np
 
+from mvdirector import tuning as tuning_mod
 from mvdirector.audio import lyrics as lyrics_mod
 from mvdirector.models import BOTH_VOICES, Analysis, TimeSpan, VocalTurn
 from mvdirector.project import Project
@@ -529,10 +530,32 @@ def analyze_project(project: Project) -> Analysis:
     vocals = load_mono(project.input_path(inputs.vocals, "vocals"))
     duration = len(mix) / ANALYSIS_SR
 
+    lyrics_path = project.input_path(inputs.lyrics, "lyrics")
+    lyrics_raw = lyrics_path.read_text("utf-8-sig")
+    lyrics_for_tuning = "" if tuning_mod.is_starter_input(lyrics_path, "lyrics.txt") else lyrics_raw
+    _, style_for_tuning = tuning_mod.read_optional_project_inputs(project)
+    pre_profile = tuning_mod.profile_track(
+        lyrics_text=lyrics_for_tuning,
+        style_text=style_for_tuning,
+        title_hint=project.config.title,
+    )
+    effective_beats_per_bar = video.beats_per_bar
+    if (
+        project.config.auto_tune
+        and video.beats_per_bar == 4
+        and pre_profile.beats_per_bar_hint not in (None, 4)
+    ):
+        effective_beats_per_bar = pre_profile.beats_per_bar_hint
+        log.info(
+            "Auto-tuned video.beats_per_bar: %d -> %d (meter cue in style/lyrics)",
+            video.beats_per_bar,
+            effective_beats_per_bar,
+        )
+
     # Drums give the cleanest beat grid; fall back to the full mix.
     beat_source = load_mono(project.input_path(inputs.drums, "drums")) if inputs.drums else mix
     tempo, beats = detect_beats(beat_source)
-    bars = bars_from_beats(beats, video.beats_per_bar)
+    bars = bars_from_beats(beats, effective_beats_per_bar)
     log.info("Tempo %.1f BPM, %d beats, %d bars, %.1fs", tempo, len(beats), len(bars), duration)
     if len(bars) < 2:
         log.warning("No usable beat grid was found; shots will be cut at equal intervals.")
@@ -544,9 +567,7 @@ def analyze_project(project: Project) -> Analysis:
         "Found %d vocal windows covering %.1fs", len(windows), sum(w.duration for w in windows)
     )
 
-    lines = lyrics_mod.parse_lyrics(
-        project.input_path(inputs.lyrics, "lyrics").read_text("utf-8-sig")
-    )
+    lines = lyrics_mod.parse_lyrics(lyrics_raw)
     words = lyrics_mod.load_or_transcribe_words(project)
     if words:
         lines = lyrics_mod.align_lines_to_words(lines, words)
@@ -561,7 +582,7 @@ def analyze_project(project: Project) -> Analysis:
             len({t.voice for t in vocal_turns}),
         )
 
-    return Analysis(
+    analysis = Analysis(
         duration=round(duration, 3),
         tempo_bpm=round(tempo, 2),
         beats=[round(b, 3) for b in beats],
@@ -571,3 +592,10 @@ def analyze_project(project: Project) -> Analysis:
         vocal_turns=vocal_turns,
         lyric_lines=lines,
     )
+    profile = tuning_mod.profile_track(
+        lyrics_text=lyrics_for_tuning,
+        style_text=style_for_tuning,
+        title_hint=project.config.title,
+        analysis=analysis,
+    )
+    return analysis.model_copy(update={"track_profile": profile})

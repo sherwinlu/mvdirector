@@ -20,6 +20,7 @@ from collections.abc import Callable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from mvdirector import tuning as tuning_mod
 from mvdirector.audio.lyrics import (
     is_hook_section,
     is_syllabic_char,
@@ -235,6 +236,17 @@ def build_manifest(
     style_text: str,
     llm: LLMClient | None,
 ) -> Manifest:
+    config, tuned_adjustments = tuning_mod.tune_config_for_planning(
+        config, analysis, lyrics_text=lyrics_text, style_text=style_text
+    )
+    for adj in tuned_adjustments:
+        log.info(
+            "Auto-tuned %s: %r -> %r (%s)",
+            adj.key,
+            adj.current,
+            adj.recommended,
+            adj.reason,
+        )
     manifest = Manifest(
         title=config.title,
         duration=analysis.duration,

@@ -28,6 +28,7 @@ from mvdirector import assemble as assemble_mod
 from mvdirector import calibrate as calibrate_mod
 from mvdirector import media, mix_assemble
 from mvdirector import report as report_mod
+from mvdirector import tuning as tuning_mod
 from mvdirector.audio.analysis import analyze_project
 from mvdirector.audio.lyrics import Transcriber
 from mvdirector.audio.mix_analysis import analyze_mix_project
@@ -47,7 +48,14 @@ from mvdirector.generation.preflight import check_assets
 from mvdirector.generation.runner import RunBudget, RunEvent, ShotRunner, load_templates
 from mvdirector.llm import LLMClient, build_llm
 from mvdirector.llm.check import LLMCheckResult, ping_llm, run_llm_check
-from mvdirector.models import Analysis, AssetKind, Manifest, ProjectMode, ReferenceSet
+from mvdirector.models import (
+    Analysis,
+    AssetKind,
+    Manifest,
+    ProjectMode,
+    ReferenceSet,
+    TrackProfile,
+)
 from mvdirector.planning.brief import ensure_writable, generate_brief, write_brief
 from mvdirector.planning.mix_planner import build_mix_manifest
 from mvdirector.planning.planner import build_manifest
@@ -65,6 +73,7 @@ __all__ = [
     "Observer",
     "PrepareResult",
     "ProjectRef",
+    "TuneResult",
     "ValidationCheck",
     # stages
     "analyze",
@@ -95,6 +104,7 @@ __all__ = [
     "refine_previz",
     "reject",
     "status_counts",
+    "tune",
     "upscale",
     "validate_project",
 ]
@@ -318,13 +328,22 @@ def prepare(
     )
 
 
+@dataclass(frozen=True)
+class TuneResult:
+    profile: TrackProfile
+    adjustments: list[tuning_mod.Adjustment]
+    applied_to_yaml: bool
+    report: str
+
+
 def analyze(
     project_dir: ProjectRef,
     *,
+    apply_tuning: bool = False,
     mode: ProjectMode | None = None,
     tracklist: Path | None = None,
 ) -> tuple[Project, Analysis]:
-    """Analyze the audio: beats, bars, vocal activity and lyric timing, or mix chapters."""
+    """Analyze the audio: beats, bars, vocal activity, lyric timing, profile, or mix chapters."""
     project = _with_mode(open_project(project_dir), mode)
     resolved_tracklist = _resolve_tracklist_arg(project, tracklist)
     if project.config.mode is ProjectMode.MIX:
@@ -336,8 +355,59 @@ def analyze(
             "--tracklist requires mix mode (--mode mix or mode: mix in project.yaml)."
         )
     analysis = analyze_project(project)
-    project.save_analysis(analysis)
+    if apply_tuning:
+        with project.run_lock():
+            project.save_analysis(analysis)
+            if analysis.track_profile is not None:
+                adjustments = tuning_mod.recommend_adjustments(
+                    project.config, analysis.track_profile
+                )
+                if tuning_mod.apply_adjustments_to_yaml(
+                    project.root / CONFIG_FILENAME, adjustments
+                ):
+                    project = Project.open(
+                        project.root, state=project.state, storage=project.storage
+                    )
+    else:
+        project.save_analysis(analysis)
     return project, analysis
+
+
+def tune(
+    project_dir: ProjectRef,
+    *,
+    apply: bool = False,
+    force: bool = False,
+) -> TuneResult:
+    """Profile track characteristics from lyrics, style, and analysis, and tune project.yaml."""
+    project = open_project(project_dir, pull=False)
+    lyrics_text, style_text = tuning_mod.read_optional_project_inputs(project)
+    try:
+        analysis: Analysis | None = project.load_analysis()
+    except MVDError:
+        analysis = None
+    profile = tuning_mod.profile_track(
+        lyrics_text=lyrics_text,
+        style_text=style_text,
+        title_hint=project.config.title,
+        analysis=analysis,
+    )
+    adjustments = tuning_mod.recommend_adjustments(project.config, profile, force=force)
+    wrote_yaml = False
+    if apply and any(adj.applied for adj in adjustments):
+        with project.run_lock():
+            project = open_project(project_dir, pull=False)
+            adjustments = tuning_mod.recommend_adjustments(project.config, profile, force=force)
+            if any(adj.applied for adj in adjustments):
+                tuning_mod.apply_adjustments_to_yaml(project.root / CONFIG_FILENAME, adjustments)
+                wrote_yaml = True
+    report = tuning_mod.render_tune_report(profile, adjustments, applied_to_yaml=wrote_yaml)
+    return TuneResult(
+        profile=profile,
+        adjustments=adjustments,
+        applied_to_yaml=wrote_yaml,
+        report=report,
+    )
 
 
 @dataclass

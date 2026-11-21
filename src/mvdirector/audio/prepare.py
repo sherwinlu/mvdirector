@@ -24,6 +24,7 @@ import numpy as np
 from pydantic import BaseModel, ConfigDict
 
 from mvdirector import media
+from mvdirector import tuning as tuning_mod
 from mvdirector.audio import analysis as analysis_mod
 from mvdirector.audio.lyrics import (
     Transcriber,
@@ -407,11 +408,35 @@ def prepare_project(
         mix_samples, vocal_samples, project.config.video.beats_per_bar, drums=drum_samples
     )
 
-    trans = transcriber or WhisperTranscriber(
-        model_size=prepare_cfg.whisper_model,
-        language=prepare_cfg.whisper_language,
-        multilingual=prepare_cfg.whisper_multilingual,
-    )
+    if transcriber is not None:
+        trans = transcriber
+    else:
+        lyrics_hint, style_hint = tuning_mod.read_optional_project_inputs(project)
+        stem_hint = "" if source_audio.stem.lower() == "mix" else source_audio.stem
+        title_hint = (
+            f"{project.config.title} {stem_hint}".strip()
+            if project.config.title.strip().lower() not in ("", "my song", "untitled")
+            else stem_hint
+        )
+        effective_prepare, whisper_adjustments = tuning_mod.tune_prepare_config(
+            project.config,
+            lyrics_text=lyrics_hint,
+            style_text=style_hint,
+            title_hint=title_hint,
+        )
+        for adj in whisper_adjustments:
+            log.info(
+                "Auto-tuned %s: %r -> %r (%s)",
+                adj.key,
+                adj.current,
+                adj.recommended,
+                adj.reason,
+            )
+        trans = WhisperTranscriber(
+            model_size=effective_prepare.whisper_model,
+            language=effective_prepare.whisper_language,
+            multilingual=effective_prepare.whisper_multilingual,
+        )
     transcript = trans.transcribe(vocals_path)
     if not transcript.words:
         log.warning(

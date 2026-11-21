@@ -36,7 +36,8 @@ Everything revolves around one file, `manifest.json`. Each stage reads it, does 
 |---|---|---|
 | Prepare *(optional)* | `mvd prepare <audio>` | From a single `.mp3` or `.wav` file: transcodes `inputs/mix.wav`, separates `inputs/vocals.wav` (Demucs), transcribes lyrics, and infers `[Section]`-tagged `inputs/lyrics.txt` + lip-sync-ready `inputs/style.md`. |
 | Brief *(optional)* | `mvd brief` | Drafts `inputs/lyrics.txt` and `inputs/style.md` from an `--idea` prompt. |
-| Analyze | `mvd analyze [--mode mix]` | Tempo, beats, bars, per-bar loudness, vocal activity, lyric timing (`analysis.json`); in `mix` mode, windowed per-chapter BPM, downbeat, and energy from `inputs.tracklist` or fixed intervals. |
+| Analyze | `mvd analyze [--tune] [--mode mix]` | Tempo, beats, bars, per-bar loudness, vocal activity, lyric timing, and `track_profile` (`analysis.json`); `--tune` persists track-specific settings to `project.yaml`. In `mix` mode, windowed per-chapter BPM, downbeat, and energy from `inputs.tracklist` or fixed intervals. |
+| Tune *(optional)* | `mvd tune [--apply]` | Inspects lyrics, style cues, and `analysis.json` to preview or write recommended transcription, pacing, and lip-sync adjustments into `project.yaml` (`auto_tune: true` applies them automatically at runtime). |
 | Plan | `mvd plan [--mode mix]` | Deterministic bar/phrase cuts + LLM visual bible and shot direction (`manifest.json`); in `mix` mode, 1 distinct environment + 2–3 loopable visual units per track chapter. |
 | Reference | `mvd reference generate`, `lock`, `video`, `lock-video` | Locks 4-panel character sheets (`row`/`grid`/`columns`, `white`/`grey`), derived character variants (`--from-character`), and optional silent turnaround reference videos. |
 | Plates & Props | `mvd plates ...`, `mvd props ...` | Locks empty set plates (including `--from-set`, `--style-ref`, `--embed-set`) and recurring hero props. |

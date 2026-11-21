@@ -27,6 +27,7 @@ src/mvdirector/
   qc/                 scoring, common.py, image and video gates, lipsync maths, syncnet
                       (LatentSync StableSyncNet + MediaPipe), faces, vision (judge + prompt),
                       factory
+  tuning.py           track characteristic profiling (`TrackProfile`) and parameter auto-tuning
   retry.py            retry policy
   report.py           per-check tallies for `mvd qc-report`
   cleanup.py          superseded and orphaned generations for `mvd clean`

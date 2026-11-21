@@ -181,6 +181,116 @@
       "title": "TimeSpan",
       "type": "object"
     },
+    "TrackProfile": {
+      "additionalProperties": false,
+      "description": "Detected musical, vocal, and linguistic characteristics used to auto-tune parameters.",
+      "properties": {
+        "languages": {
+          "description": "Detected ISO-639-1/639-2 language codes (e.g. ['en'], ['fr', 'en'], ['zh']).",
+          "items": {
+            "type": "string"
+          },
+          "title": "Languages",
+          "type": "array"
+        },
+        "multilingual": {
+          "default": false,
+          "description": "True when lyrics or style cues span more than one language.",
+          "title": "Multilingual",
+          "type": "boolean"
+        },
+        "vocal_mode": {
+          "default": "solo",
+          "description": "Primary vocal arrangement ('solo', 'duet', 'group', or 'instrumental').",
+          "enum": [
+            "solo",
+            "duet",
+            "group",
+            "instrumental"
+          ],
+          "title": "Vocal Mode",
+          "type": "string"
+        },
+        "rap_or_fast_vocal": {
+          "default": false,
+          "description": "True when style cues or measured syllable rate indicate rap or rapid phrasing.",
+          "title": "Rap Or Fast Vocal",
+          "type": "boolean"
+        },
+        "drop_or_chop_heavy": {
+          "default": false,
+          "description": "True when style/section cues or peak non-lyric bars indicate drops/vocal chops.",
+          "title": "Drop Or Chop Heavy",
+          "type": "boolean"
+        },
+        "extreme_vocals": {
+          "default": false,
+          "description": "True when cues indicate screamed, whispered, or heavily processed vocals.",
+          "title": "Extreme Vocals",
+          "type": "boolean"
+        },
+        "non_4_4_or_free_time": {
+          "default": false,
+          "description": "True when cues indicate 3/4, 6/8, odd meter, or rubato/beatless timing.",
+          "title": "Non 4 4 Or Free Time",
+          "type": "boolean"
+        },
+        "beats_per_bar_hint": {
+          "anyOf": [
+            {
+              "maximum": 12,
+              "minimum": 2,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Meter grouping inferred from style cues when explicitly non-4/4 (e.g. 3).",
+          "title": "Beats Per Bar Hint"
+        },
+        "syllables_per_second": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Measured sung syllable/token rate across aligned or active vocal spans.",
+          "title": "Syllables Per Second"
+        },
+        "intensity_contrast": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "90th-minus-20th percentile of bar_intensity (0-1).",
+          "title": "Intensity Contrast"
+        },
+        "reasons": {
+          "description": "Human-readable explanations for detected track characteristics.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Reasons",
+          "type": "array"
+        }
+      },
+      "title": "TrackProfile",
+      "type": "object"
+    },
     "VocalTurn": {
       "additionalProperties": false,
       "description": "A contiguous vocal phrase attributed to one acoustic voice cluster or simultaneous duet.",
@@ -280,6 +390,18 @@
       },
       "title": "Lyric Lines",
       "type": "array"
+    },
+    "track_profile": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TrackProfile"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Detected musical/vocal/language profile used for automatic parameter tuning."
     },
     "chapters": {
       "description": "Per-track segments measured in long-form mix mode.",

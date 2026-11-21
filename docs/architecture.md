@@ -16,9 +16,12 @@ src/mvdirector/
   llm/                LLMClient protocol, request loop (base.py), shared HTTP/retry (http.py),
                       one backend per provider, factory.py (build_llm), check.py (mvd llm-check)
   audio/              analysis.py (beats, vocals), lyrics.py (parsing, transcription, alignment),
-                      stems.py (Demucs stem separation), prepare.py (`mvd prepare` audio-only ingest)
+                      stems.py (Demucs stem separation), prepare.py (`mvd prepare` audio-only ingest),
+                      tracklist.py (cue sheet / tracklist ingestion & YouTube/FFmpeg chapters),
+                      mix_analysis.py (windowed per-chapter audio analysis for long-form mixes)
   planning/           segmenter.py (timing, dynamic pacing, sections), planner.py (direction),
-                      prompts.py (prompt text), brief.py (`mvd brief`), previz.py (3D camera plans)
+                      mix_planner.py (mix-mode chapter themes & loop units), prompts.py (prompt text),
+                      brief.py (`mvd brief`), previz.py (3D camera plans)
   comfy/              workflow.py (templates + bindings), client.py (HTTP),
                       provider.py (ComfyEndpointProvider: which endpoint serves a stage)
   qc/                 scoring, common.py, image and video gates, lipsync maths, syncnet
@@ -32,6 +35,7 @@ src/mvdirector/
                       reference.py, plates.py, props.py, previz.py, upscale.py, preflight.py
   review/             policy.py (queue and decisions), app.py (Streamlit)
   assemble.py         final cut
+  mix_assemble.py     long-form mix circular loop synthesis, HUD cards, and segment cache
   templates/          files copied by `mvd init`
 ```
 

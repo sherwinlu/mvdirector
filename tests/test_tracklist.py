@@ -170,6 +170,60 @@ def test_resolve_chapters_handles_fixed_intervals_lead_ins_and_errors(tmp_path: 
     with pytest.raises(ConfigError, match="mix duration"):
         resolve_chapters(load_tracklist(past_end), 300.0)
 
+    # 5. Overlapping explicit end time (> next track start) fails strictly.
+    overlap_json = tmp_path / "overlap.json"
+    overlap_json.write_text(
+        json.dumps(
+            {
+                "tracks": [
+                    {"start": 0.0, "end": 180.0, "title": "First"},
+                    {"start": 120.0, "end": 240.0, "title": "Overlapping Second"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="overlaps next track"):
+        resolve_chapters(load_tracklist(overlap_json), 300.0)
+
+
+def test_stress_120_chapter_tracklist_and_adversarial_ffmetadata(tmp_path: Path) -> None:
+    # 120-track 8-hour setlist stress test -> 3-digit zero-padded chapter IDs (ch001..ch120).
+    stress_txt = tmp_path / "festival_120.txt"
+    lines = [
+        f"{(idx * 240) // 3600}:{((idx * 240) % 3600) // 60:02d}:00 "
+        f"Artist {idx + 1}; = # \\ [CHAPTER] - Track {idx + 1} (128 BPM) #techno"
+        for idx in range(120)
+    ]
+    stress_txt.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    spec = load_tracklist(stress_txt)
+    resolved = resolve_chapters(spec, duration=120 * 240.0)
+    assert len(resolved) == 120
+    assert resolved[0].id == "ch001"
+    assert resolved[99].id == "ch100"
+    assert resolved[-1].id == "ch120"
+    assert resolved[-1].end == 28800.0
+
+    chapters = [
+        MixChapter(
+            id=r.id,
+            index=r.index,
+            start=r.start,
+            end=r.end,
+            title=r.title,
+            artist=r.artist,
+            bpm=r.bpm or 128.0,
+        )
+        for r in resolved
+    ]
+    yt_text, warnings = format_youtube_chapters(chapters, total_duration=28800.0)
+    assert warnings == []
+    assert len(yt_text.splitlines()) == 120
+
+    # Adversarial metadata with newlines/delimiters must never inject extra [CHAPTER] headers.
+    ffmeta = format_ffmetadata_chapters(chapters, title="Evil\n[CHAPTER]\nSTART=0\n;=#\\Mix")
+    assert ffmeta.splitlines().count("[CHAPTER]") == 120
+
 
 def test_youtube_and_ffmetadata_chapter_formatting() -> None:
     chapters = [

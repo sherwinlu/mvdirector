@@ -487,6 +487,15 @@ def resolve_chapters(
                 f"Track timestamps must strictly increase: '{entry.title}' ({entry.start:.2f}s) "
                 f"does not follow '{entries[idx - 1].title}' ({entries[idx - 1].start:.2f}s)."
             )
+        if (
+            idx + 1 < len(entries)
+            and entry.end is not None
+            and entry.end > entries[idx + 1].start + 1e-6
+        ):
+            raise ConfigError(
+                f"Track '{entry.title}' end ({entry.end:.2f}s) overlaps next track "
+                f"'{entries[idx + 1].title}' start ({entries[idx + 1].start:.2f}s)."
+            )
 
     raw_items: list[TrackEntryInput] = []
     first_start = entries[0].start

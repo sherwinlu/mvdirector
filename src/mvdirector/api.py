@@ -140,6 +140,16 @@ def _with_mode(project: Project, mode: ProjectMode | None) -> Project:
     return project
 
 
+def _resolve_tracklist_arg(project: Project, tracklist: Path | None) -> Path | None:
+    if tracklist is None:
+        return None
+    if tracklist.is_file():
+        return tracklist
+    if not tracklist.is_absolute():
+        return project.path(tracklist)
+    return tracklist
+
+
 # --- setup ------------------------------------------------------------------------------------
 
 _STARTER_MIX_TRACKLIST = {
@@ -316,11 +326,12 @@ def analyze(
 ) -> tuple[Project, Analysis]:
     """Analyze the audio: beats, bars, vocal activity and lyric timing, or mix chapters."""
     project = _with_mode(open_project(project_dir), mode)
+    resolved_tracklist = _resolve_tracklist_arg(project, tracklist)
     if project.config.mode is ProjectMode.MIX:
-        analysis = analyze_mix_project(project, tracklist_override=tracklist)
+        analysis = analyze_mix_project(project, tracklist_override=resolved_tracklist)
         project.save_analysis(analysis)
         return project, analysis
-    if tracklist is not None:
+    if resolved_tracklist is not None:
         raise ConfigError(
             "--tracklist requires mix mode (--mode mix or mode: mix in project.yaml)."
         )
@@ -369,8 +380,9 @@ def plan(
             raise MVDError("manifest.json already exists. Pass --overwrite to replace it.")
         inputs = project.config.inputs
         if project.config.mode is ProjectMode.MIX:
-            if tracklist is not None:
-                analysis = analyze_mix_project(project, tracklist_override=tracklist)
+            resolved_tracklist = _resolve_tracklist_arg(project, tracklist)
+            if resolved_tracklist is not None:
+                analysis = analyze_mix_project(project, tracklist_override=resolved_tracklist)
                 project.save_analysis(analysis)
             else:
                 analysis = project.load_analysis()
@@ -801,6 +813,8 @@ def approve(
 
     def _apply(manifest: Manifest, project: Project) -> None:
         targets = _resolve_target_shots(manifest, shot_ids, chapters) or []
+        if not targets:
+            raise MVDError("Pass at least one shot id or --chapter to approve.")
         if still:
             for sid in targets:
                 review_policy.accept_still(manifest, sid)

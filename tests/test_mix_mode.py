@@ -315,3 +315,21 @@ def test_mix_security_rejects_escaping_tracklist_and_unsafe_chapter_ids(tmp_path
             MixChapter(id=bad_id, index=0, start=0.0, end=10.0, title="Bad", bpm=120.0)
         with pytest.raises(ConfigError, match="chapter id"):
             project.segment_video_path(bad_id)
+
+
+def test_project_relative_tracklist_override_and_empty_approve_guard(tmp_path: Path) -> None:
+    project = _make_mix_project(tmp_path)
+    # Write a secondary tracklist inside the project and pass it as a project-relative Path
+    # while cwd is outside the project root.
+    alt_rel = Path("inputs/alt_tracks.txt")
+    project.write_text(alt_rel, "00:00 Alt Opening\n00:12 Alt Closing\n")
+
+    _, analysis = api.analyze(project, tracklist=alt_rel)
+    assert [c.title for c in analysis.chapters] == ["Alt Opening", "Alt Closing"]
+
+    _, manifest = api.plan(project, overwrite=True, tracklist=alt_rel)
+    assert [c.title for c in manifest.chapters] == ["Alt Opening", "Alt Closing"]
+
+    # Calling api.approve with neither shot_ids nor chapters raises MVDError.
+    with pytest.raises(MVDError, match="shot id or --chapter"):
+        api.approve(project)

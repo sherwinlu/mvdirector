@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import unicodedata
 from collections.abc import Iterable
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -30,9 +31,20 @@ from mvdirector.project import Project
 
 log = logging.getLogger(__name__)
 
-# Only square brackets mark a section. Parenthesised lines are sung adlibs and stay lyrics.
-_SECTION_TAG = re.compile(r"^\s*\[([^\]]+)\]\s*$")
-_TOKEN = re.compile(r"[a-z0-9']+")
+# Square or CJK lenticular brackets mark a section. Parenthesised lines are sung adlibs.
+_SECTION_TAG = re.compile(r"^\s*(?:\[([^\]]+)\]|［([^］]+)］|【([^】]+)】)\s*$")
+_IGNORED_TOKEN_CHARS = str.maketrans(
+    {
+        "\u0640": None,  # Arabic tatweel (sung vocal elongation)
+        "\u200b": None,
+        "\u200c": None,
+        "\u200d": None,
+        "\ufeff": None,
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u02bc": "'",
+    }
+)
 WHISPER_SAMPLE_RATE = 16000
 
 
@@ -52,6 +64,7 @@ class Transcript(BaseModel):
     segments: list[TranscriptSegment]
     words: list[Word]
     language: str | None = None
+    multilingual: bool = False
 
 
 class Transcriber(Protocol):
@@ -63,11 +76,25 @@ class Transcriber(Protocol):
 class WhisperTranscriber:
     """Local vocal transcription backed by faster-whisper."""
 
-    def __init__(self, model_size: str = "small", language: str | None = None) -> None:
+    def __init__(
+        self,
+        model_size: str = "small",
+        language: str | None = None,
+        *,
+        multilingual: bool = False,
+    ) -> None:
         self.model_size = model_size
-        self.language = language
+        self.language = language.strip().lower() if language else None
+        self.multilingual = multilingual
 
     def transcribe(self, audio_path: Path) -> Transcript:
+        if self.model_size.lower().endswith(".en") and (
+            self.multilingual or (self.language is not None and self.language != "en")
+        ):
+            raise ConfigError(
+                f"Whisper model {self.model_size!r} is English-only; use a multilingual model "
+                "(for example 'small' or 'large-v3-turbo')."
+            )
         try:
             from faster_whisper import WhisperModel
         except ImportError as exc:
@@ -84,7 +111,13 @@ class WhisperTranscriber:
         # depends on PyAV, whose version often disagrees with faster-whisper's.
         samples, _ = librosa.load(str(audio_path), sr=WHISPER_SAMPLE_RATE, mono=True)
         model = WhisperModel(self.model_size, compute_type="int8")
-        raw_segments, info = model.transcribe(samples, word_timestamps=True, language=self.language)
+        transcribe_kwargs: dict[str, object] = {
+            "word_timestamps": True,
+            "language": self.language,
+        }
+        if self.multilingual:
+            transcribe_kwargs["multilingual"] = True
+        raw_segments, info = model.transcribe(samples, **transcribe_kwargs)  # type: ignore[arg-type]
         segments: list[TranscriptSegment] = []
         words: list[Word] = []
         for seg in raw_segments:
@@ -104,7 +137,12 @@ class WhisperTranscriber:
                     )
                 )
         detected_lang = getattr(info, "language", None) or self.language
-        return Transcript(segments=segments, words=words, language=detected_lang)
+        return Transcript(
+            segments=segments,
+            words=words,
+            language=detected_lang,
+            multilingual=self.multilingual,
+        )
 
 
 def _voice_tag_map(turns: list[VocalTurn] | None) -> dict[str, str]:
@@ -173,6 +211,7 @@ def format_transcript_as_lyrics(
 
 _STRUCTURAL_SECTION_WORDS = frozenset(
     {
+        # English
         "intro",
         "verse",
         "pre-chorus",
@@ -246,25 +285,290 @@ _STRUCTURAL_SECTION_WORDS = frozenset(
         "vocal",
         "vocals",
         "vox",
+        # Romance (Spanish, Portuguese, French, Italian)
+        "introducción",
+        "introducao",
+        "introdução",
+        "introduzione",
+        "verso",
+        "estrofa",
+        "estrofe",
+        "couplet",
+        "strophe",
+        "pre-coro",
+        "precoro",
+        "pre-estribillo",
+        "pré-refrão",
+        "pre-refrao",
+        "pré-refrain",
+        "coro",
+        "estribillo",
+        "refrão",
+        "refrao",
+        "ritornello",
+        "post-coro",
+        "pós-refrão",
+        "pos-refrao",
+        "puente",
+        "ponte",
+        "pont",
+        "interludio",
+        "intermède",
+        "intermede",
+        "salida",
+        "cierre",
+        "hablado",
+        "parlé",
+        "parle",
+        # Germanic / Nordic / Polish / Turkish / Indonesian
+        "vers",
+        "refräng",
+        "omkvæd",
+        "refrein",
+        "refren",
+        "zwrotka",
+        "mostek",
+        "brücke",
+        "brucke",
+        "vorspiel",
+        "zwischenspiel",
+        "nachspiel",
+        "giriş",
+        "kıta",
+        "nakarat",
+        "köprü",
+        "çıkış",
+        "bait",
+        "reff",
+        # Slavic (Russian)
+        "интро",
+        "вступление",
+        "куплет",
+        "предприпев",
+        "припев",
+        "бридж",
+        "проигрыш",
+        "соло",
+        "аутро",
+        "концовка",
+        # Japanese
+        "イントロ",
+        "メロ",
+        "aメロ",
+        "bメロ",
+        "cメロ",
+        "dメロ",
+        "プレサビ",
+        "サビ",
+        "大サビ",
+        "ラスサビ",
+        "落ちサビ",
+        "間奏",
+        "前奏",
+        "後奏",
+        "アウトロ",
+        "ブリッジ",
+        "フック",
+        "ラップ",
+        "セリフ",
+        "パート",
+        "コーラス",
+        # Chinese (Simplified & Traditional)
+        "主歌",
+        "导歌",
+        "導歌",
+        "预副歌",
+        "預副歌",
+        "副歌",
+        "间奏",
+        "桥段",
+        "橋段",
+        "尾奏",
+        "结尾",
+        "結尾",
+        "说唱",
+        "說唱",
+        "独白",
+        "獨白",
+        "段",
+        # Korean
+        "인트로",
+        "전주",
+        "절",
+        "프리코러스",
+        "코러스",
+        "후렴",
+        "후렴구",
+        "브릿지",
+        "브리지",
+        "간주",
+        "아웃트로",
+        "후주",
+        "랩",
+        "내레이션",
+        # Arabic & Hindi
+        "مقدمة",
+        "مقطع",
+        "لازمة",
+        "كورال",
+        "خاتمة",
+        "موسيقى",
+        "मुखड़ा",
+        "अंतरा",
     }
 )
 _ENSEMBLE_SECTION_WORDS = frozenset(
-    {"duet", "both", "together", "all", "everyone", "ensemble", "choir", "group", "harmony"}
+    {
+        "duet",
+        "dueto",
+        "duo",
+        "dúo",
+        "both",
+        "ambos",
+        "beide",
+        "tous",
+        "tous les deux",
+        "juntos",
+        "ensemble",
+        "zusammen",
+        "insieme",
+        "together",
+        "all",
+        "todos",
+        "everyone",
+        "choir",
+        "group",
+        "harmony",
+        "вместе",
+        "оба",
+        "дуэт",
+        "хор",
+        "二人",
+        "ふたり",
+        "全員",
+        "みんなで",
+        "合唱",
+        "合",
+        "함께",
+        "같이",
+        "듀엣",
+        "떼창",
+    }
 )
-_DESIGNATOR_WORDS = frozenset(
+_ENGLISH_DESIGNATOR_WORDS = frozenset(
     {"male", "female", "man", "woman", "boy", "girl", "guy", "lady", "he", "she", "him", "her"}
 )
-_NUMBERED_DESIGNATORS = frozenset(
+_LOW_FOREIGN_DESIGNATORS = frozenset(
+    {
+        "hombre",
+        "chico",
+        "homme",
+        "garçon",
+        "garcon",
+        "mann",
+        "ragazzo",
+        "мужчина",
+        "парень",
+        "男",
+        "男声",
+        "男聲",
+        "男性",
+        "남",
+        "남자",
+        "남성",
+    }
+)
+_HIGH_FOREIGN_DESIGNATORS = frozenset(
+    {
+        "mujer",
+        "chica",
+        "femme",
+        "fille",
+        "frau",
+        "ragazza",
+        "женщина",
+        "девушка",
+        "女",
+        "女声",
+        "女聲",
+        "女性",
+        "여",
+        "여자",
+        "여성",
+    }
+)
+_DESIGNATOR_WORDS = _ENGLISH_DESIGNATOR_WORDS | _LOW_FOREIGN_DESIGNATORS | _HIGH_FOREIGN_DESIGNATORS
+_ENGLISH_NUMBERED_DESIGNATORS = frozenset(
     {"singer", "voice", "vocalist", "vocal", "vocals", "rapper", "character", "performer"}
 )
-_SINGER_SPLIT = re.compile(r"\s*(?:&|\+|/|\band\b)\s*", flags=re.IGNORECASE)
-_REPEAT_MARKER = re.compile(r"\s*[(\[]?\s*(?:x|×)\s*\d+\s*[)\]]?\s*$", flags=re.IGNORECASE)
-_BRACKETED_CUE = re.compile(r"^(.*?)\s*[(\[]([^()\[\]]+)[)\]]\s*$")
+_FOREIGN_NUMBERED_DESIGNATORS = frozenset(
+    {
+        "cantante",
+        "voz",
+        "chanteur",
+        "chanteuse",
+        "voix",
+        "sänger",
+        "sanger",
+        "stimme",
+        "певец",
+        "певица",
+        "голос",
+        "歌手",
+        "ボーカル",
+        "シンガー",
+        "가수",
+        "보컬",
+    }
+)
+_NUMBERED_DESIGNATORS = _ENGLISH_NUMBERED_DESIGNATORS | _FOREIGN_NUMBERED_DESIGNATORS
+_COMPACT_NUMBERED_RE = re.compile(r"^([^\W\d_]+)(\d+)$")
+_SECTION_ORDINAL_RE = re.compile(r"^(?:第?[0-9一二三四五六七八九十]+番?|\d+)|\d+$")
+_SINGER_SPLIT = re.compile(
+    r"\s*(?:&|\+|/|・|、|\b(?:and|y|e|et|und|и)\b)\s*",
+    flags=re.IGNORECASE,
+)
+_REPEAT_MARKER = re.compile(r"\s*[(\[【]?\s*(?:x|×)\s*\d+\s*[)\]】]?\s*$", flags=re.IGNORECASE)
+_BRACKETED_CUE = re.compile(r"^(.*?)\s*[(\[【]([^()\[\]【】]+)[)\]】]\s*$")
 _DASH_SPLIT = re.compile(r"\s+[-—–]\s+")
+# Pre-chorus and post-chorus equivalents excluded before checking hook/chorus markers.
+_NON_HOOK_CHORUS_RE = re.compile(
+    r"(?:\b(?:pre|post|pré|pós|pos)[\s-]?"
+    r"(?:chorus|coro|estribillo|refrão|refrao|refrain|refren|refrein)\b"
+    r"|\bпредприпев\b|プレサビ|预副歌|預副歌|导歌|導歌|프리코러스)",
+    flags=re.IGNORECASE,
+)
+_HOOK_SECTION_RE = re.compile(
+    r"(?:\b(?:chorus|hook|refrain|estribillo|coro|refrão|refrao|ritornello|"
+    r"refren|refrein|refräng|omkvæd|nakarat|reff|припев|كورال|لازمة)\b"
+    r"|サビ|フック|副歌|후렴|코러스|मुखड़ा)",
+    flags=re.IGNORECASE,
+)
+
+
+def is_hook_section(section: str | None) -> bool:
+    """True for chorus/hook sections across languages, excluding pre-chorus and post-chorus."""
+    if not section:
+        return False
+    norm = unicodedata.normalize("NFKC", section)
+    cleaned = _NON_HOOK_CHORUS_RE.sub("", norm)
+    return bool(_HOOK_SECTION_RE.search(cleaned))
+
+
+def _strip_section_affixes(word: str) -> str:
+    return _SECTION_ORDINAL_RE.sub("", word)
+
+
+def _canonical_designator(words: list[str]) -> str:
+    if all(w in _LOW_FOREIGN_DESIGNATORS for w in words):
+        return "male"
+    if all(w in _HIGH_FOREIGN_DESIGNATORS for w in words):
+        return "female"
+    return " ".join(words)
 
 
 def _is_structural(words: list[str]) -> bool:
-    core = [w for w in (re.sub(r"^\d+|\d+$", "", w) for w in words) if w]
+    core = [w for w in (_strip_section_affixes(w) for w in words) if w]
     return bool(core) and all(w in _STRUCTURAL_SECTION_WORDS for w in core)
 
 
@@ -274,16 +578,17 @@ def _looks_like_name(text: str) -> bool:
 
 def section_cue(label: str) -> tuple[str, bool]:
     """Split a section label into its performer cue and whether that cue was explicit."""
-    label = _REPEAT_MARKER.sub("", label.strip())
-    bracketed = _BRACKETED_CUE.match(label)
+    norm = unicodedata.normalize("NFKC", label.strip())
+    norm = _REPEAT_MARKER.sub("", norm)
+    bracketed = _BRACKETED_CUE.match(norm)
     if bracketed:
         return bracketed.group(2).strip(), True
-    if ":" in label:
-        return label.split(":", 1)[1].strip(), True
-    if _DASH_SPLIT.search(label):
-        lhs, rhs = _DASH_SPLIT.split(label, maxsplit=1)
-        return (rhs if _is_structural(lhs.lower().split()) else lhs).strip(), False
-    return label, False
+    if ":" in norm:
+        return norm.split(":", 1)[1].strip(), True
+    if _DASH_SPLIT.search(norm):
+        lhs, rhs = _DASH_SPLIT.split(norm, maxsplit=1)
+        return (rhs if _is_structural(lhs.casefold().split()) else lhs).strip(), False
+    return norm, False
 
 
 def singers_in_cue(cue: str, *, explicit: bool, cased: bool) -> set[str] | None:
@@ -294,23 +599,34 @@ def singers_in_cue(cue: str, *, explicit: bool, cased: bool) -> set[str] | None:
         part = _REPEAT_MARKER.sub("", raw.strip())
         if not part:
             continue
-        words = part.lower().split()
+        words = part.casefold().split()
         if " ".join(words) in _ENSEMBLE_SECTION_WORDS:
             return None
+        if len(words) == 1:
+            compact = _COMPACT_NUMBERED_RE.match(words[0])
+            if compact and compact.group(1) in _NUMBERED_DESIGNATORS:
+                role = (
+                    compact.group(1)
+                    if compact.group(1) in _ENGLISH_NUMBERED_DESIGNATORS
+                    else "singer"
+                )
+                singers.add(f"{role} {compact.group(2)}")
+                continue
         if len(words) == 2 and words[0] in _NUMBERED_DESIGNATORS and words[1].isdigit():
-            singers.add(f"{words[0]} {words[1]}")
+            role = words[0] if words[0] in _ENGLISH_NUMBERED_DESIGNATORS else "singer"
+            singers.add(f"{role} {words[1]}")
             continue
-        core = [re.sub(r"^\d+|\d+$", "", w) for w in words]
+        core = [_strip_section_affixes(w) for w in words]
         core = [w for w in core if w]
         if not core:
             continue
         if any(w in _STRUCTURAL_SECTION_WORDS for w in core):
             rest = [w for w in core if w not in _STRUCTURAL_SECTION_WORDS]
             if rest and all(w in _DESIGNATOR_WORDS for w in rest):
-                singers.add(" ".join(rest))
+                singers.add(_canonical_designator(rest))
             continue
         if all(w in _DESIGNATOR_WORDS for w in core):
-            singers.add(" ".join(core))
+            singers.add(_canonical_designator(core))
             continue
         if len(core) > 3 or any(w.isdigit() for w in words):
             continue
@@ -323,11 +639,11 @@ def section_singers(label: str | None) -> set[str] | None:
     """Performer keys named by ``label`` (empty if none, ``None`` for ensemble cues)."""
     if not label or not label.strip():
         return set()
-    cleaned = label.strip()
+    cleaned = unicodedata.normalize("NFKC", label.strip())
     cue, explicit = section_cue(cleaned)
     if not cue:
         return set()
-    return singers_in_cue(cue, explicit=explicit, cased=cleaned != cleaned.lower())
+    return singers_in_cue(cue, explicit=explicit, cased=cleaned != cleaned.casefold())
 
 
 def labels_have_multiple_singers(labels: Iterable[str | None]) -> bool:
@@ -354,26 +670,93 @@ def parse_lyrics(text: str) -> list[LyricLine]:
             continue
         tag = _SECTION_TAG.match(stripped)
         if tag:
-            section = tag.group(1).strip()
+            matched = next((g for g in tag.groups() if g is not None), "")
+            section = matched.strip() or None
             continue
         lines.append(LyricLine(text=stripped, section=section))
     return lines
 
 
+def is_syllabic_char(ch: str) -> bool:
+    """True for unspaced or syllabic scripts tokenized per character/cluster."""
+    cp = ord(ch)
+    if cp < 0x0E00:
+        return False
+    in_range = (
+        0x0E00 <= cp <= 0x109F  # Thai, Lao, Tibetan, Myanmar
+        or 0x1780 <= cp <= 0x17FF  # Khmer
+        or 0x3005 <= cp <= 0x3006  # CJK iteration marks (々, 〆)
+        or 0x3040 <= cp <= 0x312F  # Hiragana, Katakana, Bopomofo
+        or 0x31F0 <= cp <= 0x31FF  # Katakana phonetic extensions
+        or 0x3400 <= cp <= 0x4DBF  # CJK Extension A
+        or 0x4E00 <= cp <= 0x9FFF  # CJK Unified Ideographs
+        or 0xAC00 <= cp <= 0xD7AF  # Hangul Syllables
+        or 0xF900 <= cp <= 0xFAFF  # CJK Compatibility Ideographs
+        or 0x20000 <= cp <= 0x323AF  # CJK Extensions B–H
+    )
+    return in_range and unicodedata.category(ch)[0] in ("L", "N")
+
+
 def tokenize(text: str) -> list[str]:
-    return _TOKEN.findall(text.lower())
+    """Split lyric or transcript text into normalized tokens across any Unicode script."""
+    norm = unicodedata.normalize("NFKC", text).translate(_IGNORED_TOKEN_CHARS).casefold()
+    tokens: list[str] = []
+    buf: list[str] = []
+
+    def flush() -> None:
+        if not buf:
+            return
+        word = "".join(buf).strip("'")
+        buf.clear()
+        if word:
+            tokens.append(word)
+
+    i = 0
+    n = len(norm)
+    while i < n:
+        ch = norm[i]
+        if is_syllabic_char(ch):
+            flush()
+            end = i + 1
+            while end < n and unicodedata.category(norm[end]).startswith("M"):
+                end += 1
+            tokens.append(norm[i:end])
+            i = end
+            continue
+        cat = unicodedata.category(ch)
+        if cat[0] in ("L", "N") or (cat[0] == "M" and buf) or (ch == "'" and buf):
+            buf.append(ch)
+        else:
+            flush()
+        i += 1
+    flush()
+    return tokens
+
+
+def _sung_weight(text: str) -> int:
+    """Estimated relative singing duration weight across single- and mixed-script lines."""
+    total = 0
+    for ch in unicodedata.normalize("NFKC", text):
+        if ch.isspace() or unicodedata.category(ch).startswith("M"):
+            continue
+        total += 3 if is_syllabic_char(ch) else 1
+    return max(1, total)
 
 
 def load_or_transcribe_words(project: Project) -> list[Word]:
     """Word timestamps from the configured JSON file, else faster-whisper, else none."""
     inputs = project.config.inputs
     if inputs.word_timestamps:
-        raw = json.loads(project.input_path(inputs.word_timestamps, "word_timestamps").read_text())
+        raw = json.loads(
+            project.input_path(inputs.word_timestamps, "word_timestamps").read_text("utf-8")
+        )
         return [Word.model_validate(item) for item in raw]
     prepare_cfg = project.config.prepare
     vocals_path = project.input_path(inputs.vocals, "vocals")
     transcriber = WhisperTranscriber(
-        model_size=prepare_cfg.whisper_model, language=prepare_cfg.whisper_language
+        model_size=prepare_cfg.whisper_model,
+        language=prepare_cfg.whisper_language,
+        multilingual=prepare_cfg.whisper_multilingual,
     )
     try:
         return transcriber.transcribe(vocals_path).words
@@ -399,8 +782,11 @@ def align_lines_to_words(lines: list[LyricLine], words: list[Word]) -> list[Lyri
     """
     lyric_tokens: list[str] = []
     token_line: list[int] = []
+    line_token_counts: list[int] = []
     for index, line in enumerate(lines):
-        for token in tokenize(line.text):
+        tokens = tokenize(line.text)
+        line_token_counts.append(len(tokens))
+        for token in tokens:
             lyric_tokens.append(token)
             token_line.append(index)
 
@@ -411,15 +797,19 @@ def align_lines_to_words(lines: list[LyricLine], words: list[Word]) -> list[Lyri
             word_tokens.append(token)
             token_word.append(index)
 
-    # Record (start, end, block_size) per matched word on each line so an isolated 1-token
-    # stopword match far across a singer gap cannot stretch a line into another vocalist's turn.
-    matched_words: dict[int, list[tuple[float, float, int]]] = {}
+    # Record (start, end, block_size, is_syllabic) per matched token on each line so an isolated
+    # 1-token stopword/particle match cannot stretch across a singer gap or mis-anchor a CJK line.
+    matched_words: dict[int, list[tuple[float, float, int, bool]]] = {}
     matcher = SequenceMatcher(a=lyric_tokens, b=word_tokens, autojunk=False)
     for block in matcher.get_matching_blocks():
         for offset in range(block.size):
-            line_index = token_line[block.a + offset]
+            tok_idx = block.a + offset
+            line_index = token_line[tok_idx]
             word = words[token_word[block.b + offset]]
-            matched_words.setdefault(line_index, []).append((word.start, word.end, block.size))
+            syllabic = is_syllabic_char(lyric_tokens[tok_idx][0])
+            matched_words.setdefault(line_index, []).append(
+                (word.start, word.end, block.size, syllabic)
+            )
 
     spans: dict[int, tuple[float, float]] = {}
     for line_index, hits in matched_words.items():
@@ -428,6 +818,8 @@ def align_lines_to_words(lines: list[LyricLine], words: list[Word]) -> list[Lyri
             hits = hits[1:]
         while len(hits) >= 2 and hits[-1][2] == 1 and hits[-1][0] - hits[-2][1] > 3.5:
             hits = hits[:-1]
+        if len(hits) == 1 and hits[0][2] == 1 and hits[0][3] and line_token_counts[line_index] >= 4:
+            continue
         spans[line_index] = (min(h[0] for h in hits), max(h[1] for h in hits))
 
     aligned = []
@@ -453,7 +845,7 @@ def estimate_missing_timings(lines: list[LyricLine], windows: list[TimeSpan]) ->
     """Fill in untimed lines.
 
     With no aligned lines at all, lines are spread across vocal activity in proportion
-    to their length. Otherwise each run of untimed lines shares the gap between its
+    to their estimated sung length. Otherwise each run of untimed lines shares the gap between its
     timed neighbours.
     """
     if not lines or all(line.timing_source == "aligned" for line in lines):
@@ -475,7 +867,7 @@ def estimate_missing_timings(lines: list[LyricLine], windows: list[TimeSpan]) ->
         gap_end = result[run_end].start if run_end < len(result) else song_end
         gap_start = gap_start or 0.0
         gap_end = max(gap_end if gap_end is not None else song_end, gap_start)
-        weights = [max(1, len(result[i].text)) for i in range(index, run_end)]
+        weights = [_sung_weight(result[i].text) for i in range(index, run_end)]
         cursor = gap_start
         for i, weight in zip(range(index, run_end), weights):
             share = (gap_end - gap_start) * weight / sum(weights)
@@ -506,7 +898,7 @@ def _spread_over_windows(lines: list[LyricLine], windows: list[TimeSpan]) -> lis
             elapsed = reached
         return windows[-1].end
 
-    weights = [max(1, len(line.text)) for line in lines]
+    weights = [_sung_weight(line.text) for line in lines]
     result, cursor = [], 0.0
     for line, weight in zip(lines, weights):
         share = total * weight / sum(weights)

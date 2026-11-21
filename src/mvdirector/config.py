@@ -141,6 +141,13 @@ class PrepareConfig(_Section):
         default=None,
         description="Optional ISO-639-1 language code for transcription (e.g. 'en'); null = auto.",
     )
+    whisper_multilingual: bool = Field(
+        default=False,
+        description=(
+            "Detect language per segment in faster-whisper (enable for code-switching or "
+            "multi-language songs)."
+        ),
+    )
 
     @field_validator("stem_model", "whisper_model")
     @classmethod
@@ -152,11 +159,26 @@ class PrepareConfig(_Section):
     @field_validator("whisper_language")
     @classmethod
     def _check_language(cls, value: str | None) -> str | None:
-        if value is not None and not _SAFE_LANG_CODE.match(value):
+        if value is None:
+            return None
+        cleaned = value.strip().lower()
+        if not _SAFE_LANG_CODE.match(cleaned):
             raise ValueError(
-                f"Invalid language code {value!r}: expected a 2- or 3-letter lowercase ISO code."
+                f"Invalid language code {value!r}: expected a 2- or 3-letter ISO code."
             )
-        return value
+        return cleaned
+
+    @model_validator(mode="after")
+    def _check_english_only_whisper(self) -> PrepareConfig:
+        if self.whisper_model.lower().endswith(".en") and (
+            self.whisper_multilingual
+            or (self.whisper_language is not None and self.whisper_language != "en")
+        ):
+            raise ValueError(
+                f"Whisper model {self.whisper_model!r} is English-only; use a multilingual model "
+                "(for example 'small' or 'large-v3-turbo')."
+            )
+        return self
 
 
 _SNAP_ASPECT_TOLERANCE = 0.03  # the default qc aspect_tolerance

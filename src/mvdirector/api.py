@@ -15,6 +15,7 @@ import json
 import logging
 import shutil
 import sys
+import unicodedata
 from collections import Counter
 from collections.abc import Callable
 from contextlib import AbstractContextManager
@@ -701,6 +702,18 @@ def _decide(project_dir: ProjectRef, action: Callable[[Manifest, Project], objec
         raise MVDError(str(exc)) from exc
 
 
+def _safe_title(title: str) -> str:
+    chars: list[str] = []
+    for ch in unicodedata.normalize("NFC", title):
+        if ch.isalnum() or (
+            chars and chars[-1] != "_" and unicodedata.category(ch).startswith("M")
+        ):
+            chars.append(ch)
+        else:
+            chars.append("_")
+    return "".join(chars).strip("_") or "video"
+
+
 def assemble(
     project_dir: ProjectRef,
     output: Path | None = None,
@@ -714,7 +727,7 @@ def assemble(
     """Join the approved clips and lay the original mix over them."""
     project = open_project(project_dir, review_mode)
     manifest = project.load_manifest()
-    safe_title = "".join(c if c.isalnum() else "_" for c in manifest.title).strip("_") or "video"
+    safe_title = _safe_title(manifest.title)
     suffix = "_draft" if (force or draft) else ""
     target = output or project.output_dir / f"{safe_title}{suffix}.mp4"
     result = assemble_mod.assemble(

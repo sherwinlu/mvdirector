@@ -18,8 +18,9 @@ inputs:
 prepare:
   stem_model: htdemucs           # Demucs model for `mvd prepare` stem separation
   stem_device: auto              # auto | cpu | cuda | mps
-  whisper_model: small           # faster-whisper model size for transcription / alignment
-  whisper_language: null         # optional ISO code (e.g. en); null = auto-detect
+  whisper_model: small           # faster-whisper model size (use large-v3-turbo for non-English)
+  whisper_language: null         # optional ISO code (e.g. en, es, ja, ko); null = auto-detect
+  whisper_multilingual: false    # true = detect language per segment (for code-switching songs)
 
 video:
   width: 1280

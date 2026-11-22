@@ -79,6 +79,36 @@ def test_load_weaveshift_json_and_yaml_aliases(tmp_path: Path) -> None:
     assert t1.start == 252.5 and t1.bpm == 128.0 and t1.mood_tags == ["kinetic", "bright"]
 
 
+def test_tracklist_lyrics_aliases_sanitization_and_type_rejection(tmp_path: Path) -> None:
+    path = tmp_path / "lyrics_edge.json"
+    path.write_text(
+        json.dumps(
+            {
+                "tracks": [
+                    {
+                        "start": "0:00",
+                        "title": "A",
+                        "lyrics_excerpt": "  Line one\n\x00Line two  ",
+                    },
+                    {"start": "1:00", "title": "B", "lyrics": "   \t\n  "},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    spec = load_tracklist(path)
+    assert spec.tracks[0].lyrics == "Line one Line two"
+    assert spec.tracks[1].lyrics is None
+
+    bad = tmp_path / "bad_lyrics.json"
+    bad.write_text(
+        json.dumps({"tracks": [{"start": "0:00", "title": "A", "lyrics": 12345}]}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError):
+        load_tracklist(bad)
+
+
 def test_load_cue_sheet_supports_60plus_minutes_and_rem_metadata(tmp_path: Path) -> None:
     cue_text = """REM GENRE "Progressive House"
 PERFORMER "Channel One"

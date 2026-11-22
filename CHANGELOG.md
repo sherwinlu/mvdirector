@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/). While the version is 0.x, a minor release may still change the public API; every such change is listed here.
 
+## [0.7.0] - 2026-11-22
+
+### Added
+- **Suno & DAW multi-stem pack ingestion (`mvdirector.audio.stem_pack`, `inputs.stems_dir`):**
+  - `mvd prepare` now accepts one or more `.zip` archives, folders, or loose `.wav`/`.mp3`/`.flac` stem files (or automatically discovers stem packs dropped into `inputs/stems/` or `inputs/*.zip`), supporting Suno Auto Split, Split from Mix, and Premier Advanced Split.
+  - Classifies stems into canonical musical roles (`lead_vocals`, `backing_vocals`, `vocals`, `drums`, `percussion`, `bass`, `guitar`, `keys`, `strings`, `synth`, `brass`, `woodwinds`, `instrumental`, `fx`, `other`), routing clean `lead_vocals` (excluding `backing_vocals`) to `inputs/vocals.wav` and skipping Demucs, using `drums`+`percussion` for beat tracking, using harmonic stems for cleaner key/mode estimation, and synthesizing a peak-normalized `inputs/mix.wav` when no master mix is provided.
+  - Hardened archive extraction rejects zip-slip traversal, symlinks, null-byte paths, entry-flood DoS, and zip bombs with bounded streaming size limits and atomic writes.
+  - Persists `Analysis.stems` (`StemArrangement` + `StemTrackInfo`, updated `schemas/analysis.schema.json`) and feeds instrumentation/arrangement summaries and per-shot active stems (`stems=[...]`) into the Visual Bible and shot-direction prompts.
+- **Non-lipsync standard-mode video styles (`planning.video_style`, `mvd plan --style`):**
+  - Added `VideoStyle` (`lipsync` default, `narrative` for recurring characters without lip-sync, and `visual` for 100% characterless b-roll) with dedicated narrative/visual Bible and shot-direction prompts.
+  - `mvd analyze` and `mvd plan` no longer require `inputs.vocals` or `inputs.lyrics` for non-lipsync styles; `tuning` skips lip-sync knobs; `generate` and `validate_project` only require the ComfyUI workflows needed by the selected style.
+
+### Fixed
+- `ChatBackend.complete_json` now falls back to `json.loads(..., strict=False)` when open-weights models emit literal newlines inside multiline JSON string values (such as lyrics).
+
 ## [0.6.0] - 2026-11-21
 
 ### Added

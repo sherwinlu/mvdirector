@@ -176,7 +176,9 @@ def detect_audio_cues(
     if sr <= 0:
         return AudioCues(confidence="low")
     arr = np.asarray(samples, dtype=np.float32)
-    if arr.ndim > 1:
+    if arr.ndim > 2:
+        return AudioCues(confidence="low")
+    if arr.ndim == 2:
         axis = 0 if arr.shape[0] <= arr.shape[-1] else -1
         arr = np.mean(arr, axis=axis, dtype=np.float32)
     clean = np.nan_to_num(arr.reshape(-1), nan=0.0, posinf=0.0, neginf=0.0)
@@ -252,13 +254,7 @@ def detect_audio_cues(
 
     first_lift = _first_sustained_energy_lift(times, energy, duration_sec)
     main_peak = peak_candidates[0] if peak_candidates else None
-    second_peak: float | None = None
-    if main_peak is not None:
-        later = [p for p in peak_candidates if p > main_peak + min_distance]
-        if later:
-            second_peak = later[0]
-        elif len(peak_candidates) > 1:
-            second_peak = peak_candidates[1]
+    second_peak = peak_candidates[1] if len(peak_candidates) > 1 else None
 
     breakdown = _find_breakdown_candidate(times, energy, duration_sec)
 

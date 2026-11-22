@@ -129,11 +129,12 @@ class DemucsSeparator:
             )
             log.debug("exec: %s", " ".join(cmd))
             result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            stderr_text = result.stderr or ""
             should_retry_cpu = result.returncode != 0 and (
                 self.device == "mps"
                 or (
                     self.device == "auto"
-                    and any(tok in result.stderr.lower() for tok in ("mps", "metal"))
+                    and any(tok in stderr_text.lower() for tok in ("mps", "metal"))
                 )
             )
             if should_retry_cpu:
@@ -150,7 +151,7 @@ class DemucsSeparator:
                 log.debug("exec: %s", " ".join(cpu_cmd))
                 result = subprocess.run(cpu_cmd, capture_output=True, text=True, check=False)
             if result.returncode != 0:
-                tail = "\n".join(result.stderr.strip().splitlines()[-10:])
+                tail = "\n".join((result.stderr or "").strip().splitlines()[-10:])
                 raise MediaToolError(f"demucs failed (exit {result.returncode}):\n{tail}")
 
             stem_dir = out_root / self.model / mix_path.stem

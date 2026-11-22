@@ -99,6 +99,9 @@ def test_detect_audio_cues_handles_flat_silent_and_degenerate_inputs() -> None:
         empty = detect_audio_cues(bad, SR)
         assert empty == AudioCues(confidence="low")
     assert detect_audio_cues(flat, sr=0) == AudioCues(confidence="low")
+    assert detect_audio_cues(np.ones((2, 2, SR), dtype=np.float32), SR) == AudioCues(
+        confidence="low"
+    )
     assert format_cues_summary(None) == ""
     assert format_cues_summary(AudioCues(confidence="low")) == ""
 
@@ -166,6 +169,48 @@ def test_weaveshift_report_missing_timeline_raises_config_error(tmp_path: Path) 
     )
     with pytest.raises(ConfigError, match="missing timeline start"):
         load_tracklist(bad)
+
+    neg = tmp_path / "neg.weaveshift_setlist_report.json"
+    neg.write_text(
+        json.dumps(
+            {
+                "tracks": [{"title": "A"}, {"title": "B"}],
+                "transitions": [{"mix_transition_start_sec": -5.0}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="negative start"):
+        load_tracklist(neg)
+
+    bad_artist = tmp_path / "bad_artist.weaveshift_setlist_report.json"
+    bad_artist.write_text(
+        json.dumps(
+            {
+                "tracks": [{"title": "A", "artist": 123}, {"title": "B"}],
+                "transitions": [{"mix_transition_start_sec": 60.0}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="artist must be a string"):
+        load_tracklist(bad_artist)
+
+    dot_path = tmp_path / "dot.weaveshift_setlist_report.json"
+    dot_path.write_text(
+        json.dumps(
+            {
+                "output_file": r"C:\mixes\Final Set.wav",
+                "tracks": [{"path": "..", "title": ""}, {"path": r"C:\tracks\02_Wave.wav"}],
+                "transitions": [{"mix_transition_start_sec": 60.0}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    spec = load_tracklist(dot_path)
+    assert spec.title == "Final Set"
+    assert spec.tracks[0].title == "Track 01"
+    assert spec.tracks[1].title == "02_Wave"
 
 
 def test_load_weaveshift_cues_csv_unescapes_and_preserves_cues(tmp_path: Path) -> None:
@@ -249,6 +294,7 @@ def test_camelot_key_and_chroma_contrast_guard() -> None:
     assert audio.camelot_key("B♭ maj") == "6B"
     assert audio.camelot_key(None) is None
     assert audio.camelot_key("not a key") is None
+    assert audio.camelot_key("C major minor") is None
 
     # Tonal chord gets key + Camelot notation.
     t = np.arange(int(3.0 * SR), dtype=np.float32) / SR
@@ -293,6 +339,7 @@ def test_detect_vocal_windows_heuristic_and_non_lipsync_fallback(tmp_path: Path)
     # Degenerate inputs return [].
     assert audio.detect_vocal_windows_heuristic(np.zeros(SR * 2, dtype=np.float32), SR) == []
     assert audio.detect_vocal_windows_heuristic(np.ones(100, dtype=np.float32), SR) == []
+    assert audio.detect_vocal_windows_heuristic(np.ones((2, 2, SR), dtype=np.float32), SR) == []
 
     # In narrative style with lyrics.txt but no vocals.wav, analyze_project uses heuristic fallback.
     proj_dir = api.init_project(tmp_path / "narr-no-stem")
@@ -432,7 +479,7 @@ def test_demucs_separator_uses_double_dash_and_retries_mps_on_cpu(
     assert calls[0][calls[0].index("-d") + 1] == "mps"
     assert calls[1][calls[1].index("-d") + 1] == "cpu"
 
-    # CPU device failures must not retry.
+    # CPU device failures (even with stderr=None) must not retry.
     calls.clear()
     sep_cpu = DemucsSeparator(model="htdemucs", device="cpu")
     monkeypatch.setattr(
@@ -440,7 +487,7 @@ def test_demucs_separator_uses_double_dash_and_retries_mps_on_cpu(
         "run",
         lambda cmd, **_kw: (
             calls.append(list(cmd)),
-            subprocess.CompletedProcess(cmd, 1, "", "boom"),
+            subprocess.CompletedProcess(cmd, 1, "", None),  # type: ignore[arg-type]
         )[1],
     )
     with pytest.raises(MediaToolError, match="demucs failed"):

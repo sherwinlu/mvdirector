@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import warnings
 from pathlib import Path
 from typing import Literal
@@ -114,26 +115,21 @@ _CANONICAL_PITCH: dict[str, str] = {
 }
 
 
+_KEY_RE = re.compile(r"^([a-g](?:#|b|-sharp|-flat)?)\s+(major|minor|maj|min)$")
+
+
 def camelot_key(key: str | None) -> str | None:
     """Convert a musical key string (e.g. ``'A minor'``, ``'C# major'``) to Camelot notation."""
     if not key:
         return None
     norm = key.strip().lower().replace("♭", "-flat").replace("♯", "#")
-    mode = (
-        "minor"
-        if ("minor" in norm or norm.endswith(" min"))
-        else "major"
-        if ("major" in norm or norm.endswith(" maj"))
-        else None
-    )
-    if mode is None:
+    match = _KEY_RE.match(norm)
+    if match is None:
         return None
-    root = (
-        norm.replace("major", "").replace("minor", "").replace("maj", "").replace("min", "").strip()
-    )
-    canonical = _CANONICAL_PITCH.get(root)
+    canonical = _CANONICAL_PITCH.get(match.group(1))
     if canonical is None:
         return None
+    mode = "minor" if match.group(2).startswith("min") else "major"
     return (_CAMELOT_MAJOR if mode == "major" else _CAMELOT_MINOR).get(canonical)
 
 
@@ -307,7 +303,9 @@ def detect_vocal_windows_heuristic(
     if sr <= 0:
         return []
     arr = np.asarray(samples, dtype=np.float32)
-    if arr.ndim > 1:
+    if arr.ndim > 2:
+        return []
+    if arr.ndim == 2:
         axis = 0 if arr.shape[0] <= arr.shape[-1] else -1
         arr = np.mean(arr, axis=axis, dtype=np.float32)
     clean = np.nan_to_num(arr.reshape(-1), nan=0.0, posinf=0.0, neginf=0.0)

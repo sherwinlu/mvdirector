@@ -238,6 +238,14 @@ def _finite_float(value: Any) -> float | None:
     return num if math.isfinite(num) else None
 
 
+def _stem_from_path_str(raw: Any) -> str:
+    """Extract a safe display stem from an untrusted path string without touching disk."""
+    if not isinstance(raw, str) or not raw.strip():
+        return ""
+    stem = Path(raw.replace("\\", "/")).stem.strip()
+    return "" if stem in ("", ".", "..") else stem
+
+
 def _normalize_weaveshift_setlist_report(raw: dict[str, Any]) -> dict[str, Any] | None:
     """Detect and normalize a ``.weaveshift_setlist_report.json`` payload into a TracklistSpec dict.
 
@@ -283,27 +291,31 @@ def _normalize_weaveshift_setlist_report(raw: dict[str, Any]) -> dict[str, Any] 
                 raise ValueError(
                     f"WeaveShift setlist report is missing timeline start for track #{idx + 1}."
                 )
+            if start_opt < -1e-3:
+                raise ValueError(
+                    f"WeaveShift setlist report has negative start ({start_opt}) "
+                    f"for track #{idx + 1}."
+                )
             start = max(0.0, start_opt)
             if total_duration is not None and total_duration > 0.0:
                 start = min(start, total_duration)
 
         if isinstance(item, dict):
-            raw_path = item.get("path")
-            fallback_title = (
-                Path(raw_path.replace("\\", "/")).stem
-                if isinstance(raw_path, str) and raw_path.strip()
-                else ""
-            )
+            fallback_title = _stem_from_path_str(item.get("path"))
             raw_title = item.get("title")
             if raw_title is not None and not isinstance(raw_title, str):
                 raise ValueError(f"Track #{idx + 1} title must be a string.")
             title = (raw_title or "").strip() or fallback_title or f"Track {idx + 1:02d}"
             artist_val = item.get("artist")
-            artist = str(artist_val) if isinstance(artist_val, str) and artist_val.strip() else None
+            if artist_val is not None and not isinstance(artist_val, str):
+                raise ValueError(f"Track #{idx + 1} artist must be a string.")
+            artist = (artist_val or "").strip() or None
             bpm_raw = _finite_float(item.get("bpm"))
             bpm = round(bpm_raw, 2) if bpm_raw is not None and 20.0 < bpm_raw < 300.0 else None
             key_val = item.get("key")
-            key = str(key_val) if isinstance(key_val, str) and key_val.strip() else None
+            if key_val is not None and not isinstance(key_val, str):
+                raise ValueError(f"Track #{idx + 1} key must be a string.")
+            key = (key_val or "").strip() or None
         else:
             title = f"Track {idx + 1:02d}"
             artist = None
@@ -319,10 +331,7 @@ def _normalize_weaveshift_setlist_report(raw: dict[str, Any]) -> dict[str, Any] 
             entry["key"] = key
         normalized.append(entry)
 
-    out_file = raw.get("output_file")
-    doc_title = raw.get("title") or (
-        Path(out_file).stem if isinstance(out_file, str) and out_file.strip() else None
-    )
+    doc_title = raw.get("title") or (_stem_from_path_str(raw.get("output_file")) or None)
     return {
         "title": doc_title,
         "source": "weaveshift_report",
@@ -615,7 +624,7 @@ def _parse_csv_tracklist(text: str) -> TracklistSpec:
         end = parse_timestamp(end_raw) if end_raw else None
 
         path_raw = _csv_first(row, ("path", "file", "filepath", "audio_path"))
-        fallback_title = Path(path_raw).stem if path_raw else ""
+        fallback_title = _stem_from_path_str(path_raw)
         title = (
             _csv_first(row, ("title", "track", "name", "track_title"))
             or fallback_title

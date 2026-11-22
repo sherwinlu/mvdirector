@@ -1,5 +1,7 @@
 # Installation, Docker & Language Models
 
+> Looking for an end-to-end walkthrough for running everything on one machine? See the [Local Quickstart Guide](local-quickstart.md) and the interactive `mvd setup` command.
+
 ## Install
 
 Requires Python 3.11+ and `ffmpeg`. Installing the `mvdirector` package provides the `mvd` command-line tool.

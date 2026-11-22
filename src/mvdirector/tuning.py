@@ -850,7 +850,7 @@ def tune_config_for_planning(
     return updated, applied
 
 
-def _format_yaml_scalar(value: Any) -> str:
+def format_yaml_scalar(value: Any) -> str:
     if value is None:
         return "null"
     if isinstance(value, bool):
@@ -883,7 +883,26 @@ _TOP_SECTION_HEADER_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*):[ \t]*(?:#.*)?$"
 _TOP_LEVEL_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*):")
 
 
-def _update_yaml_scalar(text: str, section: str, field: str, formatted_val: str) -> str:
+def update_top_level_yaml_scalar(text: str, field: str, formatted_val: str) -> str:
+    """Update or append a top-level scalar key in YAML text while preserving comments."""
+    lines = text.splitlines(keepends=True)
+    field_re = re.compile(rf"^{re.escape(field)}:[ \t]*([^#\r\n]*?)([ \t]*#[^\r\n]*)?(\r?\n?)$")
+    for idx, raw in enumerate(lines):
+        m = field_re.match(raw)
+        if m:
+            _old_val, comment, newline = m.groups()
+            newline = newline or "\n"
+            comment_part = ""
+            if comment:
+                gap = comment[: len(comment) - len(comment.lstrip())] or "  "
+                comment_part = f"{gap}{comment.lstrip()}"
+            lines[idx] = f"{field}: {formatted_val}{comment_part}{newline}"
+            return "".join(lines)
+    sep = "" if (not text or text.endswith("\n")) else "\n"
+    return f"{text}{sep}{field}: {formatted_val}\n"
+
+
+def update_yaml_scalar(text: str, section: str, field: str, formatted_val: str) -> str:
     lines = text.splitlines(keepends=True)
     sec_start: int | None = None
     sec_end = len(lines)
@@ -1006,8 +1025,8 @@ def apply_adjustments_to_yaml(yaml_path: Path, adjustments: list[Adjustment]) ->
             re.MULTILINE,
         )
         updated_text = sec_empty_re.sub(rf"{section}:\1", updated_text)
-        updated_text = _update_yaml_scalar(
-            updated_text, section, field, _format_yaml_scalar(adj.recommended)
+        updated_text = update_yaml_scalar(
+            updated_text, section, field, format_yaml_scalar(adj.recommended)
         )
 
     try:

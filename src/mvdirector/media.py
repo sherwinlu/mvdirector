@@ -44,11 +44,14 @@ def require_tool(name: str) -> str:
     return path
 
 
-def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+def run(cmd: list[str], *, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
     """Run a command, raising MediaToolError with the tail of stderr on failure."""
     require_tool(cmd[0])
     log.debug("exec: %s", " ".join(cmd))
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise MediaToolError(f"{cmd[0]} timed out after {timeout:.0f}s") from exc
     if result.returncode != 0:
         tail = "\n".join(result.stderr.strip().splitlines()[-8:])
         raise MediaToolError(f"{cmd[0]} failed (exit {result.returncode}):\n{tail}")

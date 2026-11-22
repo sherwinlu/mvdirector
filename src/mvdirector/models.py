@@ -225,6 +225,62 @@ class TrackProfile(StrictModel):
         return cleaned
 
 
+class MusicalFeatures(StrictModel):
+    """Acoustic and musical characteristics measured directly from the audio mix."""
+
+    key: str | None = Field(
+        default=None,
+        description=(
+            "Estimated musical key and mode (e.g. 'A minor', 'C major'), or null if atonal."
+        ),
+    )
+    mode: Literal["major", "minor"] | None = Field(
+        default=None,
+        description="Estimated harmonic mode ('major' or 'minor'), or null if unclear.",
+    )
+    brightness: Literal["dark", "warm", "balanced", "bright"] = Field(
+        default="balanced",
+        description="Timbral brightness inferred from median spectral centroid.",
+    )
+    spectral_centroid_hz: float = Field(
+        default=0.0,
+        ge=0.0,
+        allow_inf_nan=False,
+        description="Median spectral centroid in Hz across active frames.",
+    )
+    percussiveness: Literal["ambient", "melodic", "balanced", "rhythmic", "percussive"] = Field(
+        default="balanced",
+        description="Harmonic-vs-percussive texture balance.",
+    )
+    percussive_ratio: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+        description="Share (0-1) of signal energy in the percussive component.",
+    )
+    dynamic_range: Literal["flat", "moderate", "dynamic", "cinematic"] = Field(
+        default="moderate",
+        description="Loudness contrast across the track.",
+    )
+    dynamic_range_db: float = Field(
+        default=0.0,
+        ge=0.0,
+        allow_inf_nan=False,
+        description="95th-minus-15th percentile RMS loudness spread in dB across active frames.",
+    )
+    onset_density: float = Field(
+        default=0.0,
+        ge=0.0,
+        allow_inf_nan=False,
+        description="Average musical onsets per second.",
+    )
+    summary: str = Field(
+        default="",
+        description="Compact human-readable musical character summary for planning prompts.",
+    )
+
+
 class Analysis(StrictModel):
     schema_version: int = ANALYSIS_SCHEMA_VERSION
     duration: float
@@ -241,6 +297,10 @@ class Analysis(StrictModel):
     track_profile: TrackProfile | None = Field(
         default=None,
         description="Detected musical/vocal/language profile used for automatic parameter tuning.",
+    )
+    musical_features: MusicalFeatures | None = Field(
+        default=None,
+        description="Acoustic musical qualities (key, mode, brightness, percussiveness, dynamics).",
     )
     chapters: list[AnalyzedChapter] = Field(
         default_factory=list,
@@ -722,7 +782,60 @@ class PropDesign(StrictModel):
         return validate_safe_id(value, "prop id")
 
 
+class SectionBeat(StrictModel):
+    """Emotional and narrative direction for one song section."""
+
+    section: str = Field(description="Song section name matching the lyrics tags (e.g. 'Verse 1').")
+    emotion: str = Field(
+        default="",
+        description="Emotional state or tension in this section.",
+    )
+    visual_beat: str = Field(
+        default="",
+        description="What happens visually or narratively here to express the lyrics and music.",
+    )
+    camera_energy: str = Field(
+        default="",
+        description=(
+            "How camera language, pacing, and performance energy should feel in this section."
+        ),
+    )
+
+
+class SongInterpretation(StrictModel):
+    """Director's reading of the song's meaning, musical style, and emotional arc."""
+
+    meaning: str = Field(
+        default="",
+        description="What the song is really about: core theme, subtext, and emotional thesis.",
+    )
+    tone: str = Field(
+        default="",
+        description="Emotional register and perspective (e.g. bittersweet, defiant, haunted).",
+    )
+    music_feel: str = Field(
+        default="",
+        description=(
+            "How the musical style, rhythm, instrumentation, and vocal delivery shape visuals."
+        ),
+    )
+    visual_motifs: list[str] = Field(
+        default_factory=list,
+        description="2 to 5 recurring visual metaphors or motifs grounded in the song's meaning.",
+    )
+    section_beats: list[SectionBeat] = Field(
+        default_factory=list,
+        description="Section-by-section emotional and narrative arc across the song.",
+    )
+
+
 class VisualBible(StrictModel):
+    interpretation: SongInterpretation | None = Field(
+        default=None,
+        description=(
+            "Director's interpretation of the song's meaning, musical feel, and section arc."
+        ),
+    )
     concept: str = ""
     style: str = ""
     palette: str = ""
@@ -733,6 +846,23 @@ class VisualBible(StrictModel):
     rules: list[str] = Field(
         default_factory=list, description="Rules every shot follows, shown to the director model."
     )
+
+    def find_section_beat(self, section: str | None) -> SectionBeat | None:
+        """Look up the section beat for ``section`` (exact match, then base without singer tag)."""
+        if not section or not self.interpretation or not self.interpretation.section_beats:
+            return None
+        wanted = unicodedata.normalize("NFKC", section).strip().casefold()
+        if not wanted:
+            return None
+        for beat in self.interpretation.section_beats:
+            if unicodedata.normalize("NFKC", beat.section).strip().casefold() == wanted:
+                return beat
+        wanted_base = wanted.split(":", 1)[0].strip()
+        for beat in self.interpretation.section_beats:
+            norm = unicodedata.normalize("NFKC", beat.section).strip().casefold()
+            if norm.split(":", 1)[0].strip() == wanted_base:
+                return beat
+        return None
 
     def find_set(self, name: str) -> SetDesign | None:
         """Look a set up by name, ignoring case, Unicode normalization and surrounding space."""

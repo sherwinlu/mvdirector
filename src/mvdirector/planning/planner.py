@@ -17,6 +17,7 @@ import statistics
 import unicodedata
 from collections import Counter
 from collections.abc import Callable
+from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -30,7 +31,7 @@ from mvdirector.audio.lyrics import (
 )
 from mvdirector.config import ProjectConfig
 from mvdirector.errors import LLMError
-from mvdirector.llm import LLMClient, text_block
+from mvdirector.llm import LLMClient, complete_json_with_optional_audio, text_block
 from mvdirector.models import (
     BOTH_VOICES,
     Analysis,
@@ -40,9 +41,11 @@ from mvdirector.models import (
     Framing,
     Manifest,
     PropDesign,
+    SectionBeat,
     SetDesign,
     Shot,
     ShotType,
+    SongInterpretation,
     TimeSpan,
     VisualBible,
     WardrobeState,
@@ -158,7 +161,50 @@ class PropReply(_Reply):
         return _slug_id(value, "prop id", "prop")
 
 
+def _none_to_str(value: object) -> object:
+    return "" if value is None else value
+
+
+def _none_to_list(value: object) -> object:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [item for item in value if item is not None]
+    return value
+
+
+class SectionBeatReply(_Reply):
+    section: str = ""
+    emotion: str = ""
+    visual_beat: str = ""
+    camera_energy: str = ""
+
+    @field_validator("section", "emotion", "visual_beat", "camera_energy", mode="before")
+    @classmethod
+    def _coerce_null_str(cls, value: object) -> object:
+        return _none_to_str(value)
+
+
+class SongInterpretationReply(_Reply):
+    meaning: str = ""
+    tone: str = ""
+    music_feel: str = ""
+    visual_motifs: list[str] = Field(default_factory=list)
+    section_beats: list[SectionBeatReply] = Field(default_factory=list)
+
+    @field_validator("meaning", "tone", "music_feel", mode="before")
+    @classmethod
+    def _coerce_null_str(cls, value: object) -> object:
+        return _none_to_str(value)
+
+    @field_validator("visual_motifs", "section_beats", mode="before")
+    @classmethod
+    def _coerce_null_list(cls, value: object) -> object:
+        return _none_to_list(value)
+
+
 class BibleReply(_Reply):
+    interpretation: SongInterpretationReply | None = None
     appearance: str = ""
     invariants: str = ""
     style: str
@@ -208,6 +254,11 @@ class ShotCreative(_Reply):
     allow_cuts: bool = False
     props: list[str] = Field(default_factory=list)
 
+    @field_validator("characters", "props", mode="before")
+    @classmethod
+    def _coerce_null_list(cls, value: object) -> object:
+        return _none_to_list(value)
+
     @field_validator("id")
     @classmethod
     def _check_id(cls, value: str) -> str:
@@ -235,6 +286,8 @@ def build_manifest(
     lyrics_text: str,
     style_text: str,
     llm: LLMClient | None,
+    *,
+    mix_path: Path | None = None,
 ) -> Manifest:
     config, tuned_adjustments = tuning_mod.tune_config_for_planning(
         config, analysis, lyrics_text=lyrics_text, style_text=style_text
@@ -268,7 +321,7 @@ def build_manifest(
         log.warning("LLM disabled: using rule-based direction. Edit manifest.json to refine it.")
         manifest.visual_bible = VisualBible(style=" ".join(style_text.split()))
     else:
-        _write_bible(manifest, lyrics_text, style_text, llm)
+        _write_bible(manifest, lyrics_text, style_text, llm, analysis=analysis, mix_path=mix_path)
     voice_map = _map_voices_to_characters(analysis, manifest)
     if config.planning.max_lipsync_share is not None:
         # After the bible, so each shot can be matched to its section or acoustic singer.
@@ -277,22 +330,75 @@ def build_manifest(
             config.planning.max_lipsync_share,
             lambda shot: _shot_singer_hint(shot, analysis, manifest.characters, voice_map),
         )
-    _direct_shots(manifest, config, llm, analysis=analysis, voice_map=voice_map)
+    _direct_shots(
+        manifest,
+        config,
+        llm,
+        analysis=analysis,
+        voice_map=voice_map,
+        style_text=style_text,
+    )
     _populate_slice_mutes(manifest, analysis, voice_map)
     _report_mix(manifest.shots, has_bible=llm is not None)
     return manifest
 
 
-def _write_bible(manifest: Manifest, lyrics_text: str, style_text: str, llm: LLMClient) -> None:
-    section_list = "\n".join(f"- {name}" for name in _section_order(lyrics_text)) or "(none)"
-    request = (
-        f"MUSIC STYLE AND BRIEF:\n{style_text}\n\n"
-        f"SONG SECTIONS, IN ORDER:\n{section_list}\n\n"
-        f"LYRICS:\n{lyrics_text}"
+def _build_interpretation(raw: SongInterpretationReply | None) -> SongInterpretation | None:
+    if raw is None:
+        return None
+    motifs = [m.strip() for m in raw.visual_motifs if m.strip()]
+    beats = [
+        SectionBeat(
+            section=b.section.strip(),
+            emotion=b.emotion.strip(),
+            visual_beat=b.visual_beat.strip(),
+            camera_energy=b.camera_energy.strip(),
+        )
+        for b in raw.section_beats
+        if b.section.strip()
+    ]
+    meaning = raw.meaning.strip()
+    tone = raw.tone.strip()
+    music_feel = raw.music_feel.strip()
+    if not (meaning or tone or music_feel or motifs or beats):
+        return None
+    return SongInterpretation(
+        meaning=meaning,
+        tone=tone,
+        music_feel=music_feel,
+        visual_motifs=motifs,
+        section_beats=beats,
     )
+
+
+def _write_bible(
+    manifest: Manifest,
+    lyrics_text: str,
+    style_text: str,
+    llm: LLMClient,
+    *,
+    analysis: Analysis | None = None,
+    mix_path: Path | None = None,
+) -> None:
+    section_list = "\n".join(f"- {name}" for name in _section_order(lyrics_text)) or "(none)"
+    parts = [f"MUSIC STYLE AND BRIEF:\n{style_text}"]
+    if analysis is not None:
+        if analysis.musical_features and analysis.musical_features.summary:
+            parts.append(f"MUSICAL ANALYSIS:\n{analysis.musical_features.summary}")
+        elif analysis.tempo_bpm > 0:
+            parts.append(
+                f"MUSICAL ANALYSIS:\n~{analysis.tempo_bpm:.0f} BPM, "
+                f"duration {analysis.duration:.0f}s"
+            )
+    parts.append(f"SONG SECTIONS, IN ORDER:\n{section_list}")
+    parts.append(f"LYRICS:\n{lyrics_text}")
     try:
-        bible = llm.complete_json(
-            system=prompts.BIBLE_SYSTEM, content=[text_block(request)], schema=BibleReply
+        bible = complete_json_with_optional_audio(
+            llm,
+            system=prompts.BIBLE_SYSTEM,
+            text="\n\n".join(parts),
+            schema=BibleReply,
+            audio_path=mix_path,
         )
     except LLMError as exc:
         raise LLMError(
@@ -335,6 +441,7 @@ def _write_bible(manifest: Manifest, lyrics_text: str, style_text: str, llm: LLM
             wardrobe=[WardrobeState(id=w.id, description=w.description) for w in bible.wardrobe],
         )
     manifest.visual_bible = VisualBible(
+        interpretation=_build_interpretation(bible.interpretation),
         concept=bible.concept,
         style=bible.style,
         palette=bible.palette,
@@ -1000,6 +1107,7 @@ def _direct_shots(
     *,
     analysis: Analysis | None = None,
     voice_map: dict[str, str] | None = None,
+    style_text: str = "",
 ) -> None:
     monotonic = config.planning.wardrobe_monotonic
     wardrobe = _Wardrobe(manifest.character.wardrobe_ids, monotonic)
@@ -1022,6 +1130,7 @@ def _direct_shots(
                     allow_multicut=config.planning.allow_multicut_shots,
                     analysis=analysis,
                     voice_map=voice_map,
+                    style_text=style_text,
                 )
             except LLMError as exc:
                 # One bad batch must not lose the whole plan: these shots get simple rule-based
@@ -1178,11 +1287,52 @@ def _ask_for_batch(
     allow_multicut: bool = False,
     analysis: Analysis | None = None,
     voice_map: dict[str, str] | None = None,
+    style_text: str = "",
 ) -> dict[str, ShotCreative]:
     bible, character = manifest.visual_bible, manifest.character
     lines = []
+    interp = bible.interpretation
+    if interp is not None:
+        interp_lines = ["SONG INTERPRETATION:"]
+        if interp.meaning:
+            interp_lines.append(f"Meaning: {interp.meaning}")
+        if interp.tone:
+            interp_lines.append(f"Tone: {interp.tone}")
+        if interp.music_feel:
+            interp_lines.append(f"Music feel: {interp.music_feel}")
+        if interp.visual_motifs:
+            interp_lines.append("Visual motifs: " + "; ".join(interp.visual_motifs))
+        if len(interp_lines) > 1:
+            lines.append("\n".join(interp_lines))
+    if style_text.strip() and not (interp and interp.music_feel):
+        compact_style = " ".join(style_text.split())
+        lines.append(f"MUSIC STYLE: {compact_style[:500]}")
     if bible.concept:
         lines.append(f"CONCEPT: {bible.concept}")
+    if interp is not None and interp.section_beats:
+        seen_beats: set[str] = set()
+        beat_lines: list[str] = []
+        for s in batch:
+            beat = bible.find_section_beat(s.section)
+            if beat is None:
+                continue
+            key = beat.section.casefold()
+            if key in seen_beats:
+                continue
+            seen_beats.add(key)
+            details = [
+                f"{label}: {val}"
+                for label, val in (
+                    ("emotion", beat.emotion),
+                    ("visual beat", beat.visual_beat),
+                    ("camera/energy", beat.camera_energy),
+                )
+                if val
+            ]
+            if details:
+                beat_lines.append(f"- {beat.section} | " + " | ".join(details))
+        if beat_lines:
+            lines.append("SECTION ARCS FOR THIS BATCH:\n" + "\n".join(beat_lines))
     if bible.rules:
         lines.append("PRODUCTION RULES:\n" + "\n".join(f"- {rule}" for rule in bible.rules))
     lines.append(

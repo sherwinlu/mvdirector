@@ -254,6 +254,7 @@ def analyze_mix_project(
                 genre_tags=item.genre_tags,
                 theme_prompt=item.theme_prompt,
                 clip_prompts=item.clip_prompts,
+                lyrics=item.lyrics,
             )
         )
         all_beats.extend(ch_beats)

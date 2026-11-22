@@ -261,6 +261,18 @@ def _ensure_analyzed_chapters(config: ProjectConfig, analysis: Analysis) -> list
     return synthesized
 
 
+def _format_lyric_excerpt(lyrics: str | None, max_chars: int = 280) -> str:
+    """Collapse whitespace and control chars before truncating a chapter lyric excerpt."""
+    if not lyrics:
+        return ""
+    cleaned = " ".join("".join(ch if ch.isprintable() else " " for ch in lyrics).split())
+    if not cleaned:
+        return ""
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return cleaned[:max_chars].rstrip() + "..."
+
+
 def _request_llm_themes(
     chapters: list[AnalyzedChapter],
     style_text: str,
@@ -282,9 +294,11 @@ def _request_llm_themes(
         for ch in batch:
             tags = ", ".join([*ch.genre_tags, *ch.mood_tags]) or "electronic / ambient"
             hint = f" | user_theme_hint={ch.theme_prompt!r}" if ch.theme_prompt else ""
+            excerpt = _format_lyric_excerpt(ch.lyrics)
+            lyric_note = f" | lyrics_excerpt={excerpt!r}" if excerpt else ""
             chapter_lines.append(
                 f"- id={ch.id} | time={ch.start:.0f}-{ch.end:.0f}s | title={ch.title!r} | "
-                f"bpm={ch.bpm:.0f} | energy={ch.energy:.2f} | tags={tags}{hint}"
+                f"bpm={ch.bpm:.0f} | energy={ch.energy:.2f} | tags={tags}{hint}{lyric_note}"
             )
         prompt_parts = [
             f"GLOBAL STYLE BRIEF:\n{style_text.strip() or 'Cinematic atmospheric electronic mix.'}",

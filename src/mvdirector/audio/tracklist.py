@@ -131,6 +131,7 @@ class TrackEntryInput(BaseModel):
     genre_tags: list[str] = Field(default_factory=list)
     theme_prompt: str | None = None
     clip_prompts: list[str] = Field(default_factory=list)
+    lyrics: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -153,6 +154,7 @@ class TrackEntryInput(BaseModel):
         _pick_alias(data, "genre_tags", ("genre", "genres", "style"))
         _pick_alias(data, "theme_prompt", ("prompt", "visual_prompt", "environment", "theme"))
         _pick_alias(data, "clip_prompts", ("prompts", "shot_prompts"))
+        _pick_alias(data, "lyrics", ("lyric_excerpt", "lyrics_excerpt"))
         return data
 
     @field_validator("start", mode="before")
@@ -173,7 +175,7 @@ class TrackEntryInput(BaseModel):
             raise ValueError("Track title must not be empty.")
         return cleaned
 
-    @field_validator("artist", "key", "theme_prompt")
+    @field_validator("artist", "key", "theme_prompt", "lyrics")
     @classmethod
     def _clean_optional_str(cls, value: str | None) -> str | None:
         if value is None:
@@ -259,6 +261,7 @@ class ResolvedTrack:
     genre_tags: list[str] = field(default_factory=list)
     theme_prompt: str | None = None
     clip_prompts: list[str] = field(default_factory=list)
+    lyrics: str | None = None
 
 
 def _parse_cue_sheet(text: str) -> TracklistSpec:
@@ -537,6 +540,7 @@ def resolve_chapters(
                 genre_tags=list(item.genre_tags),
                 theme_prompt=item.theme_prompt,
                 clip_prompts=list(item.clip_prompts),
+                lyrics=item.lyrics,
             )
         )
     return resolved

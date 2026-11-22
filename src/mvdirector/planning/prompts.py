@@ -267,7 +267,10 @@ Rules:
   water, slow volumetric light sweeps, floating dust/embers, gentle camera glide). Avoid one-off
   explosions, sudden whip-pans, narrative plot beats, internal cuts, or on-screen text.
 - Write every field in English. For each chapter, provide exactly the requested number of
-  complementary 'clip_prompts' (varying framing/angle within the same chapter environment)."""
+  complementary 'clip_prompts' (varying framing/angle within the same chapter environment).
+- When 'lyrics_excerpt' is provided for a chapter, draw concrete environmental imagery, motifs,
+  and mood from it (translating non-English imagery into English visual descriptions without
+  rendering on-screen text)."""
 
 PANEL_LAYOUT = {
     "row": "Four equal panels in a single horizontal row, thin neutral grey dividers.",

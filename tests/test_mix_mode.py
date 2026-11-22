@@ -43,9 +43,16 @@ class _FakeProvider:
 class _ScriptedMixLLM:
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.prompts: list[str] = []
 
     def complete_json(self, *, system: str, content, schema):  # noqa: ANN001
         self.calls.append(system)
+        self.prompts.append(
+            " ".join(
+                block["text"] if isinstance(block, dict) and "text" in block else str(block)
+                for block in content
+            )
+        )
         return schema.model_validate(
             {
                 "style": "Anamorphic 35mm atmospheric architectural cinema",
@@ -105,6 +112,7 @@ def _make_mix_project(
                             "title": "Deep Opening",
                             "artist": "Klang",
                             "mood_tags": ["deep", "misty"],
+                            "lyrics": "Drifting through obsidian water under silver skylights",
                         },
                         {
                             "start": "00:16",
@@ -170,6 +178,28 @@ def test_quantize_loop_clip_seconds_snaps_to_bar_multiples() -> None:
     assert dur == 5.0
 
 
+def test_mix_planner_sanitizes_truncates_and_skips_blank_chapter_lyrics() -> None:
+    from mvdirector.planning.mix_planner import _format_lyric_excerpt
+
+    # Blank / whitespace / control-only lyrics must produce empty excerpt (omitted from prompt).
+    assert _format_lyric_excerpt(None) == ""
+    assert _format_lyric_excerpt("   \n\t\x00\x1b  ") == ""
+
+    # Leading whitespace and control chars are stripped BEFORE truncation.
+    padded = "\n\t\x00" + (" " * 300) + "Silver tide\nunder\tglass"
+    assert _format_lyric_excerpt(padded) == "Silver tide under glass"
+
+    # Oversized 50 KB lyrics are bounded cleanly to <= 283 chars with ellipsis.
+    huge = "neon rain " * 5000
+    out = _format_lyric_excerpt(huge)
+    assert out.endswith("...")
+    assert len(out) <= 283
+
+    # Multilingual / non-Latin lyrics are preserved intact.
+    cjk = "夜空の星が静かに落ちる"
+    assert _format_lyric_excerpt(cjk) == cjk
+
+
 def test_mix_planner_llm_and_compose_still_prompt_apply_distinct_chapter_palettes(
     tmp_path: Path,
 ) -> None:
@@ -179,6 +209,9 @@ def test_mix_planner_llm_and_compose_still_prompt_apply_distinct_chapter_palette
     manifest = build_mix_manifest(project.config, analysis, "Dark architectural techno", llm)  # type: ignore[arg-type]
 
     assert len(llm.calls) == 1  # Batched into a single LLM request
+    assert (
+        "lyrics_excerpt='Drifting through obsidian water under silver skylights'" in llm.prompts[0]
+    )
     assert manifest.mode is ProjectMode.MIX
     assert len(manifest.chapters) == 2
     assert len(manifest.shots) == 4  # 2 chapters x 2 loop units

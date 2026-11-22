@@ -10,6 +10,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+import yaml
 from typer.testing import CliRunner
 
 from mvdirector import api
@@ -190,8 +191,7 @@ def test_render_environment_report_healthy_and_missing() -> None:
     assert "OK   ffmpeg" in text_ok
     assert "OK   Ollama at http://127.0.0.1:11434 (models: gemma3:12b)" in text_ok
     assert (
-        "OK   ComfyUI at http://127.0.0.1:8188 (v0.45.4, mps, VRAM 24.0/32.0 GiB free)"
-        in text_ok
+        "OK   ComfyUI at http://127.0.0.1:8188 (v0.45.4, mps, VRAM 24.0/32.0 GiB free)" in text_ok
     )
 
     missing = EnvironmentReport(
@@ -450,7 +450,7 @@ def test_cli_setup_remote_comfy_interactive_and_non_interactive(
     def fake_inspect(**kw: object) -> EnvironmentReport:
         url = kw.get("comfy_url")
         probed_urls.append(url if isinstance(url, str) else None)
-        is_remote = isinstance(url, str) and "gpu.example.com" in url
+        is_remote = url == "https://gpu.example.com:8188"
         return EnvironmentReport(
             python_version="3.12.4",
             platform_label="Darwin arm64",
@@ -479,9 +479,9 @@ def test_cli_setup_remote_comfy_interactive_and_non_interactive(
     )
     res = runner.invoke(app, ["setup", str(target)], input=answers)
     assert res.exit_code == 0, res.output
-    assert "Connected to ComfyUI at https://gpu.example.com:8188" in res.stdout
+    assert "Connected to ComfyUI at" in res.stdout
     assert "export COMFY_TOKEN=<your-token>" in res.stdout
-    assert "https://gpu.example.com:8188" in probed_urls
+    assert probed_urls == [None, "https://gpu.example.com:8188"]
 
     # Non-interactive with --comfy-url and --comfy-token-env
     target2 = tmp_path / "remote-cli"
@@ -499,9 +499,9 @@ def test_cli_setup_remote_comfy_interactive_and_non_interactive(
     )
     assert res2.exit_code == 0, res2.output
     assert "export COMFY_TOKEN=<your-token>" in res2.stdout
-    raw_yaml = (target2 / CONFIG_FILENAME).read_text(encoding="utf-8")
-    assert "https://gpu.example.com:8188" in raw_yaml
-    assert "${COMFY_TOKEN}" in raw_yaml
+    parsed_yaml = yaml.safe_load((target2 / CONFIG_FILENAME).read_text(encoding="utf-8"))
+    assert parsed_yaml["comfy"]["base_url"] == "https://gpu.example.com:8188"
+    assert parsed_yaml["comfy"]["headers"] == {"Authorization": "Bearer ${COMFY_TOKEN}"}
 
 
 def test_setup_regression_multiline_headers_unset_env_and_atomic_init(
@@ -539,5 +539,3 @@ def test_setup_regression_multiline_headers_unset_env_and_atomic_init(
     cfg = load_config(cfg_path)
     assert cfg.title == "Updated Title"
     assert cfg.comfy.headers == {"Authorization": "Bearer tok-after"}
-
-

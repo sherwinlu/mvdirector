@@ -291,9 +291,7 @@ def probe_comfy(
         return ComfyProbe(url=base_url, reachable=False, error=str(exc))
 
     try:
-        config = ComfyConfig(
-            base_url=normalized, headers=headers or {}, request_timeout=timeout
-        )
+        config = ComfyConfig(base_url=normalized, headers=headers or {}, request_timeout=timeout)
     except (ConfigError, ValidationError) as exc:
         return ComfyProbe(url=normalized, reachable=False, error=str(exc))
     try:
@@ -347,12 +345,8 @@ def inspect_environment(
     ollama_transport: httpx.BaseTransport | None = None,
 ) -> EnvironmentReport:
     """Inspect local tools, Python extras, Ollama, and ComfyUI readiness."""
-    resolved_comfy = (
-        comfy_url or os.environ.get("COMFY_URL", "").strip() or DEFAULT_COMFY_URL
-    )
-    resolved_ollama = (
-        ollama_url or os.environ.get("MVD_LLM_URL", "").strip() or DEFAULT_OLLAMA_URL
-    )
+    resolved_comfy = comfy_url or os.environ.get("COMFY_URL", "").strip() or DEFAULT_COMFY_URL
+    resolved_ollama = ollama_url or os.environ.get("MVD_LLM_URL", "").strip() or DEFAULT_OLLAMA_URL
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     plat = f"{platform.system()} {platform.machine()}".strip()
     comfy_headers = _comfy_probe_headers(comfy_token_env)
@@ -363,9 +357,7 @@ def inspect_environment(
         ffprobe_ok=shutil.which("ffprobe") is not None,
         extras=check_extras(),
         ollama=probe_ollama(resolved_ollama, transport=ollama_transport),
-        comfy=probe_comfy(
-            resolved_comfy, headers=comfy_headers, transport=comfy_transport
-        ),
+        comfy=probe_comfy(resolved_comfy, headers=comfy_headers, transport=comfy_transport),
     )
 
 
@@ -396,9 +388,7 @@ def validate_setup_options(options: SetupOptions) -> None:
         validate_http_url(options.llm_base_url, "LLM base URL")
     if options.video_preset is not None and options.video_preset not in VIDEO_PRESETS:
         valid = ", ".join(VIDEO_PRESETS)
-        raise ConfigError(
-            f"Unknown video preset {options.video_preset!r}. Choose from: {valid}"
-        )
+        raise ConfigError(f"Unknown video preset {options.video_preset!r}. Choose from: {valid}")
 
 
 def _replace_section_field_block(
@@ -454,6 +444,7 @@ def _replace_section_field_block(
 def _mask_unset_allowed_env_refs(value: Any) -> Any:
     """Replace unset allowed ``${VAR}`` placeholders so validation works pre-export."""
     if isinstance(value, str):
+
         def _sub(match: re.Match[str]) -> str:
             var_name = match.group(1)
             if is_allowed_env_var(var_name) and os.environ.get(var_name) is None:
@@ -499,9 +490,7 @@ def apply_setup_config(project_dir: Path, options: SetupOptions) -> Path:
     formatted_updates: list[tuple[str, str, str, bool]] = []
     if options.comfy_url is not None:
         normalized_comfy = validate_http_url(options.comfy_url, "ComfyUI URL")
-        formatted_updates.append(
-            ("comfy", "base_url", format_yaml_scalar(normalized_comfy), False)
-        )
+        formatted_updates.append(("comfy", "base_url", format_yaml_scalar(normalized_comfy), False))
     if options.comfy_token_env is not None:
         if options.comfy_token_env == "":
             formatted_updates.append(("comfy", "headers", "{}", True))
@@ -512,9 +501,7 @@ def apply_setup_config(project_dir: Path, options: SetupOptions) -> Path:
             )
 
     if options.llm_enabled is not None:
-        formatted_updates.append(
-            ("llm", "enabled", format_yaml_scalar(options.llm_enabled), False)
-        )
+        formatted_updates.append(("llm", "enabled", format_yaml_scalar(options.llm_enabled), False))
     if options.llm_provider is not None:
         formatted_updates.append(
             ("llm", "provider", format_yaml_scalar(options.llm_provider), False)
@@ -528,9 +515,7 @@ def apply_setup_config(project_dir: Path, options: SetupOptions) -> Path:
             formatted_updates.append(("llm", "base_url", format_yaml_scalar(None), False))
         else:
             normalized_llm = validate_http_url(options.llm_base_url, "LLM base URL")
-            formatted_updates.append(
-                ("llm", "base_url", format_yaml_scalar(normalized_llm), False)
-            )
+            formatted_updates.append(("llm", "base_url", format_yaml_scalar(normalized_llm), False))
 
     if options.qc_on_missing_dependency is not None:
         formatted_updates.append(

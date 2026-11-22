@@ -154,9 +154,7 @@ def _default_project_title(directory: Path) -> str:
 
 @app.command()
 def setup(
-    directory: Path = typer.Argument(
-        Path("."), help="Project folder to create or configure."
-    ),
+    directory: Path = typer.Argument(Path("."), help="Project folder to create or configure."),
     mode: ProjectMode = typer.Option(
         ProjectMode.STANDARD,
         "--mode",
@@ -226,9 +224,7 @@ def setup(
     if (
         is_new
         and not non_interactive
-        and not typer.confirm(
-            f"Create a new {mode.value} project in '{directory}'?", default=True
-        )
+        and not typer.confirm(f"Create a new {mode.value} project in '{directory}'?", default=True)
     ):
         typer.echo("Cancelled.")
         raise typer.Exit(code=0)
@@ -246,9 +242,7 @@ def setup(
     chosen_preset = (video_preset or ("custom" if not is_new else "ltx")).strip().lower()
     if chosen_preset not in setup_mod.VIDEO_PRESETS:
         valid = ", ".join(setup_mod.VIDEO_PRESETS)
-        raise _fail(
-            MVDError(f"Unsupported --video-preset {chosen_preset!r}. Choose from: {valid}")
-        )
+        raise _fail(MVDError(f"Unsupported --video-preset {chosen_preset!r}. Choose from: {valid}"))
 
     if not non_interactive:
         chosen_title = typer.prompt("Project title", default=chosen_title).strip()
@@ -362,9 +356,7 @@ def setup(
         preset_keys = "/".join(setup_mod.VIDEO_PRESETS)
         while True:
             raw_preset = (
-                typer.prompt(f"Video preset ({preset_keys})", default=chosen_preset)
-                .strip()
-                .lower()
+                typer.prompt(f"Video preset ({preset_keys})", default=chosen_preset).strip().lower()
             )
             if raw_preset in setup_mod.VIDEO_PRESETS:
                 chosen_preset = raw_preset
@@ -426,9 +418,7 @@ def setup(
         and report.ollama.reachable
         and chosen_model not in report.ollama.models
     ):
-        _yellow(
-            f"Note: '{chosen_model}' was not found in Ollama. Run: ollama pull {chosen_model}"
-        )
+        _yellow(f"Note: '{chosen_model}' was not found in Ollama. Run: ollama pull {chosen_model}")
 
     typer.echo("\nNext steps:")
     typer.echo(f"  1. cd {directory}")

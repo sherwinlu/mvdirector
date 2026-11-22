@@ -36,6 +36,10 @@ Score from 0 to 1:
     stays closed (score spec_match <= 0.2 if a co-singer is missing or the wrong person is singing).
 - artifact_free: no malformed hands or fingers, extra or missing limbs, warped faces,
   melted objects, garbled text, watermarks{video_artifacts}.
+  * Overlaid text & title cards: any overlaid typography, opening credits, title cards,
+    subtitles, captions, logos, or watermarks—even clean, legible, or stylized serif text
+    centered or in a corner—MUST score artifact_free <= 0.2 and be named in 'issues' unless
+    the specification explicitly asks for text.
   * Body proportions & height-to-width ratios: check human head-to-body, torso-to-leg and
     height-to-width proportions carefully. Vertically squashed or compressed bodies, dwarf or
     stubby legs beneath a wide coat or torso, oversized heads, or stiff front-facing reference

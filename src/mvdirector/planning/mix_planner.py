@@ -300,8 +300,9 @@ def _request_llm_themes(
                 f"- id={ch.id} | time={ch.start:.0f}-{ch.end:.0f}s | title={ch.title!r} | "
                 f"bpm={ch.bpm:.0f} | energy={ch.energy:.2f} | tags={tags}{hint}{lyric_note}"
             )
+        brief = style_text.strip() or "Atmospheric ambient visual environments."
         prompt_parts = [
-            f"GLOBAL STYLE BRIEF:\n{style_text.strip() or 'Cinematic atmospheric electronic mix.'}",
+            f"GLOBAL STYLE BRIEF:\n{brief}",
             f"CLIPS PER CHAPTER: {clips_per_segment}",
         ]
         if prev_notes:
@@ -345,7 +346,7 @@ def build_mix_manifest(
     """Create a ``ProjectMode.MIX`` manifest with 1 theme + ``clips_per_segment`` shots/chapter."""
     chapters_in = _ensure_analyzed_chapters(config, analysis)
     clips_per_seg = config.mix.clips_per_segment
-    clean_style = " ".join(style_text.split()) or "Cinematic atmospheric visual environments"
+    clean_style = " ".join(style_text.split()) or "Atmospheric ambient visual environments"
 
     llm_style = ""
     llm_neg = ""

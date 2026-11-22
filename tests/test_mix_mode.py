@@ -366,3 +366,21 @@ def test_project_relative_tracklist_override_and_empty_approve_guard(tmp_path: P
     # Calling api.approve with neither shot_ids nor chapters raises MVDError.
     with pytest.raises(MVDError, match="shot id or --chapter"):
         api.approve(project)
+
+
+def test_mix_motion_prompt_omits_no_subtitles_and_cinematic_default(tmp_path: Path) -> None:
+    from mvdirector.config import VideoConfig
+    from mvdirector.planning import prompts
+
+    project = _make_mix_project(tmp_path)
+    api.analyze(project)
+    _, manifest = api.plan(project, overwrite=True)
+
+    assert "cinematic" not in manifest.visual_bible.style.lower()
+    shot = manifest.shots[0]
+    motion = prompts.compose_motion_prompt(
+        manifest, shot, video_config=VideoConfig(motion_no_subtitles=True)
+    )
+    assert "No subtitles" not in motion
+    assert "no text" not in motion.lower()
+    assert "cinematic" not in motion.lower()

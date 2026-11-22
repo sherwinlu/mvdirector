@@ -14,7 +14,7 @@ import re
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from mvdirector.models import Character, Framing, Manifest, Shot, ShotType
+from mvdirector.models import Character, Framing, Manifest, ProjectMode, Shot, ShotType
 
 if TYPE_CHECKING:
     from mvdirector.config import VideoConfig
@@ -340,7 +340,13 @@ Rules:
   weather, interiors, or abstract/cybernetic spaces with zero people, faces, or performers. State
   absences affirmatively by describing the uninhabited space itself.
 - High chapter contrast: neighbouring chapters MUST differ clearly in color palette, lighting
-  temperature, or spatial scale so timeline scrubbing gives instant visual chapter feedback.
+  temperature, or spatial scale so timeline scrubbing gives instant visual chapter feedback. Write
+  color palettes using natural color words (e.g. 'deep teal, warm amber, slate grey'), never hex
+  codes like '#FFA500'.
+- No text-bearing props or movie-title framing: avoid signage, neon signs, storefronts, books,
+  screens, posters, or plaques; describe 'style' with photographic or architectural terms (e.g.
+  'atmospheric ambient photography') rather than 'cinematic' or movie-trailer phrasing so video
+  models do not invent opening credits.
 - Seamless loop physics: design every 'clip_prompts' entry and 'motion_style' for short (4-8s)
   crossfade-looped clips. Use continuous cyclical or steady ambient motion (drifting fog, rippling
   water, slow volumetric light sweeps, floating dust/embers, gentle camera glide). Avoid one-off
@@ -997,7 +1003,7 @@ def compose_motion_prompt(
     if single_take and not shot.allow_cuts:
         framing = _FRAMING_LABEL[shot.framing]
         parts.append(f"Maintain {framing} framing throughout. Single continuous shot, no cuts.")
-    if no_subtitles:
+    if no_subtitles and manifest.mode is not ProjectMode.MIX:
         parts.append("No subtitles, no text.")
     if no_music:
         parts.append("No music.")

@@ -25,6 +25,7 @@ prepare:
   whisper_model: small           # faster-whisper model size (use large-v3-turbo for non-English)
   whisper_language: null         # optional ISO code (e.g. en, es, ja, ko); null = auto-detect
   whisper_multilingual: false    # true = detect language per segment (for code-switching songs)
+  whisper_stall_timeout_seconds: 600  # abort a stalled transcription (first segment: 3x); 0 = off
 
 video:
   width: 1280

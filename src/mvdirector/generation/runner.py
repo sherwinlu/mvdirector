@@ -18,24 +18,27 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from mvdirector import media
+from mvdirector import assemble, media
+from mvdirector.comfy.cache import ComfyRenderCache, canonical_graph_key, file_sha256
 from mvdirector.comfy.client import ComfyClient
-from mvdirector.comfy.workflow import WorkflowTemplate
+from mvdirector.comfy.workflow import OutputSpec, WorkflowTemplate
 from mvdirector.errors import BudgetExceeded, ComfyJobError, ConfigError, MediaToolError
 from mvdirector.models import (
     AssetKind,
     AssetState,
     AssetStatus,
     Attempt,
+    ContinuityMode,
     Manifest,
     QCReport,
     ReferenceSet,
+    RetryStrategy,
     Review,
     Shot,
     ShotType,
 )
 from mvdirector.planning import prompts
-from mvdirector.project import Project
+from mvdirector.project import Project, require_safe_id
 from mvdirector.qc.faces import IdentityReference
 from mvdirector.qc.factory import QualityGates
 from mvdirector.retry import AttemptPlan, RetryPolicy
@@ -131,25 +134,97 @@ class ShotRunner:
         self._budget = budget
         self._observer = observer
         self._draft = draft
-        self._uploads: dict[Path, str] = {}
+        self._uploads: dict[tuple[Path, int, int], str] = {}
+        self._uploaded_local: dict[str, Path] = {}
+        self._uploaded_digests: dict[str, str] = {}
+        self._file_hashes: dict[tuple[Path, int, int], str] = {}
         self._identities: dict[tuple[str, ...], IdentityReference] = {}
         self._warned: set[str] = set()
+        self._analysis_beats: list[float] | None = None
+        self._cache: ComfyRenderCache | None = (
+            ComfyRenderCache(project.path(".comfy_cache"))
+            if project.config.comfy.cache_enabled
+            else None
+        )
 
     # ---------------------------------------------------------------- public
 
     def run(self, kinds: list[AssetKind], shot_ids: list[str] | None = None) -> None:
         """Process the given asset kinds for the selected shots (all shots by default)."""
         shots = [s for s in self._manifest.shots if shot_ids is None or s.id in shot_ids]
+        has_chained = any(s.continuity is not ContinuityMode.CUT for s in shots)
+        # Chained shots run after the shot they continue from, whichever kinds this run covers:
+        # a video-only run must render the previous clip before taking a deferred handoff still.
+        waves = self._chain_waves(shots) if has_chained else [shots]
+        previous_kind: AssetKind | None = None
         try:
-            for index, kind in enumerate(kinds):  # stills first: failures are cheapest there
-                if index > 0:
-                    self._comfy.free_memory()
-                self._emit(RunEvent("phase_started", asset=kind.value))
-                for shot in shots:
-                    self._run_asset(shot, kind)
+            for wave_idx, wave_shots in enumerate(waves):
+                for kind in kinds:  # stills first: failures are cheapest there
+                    if previous_kind is not None and kind is not previous_kind:
+                        self._comfy.free_memory()  # unload the previous phase's model
+                    previous_kind = kind
+                    self._emit(RunEvent("phase_started", asset=kind.value))
+                    ordered = (
+                        self._sort_for_cache(wave_shots, kind)
+                        if (self._project.config.comfy.sort_batch_for_cache and wave_idx == 0)
+                        else wave_shots
+                    )
+                    for shot in ordered:
+                        self._run_asset(shot, kind)
         finally:
             self._project.save_manifest(self._manifest)
             self._emit(RunEvent("run_finished", generations_used=self._budget.used))
+
+    def _chain_waves(self, shots: list[Shot]) -> list[list[Shot]]:
+        """Partition shots into dependency waves so CUT shots batch while chains run in order."""
+        selected_ids = {s.id for s in shots}
+        all_shots = self._manifest.shots
+        pos_by_id = {s.id: i for i, s in enumerate(all_shots)}
+        depth_by_id: dict[str, int] = {}
+        waves: dict[int, list[Shot]] = {}
+        for shot in shots:
+            pos = pos_by_id.get(shot.id)
+            if (
+                shot.continuity is not ContinuityMode.CUT
+                and pos is not None
+                and pos > 0
+                and all_shots[pos - 1].id in selected_ids
+            ):
+                depth = depth_by_id.get(all_shots[pos - 1].id, 0) + 1
+            else:
+                depth = 0
+            depth_by_id[shot.id] = depth
+            waves.setdefault(depth, []).append(shot)
+        return [waves[d] for d in sorted(waves)]
+
+    @staticmethod
+    def _sort_for_cache(shots: list[Shot], kind: AssetKind) -> list[Shot]:
+        """Group independent shots by workflow/setting/prompt prefix to keep ComfyUI caches warm.
+
+        Inspired by ``tysonfarrington-cmyk/xenoform`` (``final_tier.py``) and
+        ``tsondo/musicvision`` (``assets/consistency.py``).
+        """
+        if kind is AssetKind.STILL:
+            return sorted(
+                shots,
+                key=lambda s: (
+                    0 if s.type.shows_singer else 1,
+                    s.character or "",
+                    s.wardrobe or "",
+                    s.setting,
+                    s.still_prompt[:48],
+                    s.index,
+                ),
+            )
+        return sorted(
+            shots,
+            key=lambda s: (
+                0 if s.type is ShotType.LIPSYNC else 1,
+                s.setting,
+                s.motion_prompt[:48],
+                s.index,
+            ),
+        )
 
     def _emit(self, event: RunEvent) -> None:
         if self._observer is not None:
@@ -225,20 +300,158 @@ class ShotRunner:
         path = self._project.path(shot.previz_video)
         return path if path.is_file() else None
 
+    def _previz_depth_for(self, shot: Shot, template: WorkflowTemplate) -> Path | None:
+        if not shot.previz_depth_video or not template.accepts("previz_depth_video"):
+            return None
+        path = self._project.path(shot.previz_depth_video)
+        return path if path.is_file() else None
+
+    def _previous_shot(self, shot: Shot) -> Shot | None:
+        shots = self._manifest.shots
+        pos = next((i for i, item in enumerate(shots) if item.id == shot.id), None)
+        return shots[pos - 1] if pos is not None and pos > 0 else None
+
+    def _played_tail(self, prev: Shot) -> tuple[Path, int, Attempt] | None:
+        """``(clip, index of its last frame played at assembly, attempt)`` for ``prev``.
+
+        Uses assembly's own timing (lip-sync delay, a dropped handoff seam frame), so chained
+        shots continue from exactly the frame viewers see last.
+
+        Credits & Attribution:
+            Trim-aware cross-shot handoff frame chaining inspired by
+            ``GeekatplayStudio/ComfyUI-Music-to-Video`` (``nodes.py``) and
+            ``afj176/open-cinema-studio`` (``app/studio.py``).
+        """
+        prev_video = prev.video.selected or prev.video.best_attempt()
+        if prev_video is None or not prev_video.path:
+            return None
+        video_path = self._project.path(prev_video.path)
+        if not video_path.is_file():
+            return None
+        timing = assemble.clip_timing(
+            prev,
+            prev_video,
+            prev.still.selected or prev.still.best_attempt(),
+            sync_delay_compensation=self._project.config.video.sync_delay_compensation,
+        )
+        fps = self._manifest.fps
+        frames = assemble.frame_counts([prev], fps)[0]
+        return video_path, timing.last_played_frame(frames, fps), prev_video
+
+    def _previous_handoff_frame(self, shot: Shot) -> Path | None:
+        """The previous clip's last played frame, used as a ``reframe`` shot's reference."""
+        prev = self._previous_shot(shot)
+        tail = self._played_tail(prev) if prev is not None else None
+        if prev is None or tail is None:
+            return None
+        video_path, frame_index, _ = tail
+        safe_prev_id = require_safe_id(prev.id, "shot id")
+        handoff_dst = self._project.path(f"assets/stills/{safe_prev_id}_handoff.png")
+        return media.extract_frame_at_index(video_path, frame_index, handoff_dst)
+
+    def _take_handoff_still(self, shot: Shot, state: AssetState) -> bool:
+        """Make a ``continue`` shot's still the previous clip's last played frame.
+
+        Returns True when the still is settled here: handed off, or deferred until the previous
+        shot has a clip to continue from. Returns False when the still has to be generated
+        normally instead, which makes this join a plain cut.
+        """
+        prev = self._previous_shot(shot)
+        if prev is None:
+            return False
+        if state.director_note:
+            log.warning(
+                "%s: a reviewer asked for changes to this continuation still; it gets a newly "
+                "generated still, so the join with %s renders as a cut.",
+                shot.id,
+                prev.id,
+            )
+            return False
+        if prev.video.status is AssetStatus.PENDING:
+            # Not final yet: even an existing take may still be retried or replaced.
+            log.warning(
+                "%s: continuity 'continue' waits for %s's clip; this still will be that clip's "
+                "last frame once its video is finished (`mvd videos` or `mvd run`).",
+                shot.id,
+                prev.id,
+            )
+            return True
+        tail = self._played_tail(prev)
+        if tail is None:
+            log.warning(
+                "%s: %s has no usable clip to continue from; this shot gets a newly generated "
+                "still, so the join renders as a cut.",
+                shot.id,
+                prev.id,
+            )
+            return False
+        video_path, frame_index, prev_video = tail
+        if any(
+            a.strategy is RetryStrategy.HANDOFF
+            and a.params.get("handoff_source") == prev_video.path
+            for a in state.attempts
+        ):
+            # Handing off the same frame again would only repeat the attempt that was sent back.
+            log.warning(
+                "%s: the handoff frame from %s's current clip was already used and sent back; "
+                "this shot gets a newly generated still, so the join renders as a cut. "
+                "Re-render %s's video to continue from a new frame.",
+                shot.id,
+                prev.id,
+                prev.id,
+            )
+            return False
+        number = len(state.attempts) + 1
+        destination = self._project.asset_path(shot, AssetKind.STILL, number)
+        media.extract_frame_at_index(video_path, frame_index, destination)
+        # The clip starts directly from the handoff frame: align the audio slice to shot.start
+        # (zero head handle) so frame 0 is the handoff boundary and stays locked to the audio.
+        shot.audio_slice.start = round(shot.start, 3)
+        shot.audio_slice.head_handle = 0.0
+        attempt = Attempt(
+            number=number,
+            strategy=RetryStrategy.HANDOFF,
+            seed=0,
+            prompt="(continued from previous shot handoff frame)",
+            params={"handoff_source": prev_video.path, "handoff_frame": frame_index},
+            path=self._project.rel(destination),
+            qc=QCReport(passed=True, score=1.0),
+        )
+        state.attempts.append(attempt)
+        state.status = AssetStatus.PASSED
+        state.selected_attempt = number
+        self._project.save_manifest(self._manifest)
+        self._emit(
+            RunEvent("asset_passed", asset=AssetKind.STILL.value, shot_id=shot.id, attempt=number)
+        )
+        return True
+
     def _run_asset(self, shot: Shot, kind: AssetKind) -> None:
         state = shot.asset(kind)
+        if shot.continuity is ContinuityMode.CONTINUE and shot.still.status is AssetStatus.PENDING:
+            # A one-take continuation's still is the previous clip's last played frame. The video
+            # phase takes it as well, for stills an earlier still-only run had to defer.
+            settled = self._take_handoff_still(shot, shot.still)
+            if kind is AssetKind.STILL and settled:
+                return
         if kind is AssetKind.VIDEO and shot.still.status is not AssetStatus.PASSED:
             # Never spend video time on a still that has not passed QC or been accepted.
             log.info("%s: still is %s; skipping video", shot.id, shot.still.status.value)
             return
         while state.status is AssetStatus.PENDING:
             if len(state.attempts) >= state.attempts_allowed:
-                if kind is AssetKind.VIDEO and self._fall_back_to_performance(shot, state):
+                if kind is AssetKind.VIDEO and self._fall_back_from_lipsync(shot, state):
                     continue
                 self._mark_exhausted(shot, kind, state)
                 break
             self._budget.consume()
-            plan = self._policy.prepare(shot, kind)
+            still_tpl_key = "still" if shot.type.shows_singer else "t2i"
+            can_repair = (
+                kind is AssetKind.STILL
+                and still_tpl_key in self._templates
+                and self._templates[still_tpl_key].accepts("reference_image")
+            )
+            plan = self._policy.prepare(shot, kind, can_repair=can_repair)
             shot.review = Review()  # any earlier review no longer describes this shot
             self._emit(
                 RunEvent(
@@ -250,7 +463,31 @@ class ShotRunner:
                     generations_used=self._budget.used,
                 )
             )
-            attempt = self._attempt(shot, kind, plan)
+            prev_attempt = state.attempts[-1] if state.attempts else None
+            attempt = self._attempt(shot, kind, plan, previous_attempt=prev_attempt)
+            # Anti-regression guard for targeted in-place still repair
+            # (inspired by afj176/open-cinema-studio studio.py:_repair_frame).
+            if (
+                plan.strategy is RetryStrategy.REPAIR_STILL
+                and prev_attempt is not None
+                and prev_attempt.qc is not None
+                and attempt.qc is not None
+                and not attempt.qc.passed
+            ):
+                old_failed = {c.name for c in prev_attempt.qc.failed_checks}
+                new_failed = {c.name for c in attempt.qc.failed_checks}
+                improved = new_failed <= old_failed and len(attempt.qc.issues) < len(
+                    prev_attempt.qc.issues
+                )
+                if not improved:
+                    attempt.regressed = True
+                    log.info(
+                        "%s still repair did not strictly reduce issues (%s -> %s); "
+                        "excluding regressed repair from best_attempt selection",
+                        shot.id,
+                        len(prev_attempt.qc.issues),
+                        len(attempt.qc.issues),
+                    )
             state.attempts.append(attempt)
             self._manifest.total_generations += 1
             self._emit(
@@ -268,6 +505,15 @@ class ShotRunner:
                 )
             )
             if attempt.qc is not None and attempt.qc.passed:
+                # Smart Cutaway Rescue: if lip-sync correlation is critically low on an advisory
+                # pass and smart_cutaway_rescue is enabled, convert to a b-roll cutaway instead
+                # of keeping a poor mouth-sync clip (inspired by VisualFrisson/ComfyUI-OneShotMV).
+                if (
+                    kind is AssetKind.VIDEO
+                    and self._should_rescue_weak_lipsync(shot, attempt)
+                    and self._convert_lipsync_to_broll(shot, state)
+                ):
+                    continue
                 state.status = AssetStatus.PASSED
                 state.selected_attempt = attempt.number
                 self._emit(
@@ -292,23 +538,60 @@ class ShotRunner:
                 )
                 break
 
-    def _attempt(self, shot: Shot, kind: AssetKind, plan: AttemptPlan) -> Attempt:
+    def _attempt(
+        self,
+        shot: Shot,
+        kind: AssetKind,
+        plan: AttemptPlan,
+        *,
+        previous_attempt: Attempt | None = None,
+    ) -> Attempt:
         state = shot.asset(kind)
         plate = self._plate_for(shot) if kind is AssetKind.STILL else None
         notation = self._project.config.comfy.reference_notation
+        max_chars = self._project.config.comfy.max_prompt_chars
         still_refs: list[tuple[str, Path]] = []
         prop_refs = self._prop_paths(shot)
+        repair_source: Path | None = None
         if kind is AssetKind.STILL:
             still_refs = self._still_reference_paths(shot, plate)
             still_tpl = self._templates["still" if shot.type.shows_singer else "t2i"]
-            prompt = prompts.compose_still_prompt(
-                self._manifest,
-                shot,
-                plate_attached=plate is not None,
-                props_attached=bool(prop_refs and still_tpl.accepts("prop_image")),
-                reference_notation=notation,
-                bound_references=[name for name, _ in still_refs] if still_refs else None,
-            )
+            if (
+                plan.strategy is RetryStrategy.REPAIR_STILL
+                and previous_attempt is not None
+                and previous_attempt.path
+                and still_tpl.accepts("reference_image")
+            ):
+                candidate = self._project.path(previous_attempt.path)
+                if candidate.is_file():
+                    repair_source = candidate
+                    issues = (
+                        "; ".join(previous_attempt.qc.issues) if previous_attempt.qc else "defects"
+                    )
+                    hints = " ".join(previous_attempt.qc.fix_hints) if previous_attempt.qc else ""
+                    prompt = (
+                        "Keep the exact composition, framing, lighting, pose, and character "
+                        f"identity from the input image. Fix ONLY these defects: {issues}. "
+                        f"{hints}"
+                    ).strip()
+                else:
+                    prompt = prompts.compose_still_prompt(
+                        self._manifest,
+                        shot,
+                        plate_attached=plate is not None,
+                        props_attached=bool(prop_refs and still_tpl.accepts("prop_image")),
+                        reference_notation=notation,
+                        bound_references=[name for name, _ in still_refs] if still_refs else None,
+                    )
+            else:
+                prompt = prompts.compose_still_prompt(
+                    self._manifest,
+                    shot,
+                    plate_attached=plate is not None,
+                    props_attached=bool(prop_refs and still_tpl.accepts("prop_image")),
+                    reference_notation=notation,
+                    bound_references=[name for name, _ in still_refs] if still_refs else None,
+                )
         else:
             video_template = self._video_template(shot)
             previz = self._previz_for(shot, video_template)
@@ -320,6 +603,8 @@ class ShotRunner:
                 has_audio_video=self._video_uses_audio_video(shot, video_template),
                 previz_attached=previz is not None,
             )
+        if max_chars is not None:
+            prompt = prompts.fit_prompt_budget(prompt, max_chars)
         attempt = Attempt(
             number=plan.number,
             strategy=plan.strategy,
@@ -331,11 +616,15 @@ class ShotRunner:
         log.info("%s %s attempt %d (%s)", shot.id, kind.value, plan.number, plan.strategy.value)
         try:
             if kind is AssetKind.STILL:
-                self._generate_still(shot, attempt, destination, still_refs, prop_refs)
+                self._generate_still(
+                    shot, attempt, destination, still_refs, prop_refs, repair_source=repair_source
+                )
             else:
                 self._generate_video(shot, attempt, destination, prop_refs)
             attempt.path = self._project.rel(destination)
             attempt.qc = self._check(shot, kind, destination)
+            if kind is AssetKind.VIDEO and attempt.qc is not None:
+                attempt.sync_delay_seconds = self._extract_sync_delay(shot, attempt.qc)
         except (ComfyJobError, MediaToolError) as exc:
             # The job itself failed. Record it and let the loop try again.
             log.warning("%s %s attempt %d errored: %s", shot.id, kind.value, plan.number, exc)
@@ -351,6 +640,19 @@ class ShotRunner:
             outcome,
         )
         return attempt
+
+    @staticmethod
+    def _extract_sync_delay(shot: Shot, report: QCReport) -> float:
+        """Clamp measured lip-sync playback offset safely within the shot's audio handles."""
+        sync_check = next((c for c in report.checks if c.name == "lipsync"), None)
+        if sync_check is None:
+            return 0.0
+        raw_delay = sync_check.metrics.get("sync_delay_seconds")
+        if raw_delay is None:
+            return 0.0
+        head = max(0.0, shot.audio_slice.head_handle)
+        tail = max(0.0, shot.audio_slice.end - shot.end)
+        return round(max(-head, min(tail, float(raw_delay))), 4)
 
     def _still_reference_paths(self, shot: Shot, plate: Path | None) -> list[tuple[str, Path]]:
         """Ordered (binding_name, path) pairs uploaded to the ``still`` workflow."""
@@ -402,6 +704,8 @@ class ShotRunner:
         destination: Path,
         still_refs: list[tuple[str, Path]],
         prop_refs: list[tuple[str, Path]],
+        *,
+        repair_source: Path | None = None,
     ) -> None:
         video = self._project.config.video
         width, height = video.generation_size(draft=self._draft)
@@ -415,12 +719,25 @@ class ShotRunner:
         }
         if shot.type.shows_singer:
             template = self._templates["still"]
-            for param, ref_path in still_refs:
-                params[param] = self._upload(ref_path)
+            if repair_source is not None:
+                params["reference_image"] = self._upload(repair_source)
+            else:
+                for param, ref_path in still_refs:
+                    params[param] = self._upload(ref_path)
         else:
             template = self._templates["t2i"]
+            if repair_source is not None and template.accepts("reference_image"):
+                params["reference_image"] = self._upload(repair_source)
+        if (
+            repair_source is None
+            and shot.continuity is ContinuityMode.REFRAME
+            and template.accepts("previous_frame")
+        ):
+            handoff = self._previous_handoff_frame(shot)
+            if handoff is not None:
+                params["previous_frame"] = self._upload(handoff)
         self._attach_prop_refs(params, template, prop_refs)
-        self._comfy.run(template.render(params), template.bindings.output, destination)
+        self._run_comfy(template.render(params), template.bindings.output, destination)
 
     def _video_template(self, shot: Shot) -> WorkflowTemplate:
         return (
@@ -444,6 +761,7 @@ class ShotRunner:
         width, height = video.generation_size(draft=self._draft)
         still = shot.still.selected
         assert still is not None and still.path is not None  # guarded in _run_asset
+        still_path = self._project.path(still.path)
         clip_duration = round(shot.audio_slice.end - shot.audio_slice.start, 3)
         template = self._video_template(shot)
         params: dict[str, Any] = {
@@ -451,7 +769,7 @@ class ShotRunner:
             "negative_prompt": self._manifest.visual_bible.negative_prompt,
             "lyrics": shot.lyrics,
             "seed": attempt.seed,
-            "image": self._upload(self._project.path(still.path)),
+            "image": self._upload(still_path),
             "width": width,
             "height": height,
             "num_frames": shot.num_frames,
@@ -468,12 +786,63 @@ class ShotRunner:
             if ref is not None and ref.video:
                 ref_video_path = self._project.path(ref.video)
                 if ref_video_path.is_file():
-                    params["reference_video"] = self._upload(ref_video_path)
+                    params["reference_video"] = self._upload(self._with_audio(ref_video_path))
+        if template.accepts("end_image"):
+            if shot.end_frame_path:
+                end_path = self._project.path(shot.end_frame_path)
+                if end_path.is_file():
+                    params["end_image"] = self._upload(end_path)
+            elif (
+                shot.camera_path_zoom is not None
+                and not shot.type.shows_singer
+                and still_path.is_file()
+            ):
+                # Zoomed-crop end guide for empty wide camera moves (disabled on human shots
+                # to prevent pose-freezing; inspired by afj176/open-cinema-studio).
+                safe_shot_id = require_safe_id(shot.id, "shot id")
+                guide_dst = self._project.path(f"assets/stills/{safe_shot_id}_path_guide.png")
+                media.zoom_crop_image(still_path, guide_dst, zoom_factor=shot.camera_path_zoom)
+                params["end_image"] = self._upload(guide_dst)
         self._attach_prop_refs(params, template, prop_refs)
         previz = self._previz_for(shot, template)
         if previz is not None:
-            params["previz_video"] = self._upload(previz)
-        self._comfy.run(template.render(params), template.bindings.output, destination)
+            params["previz_video"] = self._upload(self._with_audio(previz))
+        previz_depth = self._previz_depth_for(shot, template)
+        if previz_depth is not None:
+            params["previz_depth_video"] = self._upload(self._with_audio(previz_depth))
+        self._run_comfy(template.render(params), template.bindings.output, destination)
+
+    def _with_audio(self, video_path: Path) -> Path:
+        """``video_path``, or a cached copy of it with a silent audio track to upload instead.
+
+        ComfyUI video loaders such as ``VHS_LoadVideoPath`` fail on files without audio. The
+        source is never rewritten: it may be a locked user asset in any container.
+        """
+        try:
+            return media.with_audio_track(video_path, self._project.path("assets/cache/audio"))
+        except MediaToolError as exc:
+            log.warning(
+                "Could not add a silent audio track to %s (%s); uploading it unchanged",
+                video_path.name,
+                exc,
+            )
+            return video_path
+
+    def _run_comfy(self, graph: dict[str, Any], output: OutputSpec, destination: Path) -> Path:
+        if self._cache is not None:
+            key = canonical_graph_key(
+                graph,
+                self._uploaded_local,
+                uploaded_digests=self._uploaded_digests,
+                output_node=output.node,
+                extensions=tuple(output.extensions),
+            )
+            if self._cache.lookup(key, destination):
+                return destination
+            result = self._comfy.run(graph, output, destination)
+            self._cache.store(key, result)
+            return result
+        return self._comfy.run(graph, output, destination)
 
     def _extra_reference_images(self, shot: Shot) -> list[tuple[str, Path]]:
         """Reference sheets for secondary visible performers and props in this shot."""
@@ -519,7 +888,166 @@ class ShotRunner:
             reference_image=reference_image,
             extra_references=extra_references or None,
             expected_size=expected_size,
+            prev_tail_frames=self._previous_tail_frames(shot),
+            beat_times=self._beats_for_shot(shot),
         )
+
+    def _previous_tail_frames(self, shot: Shot) -> list[Any] | None:
+        """Last 4 played frames of the previous shot when auditing a CONTINUE seam."""
+        still = shot.still.selected
+        if (
+            shot.continuity is not ContinuityMode.CONTINUE
+            or still is None
+            or still.strategy is not RetryStrategy.HANDOFF
+        ):
+            return None  # without a handoff still the join is a plain cut, not a seam
+        prev = self._previous_shot(shot)
+        tail = self._played_tail(prev) if prev is not None else None
+        if tail is None:
+            return None
+        video_path, last_index, _ = tail
+        try:
+            frames = media.extract_frames(video_path, 128)
+        except MediaToolError:
+            return None
+        end_idx = min(len(frames), last_index + 1)
+        return frames[max(0, end_idx - 4) : end_idx] or None
+
+    def _beats_for_shot(self, shot: Shot) -> list[float] | None:
+        """Beat timestamps relative to ``shot.audio_slice.start`` for beat-motion telemetry."""
+        if self._analysis_beats is None:
+            try:
+                self._analysis_beats = list(self._project.load_analysis().beats)
+            except Exception:  # noqa: BLE001
+                self._analysis_beats = []
+        if not self._analysis_beats:
+            return None
+        start = shot.audio_slice.start
+        end = shot.audio_slice.end
+        rel = [round(b - start, 4) for b in self._analysis_beats if start <= b <= end]
+        return rel if len(rel) >= 2 else None
+
+    def _can_become_cutaway(self, shot: Shot) -> bool:
+        """True if turning ``shot`` into ``broll`` keeps consecutive cutaways <= 2."""
+        shots = self._manifest.shots
+        pos = next((i for i, item in enumerate(shots) if item.id == shot.id), None)
+        if pos is None:
+            return False
+        run = 1
+        for step in (-1, 1):
+            at = pos + step
+            while 0 <= at < len(shots) and shots[at].type is ShotType.BROLL:
+                run += 1
+                at += step
+        return run <= 2
+
+    def _should_rescue_weak_lipsync(self, shot: Shot, attempt: Attempt) -> bool:
+        """True when smart_cutaway_rescue should replace a weak lip-sync take with a cutaway."""
+        retry_cfg = self._project.config.retry
+        if not retry_cfg.smart_cutaway_rescue or shot.type is not ShotType.LIPSYNC:
+            return False
+        if attempt.qc is None:
+            return False
+        sync_check = next((c for c in attempt.qc.checks if c.name == "lipsync"), None)
+        if sync_check is None or "correlation" not in sync_check.metrics:
+            return False
+        return sync_check.metrics["correlation"] < retry_cfg.smart_cutaway_max_correlation
+
+    def _convert_lipsync_to_broll(self, shot: Shot, state: AssetState) -> bool:
+        """Convert a weak or exhausted singing shot into a cutaway if within the cutaway run cap.
+
+        Credits & Attribution:
+            Smart Cutaway rescue prioritizing weak-lip-sync singing shots inspired by
+            ``VisualFrisson/ComfyUI-OneShotMV`` (``fv/broll.py``).
+        """
+        if not self._can_become_cutaway(shot) or "t2i" not in self._templates:
+            return False
+        # Snapshot mutable shot fields so a failed cutaway still or exception rolls back cleanly.
+        snapshot = (
+            shot.fallback_from,
+            shot.type,
+            shot.continuity,
+            shot.character,
+            list(shot.characters),
+            list(shot.singers),
+            shot.wardrobe,
+            dict(shot.character_wardrobes),
+            shot.still_prompt,
+            shot.motion_prompt,
+            shot.still.model_copy(deep=True),
+        )
+        try:
+            shot.fallback_from, shot.type = shot.type, ShotType.BROLL
+            shot.continuity = ContinuityMode.CUT
+            shot.character = None
+            shot.characters = []
+            shot.singers = []
+            shot.wardrobe = None
+            shot.character_wardrobes = {}
+            shot.still_prompt = (
+                f"Empty atmospheric cutaway in {shot.setting or 'the scene'}, "
+                "evoking the mood of the song with dramatic light and texture. No people."
+            )
+            shot.motion_prompt = (
+                "Light and shadow shift steadily across the frame with natural movement. "
+                "No people. Gentle push-in."
+            )
+            shot.still.reset(self._project.config.retry.max_attempts)
+            shot.still.prompt_override = None
+            shot.still.param_overrides = {}
+            self._run_asset(shot, AssetKind.STILL)
+        except BaseException:
+            (
+                shot.fallback_from,
+                shot.type,
+                shot.continuity,
+                shot.character,
+                shot.characters,
+                shot.singers,
+                shot.wardrobe,
+                shot.character_wardrobes,
+                shot.still_prompt,
+                shot.motion_prompt,
+                shot.still,
+            ) = snapshot
+            raise
+        if shot.still.status is not AssetStatus.PASSED:
+            (
+                shot.fallback_from,
+                shot.type,
+                shot.continuity,
+                shot.character,
+                shot.characters,
+                shot.singers,
+                shot.wardrobe,
+                shot.character_wardrobes,
+                shot.still_prompt,
+                shot.motion_prompt,
+                shot.still,
+            ) = snapshot
+            return False
+        state.reset(self._project.config.retry.max_attempts)
+        state.prompt_override = None
+        state.param_overrides = {}
+        shot.review = Review()
+        log.warning(
+            "%s: weak/exhausted lip-sync rescued as a b-roll cutaway (within 2-cutaway limit)",
+            shot.id,
+        )
+        self._emit(RunEvent("shot_converted", shot_id=shot.id, asset=AssetKind.VIDEO.value))
+        self._project.save_manifest(self._manifest)
+        return True
+
+    def _fall_back_from_lipsync(self, shot: Shot, state: AssetState) -> bool:
+        """Convert an exhausted singing shot to b-roll (when configured) or performance."""
+        if not self._project.config.retry.lipsync_fallback or shot.type is not ShotType.LIPSYNC:
+            return False
+        if (
+            self._project.config.retry.lipsync_fallback_mode == "broll"
+            and self._convert_lipsync_to_broll(shot, state)
+        ):
+            return True
+        return self._fall_back_to_performance(shot, state)
 
     def _fall_back_to_performance(self, shot: Shot, state: AssetState) -> bool:
         """Turn a singing shot that could not be made into one where the singer is not singing.
@@ -641,22 +1169,46 @@ class ShotRunner:
             raise
         source_stat = source_path.stat()
         mute_spans = self._effective_mute_spans(shot)
+        video_cfg = self._project.config.video
+        target_dur = round(shot.num_frames / max(video_cfg.fps, 1), 6)
         stamp: dict[str, Any] = {
             "source": source_path.name,
             "source_size": source_stat.st_size,
             "source_mtime_ns": source_stat.st_mtime_ns,
             "start": round(shot.audio_slice.start, 4),
             "end": round(shot.audio_slice.end, 4),
+            "vae_offset": round(video_cfg.audio_vae_offset_seconds, 6),
+            "mirror_pad": video_cfg.audio_mirror_pad,
+            "target_duration": target_dur,
         }
         if mute_spans:
             stamp["mute_spans"] = [list(span) for span in mute_spans]
         marker = path.with_name(f"{path.name}.json")
         if not path.is_file() or _read_stamp(marker) != stamp:
-            media.slice_audio(source_path, path, shot.audio_slice.start, shot.audio_slice.end)
+            media.prepare_audio_slice(
+                source_path,
+                path,
+                shot.audio_slice.start,
+                shot.audio_slice.end,
+                target_duration=target_dur if video_cfg.audio_mirror_pad else None,
+                vae_offset_seconds=video_cfg.audio_vae_offset_seconds,
+                mirror_pad=video_cfg.audio_mirror_pad,
+            )
             if mute_spans:
+                # Align relative mute offsets with prepare_audio_slice's VAE-shifted start.
+                effective_slice_start = shot.audio_slice.start + video_cfg.audio_vae_offset_seconds
                 rel_mutes = [
-                    (a - shot.audio_slice.start, b - shot.audio_slice.start) for a, b in mute_spans
+                    (a - effective_slice_start, b - effective_slice_start) for a, b in mute_spans
                 ]
+                # If the slice end itself was muted (duet handoff) and mirror-padded, keep the
+                # padded overrun region muted too so foreign vocals are never mirrored back in.
+                slice_len = shot.audio_slice.end - shot.audio_slice.start
+                if (
+                    video_cfg.audio_mirror_pad
+                    and target_dur > slice_len
+                    and any(b >= slice_len - 0.02 for _, b in rel_mutes)
+                ):
+                    rel_mutes.append((slice_len, target_dur))
                 media.mute_audio_spans(path, rel_mutes)
             atomic_write(marker, json.dumps(stamp))
         return path
@@ -669,6 +1221,18 @@ class ShotRunner:
         return mp4_path
 
     def _upload(self, path: Path) -> str:
-        if path not in self._uploads:
-            self._uploads[path] = self._comfy.upload(path)
-        return self._uploads[path]
+        if not path.is_file():
+            raise ConfigError(f"Asset file not found for upload: {path}")
+        st = path.stat()
+        cache_key = (path, st.st_size, st.st_mtime_ns)
+        if cache_key not in self._uploads:
+            remote = self._comfy.upload(path)
+            self._uploads[cache_key] = remote
+            self._uploaded_local[remote] = path
+            if self._cache is not None:
+                digest = self._file_hashes.get(cache_key)
+                if digest is None:
+                    digest = file_sha256(path)
+                    self._file_hashes[cache_key] = digest
+                self._uploaded_digests[remote] = digest
+        return self._uploads[cache_key]

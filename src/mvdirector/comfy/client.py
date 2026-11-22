@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import time
+import urllib.parse
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -19,15 +20,19 @@ from typing import Any
 
 import httpx
 
+from mvdirector.comfy.cache import file_sha256
 from mvdirector.comfy.workflow import OutputSpec
 from mvdirector.config import ComfyConfig
-from mvdirector.errors import ComfyConnectionError, ComfyJobError
+from mvdirector.errors import ComfyConnectionError, ComfyJobError, ComfyResourceError
 from mvdirector.llm.http import retry_delay
 
 log = logging.getLogger(__name__)
 
 _TRANSIENT_RETRIES = 3
 _MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024  # 512 MiB cap per generated asset
+# /free only flags ComfyUI's worker thread to unload; give it this long to release VRAM.
+_VRAM_SETTLE_POLLS = 30
+_VRAM_POLL_SECONDS = 1.0
 
 
 class ComfyClient:
@@ -42,6 +47,9 @@ class ComfyClient:
         self._sleep = sleep
         self._upload_subfolder = upload_subfolder
         self._client_id = uuid.uuid4().hex
+        # The VRAM floor is checked once per phase (the first job after a /free), not per job:
+        # within a phase ComfyUI keeps the phase's model loaded on purpose.
+        self._vram_floor_checked = False
         self._http = httpx.Client(
             base_url=config.base_url.rstrip("/"),
             headers=config.headers,
@@ -64,8 +72,145 @@ class ComfyClient:
         """Return ComfyUI's system stats; raises ComfyConnectionError if unreachable."""
         return self._request("GET", "/system_stats").json()
 
+    def free_vram_gb(self) -> float | None:
+        """Probe current free GPU VRAM (GiB) from ComfyUI ``/system_stats``, or None if absent.
+
+        Credits & Attribution:
+            Pre-shot VRAM floor custody inspired by ``JavaDerek/music-video-pipeline``
+            (https://github.com/JavaDerek/music-video-pipeline — ``custody.py``).
+        """
+        stats = self.ping()
+        devices = stats.get("devices")
+        if not isinstance(devices, list) or not devices:
+            return None
+        free_bytes: list[int] = []
+        for dev in devices:
+            if not isinstance(dev, dict):
+                continue
+            vram = dev.get("vram_free")
+            if isinstance(vram, (int, float)) and vram >= 0:
+                free_bytes.append(int(vram))
+        if not free_bytes:
+            return None
+        return max(free_bytes) / (1024.0**3)
+
+    def check_vram_floor(
+        self,
+        min_free_gb: float | None = None,
+        *,
+        settle_polls: int = _VRAM_SETTLE_POLLS,
+        poll_seconds: float = _VRAM_POLL_SECONDS,
+    ) -> float | None:
+        """Verify free GPU VRAM meets ``min_free_gb``, asking ComfyUI to ``/free`` it first.
+
+        Prevents silent OS GPU wedges when queueing heavy video models onto contended cards.
+        ``/free`` only flags ComfyUI's worker to unload models, so VRAM is re-probed for up to
+        ``settle_polls`` intervals before giving up with ``ComfyResourceError``, which stops the
+        run instead of counting as a failed attempt.
+        """
+        floor = self._config.min_free_vram_gb if min_free_gb is None else min_free_gb
+        if floor is None:
+            return None
+        avail = self.free_vram_gb()
+        if avail is None or avail >= floor:
+            return avail
+        log.info(
+            "Free VRAM %.2f GiB is below floor %.2f GiB; calling /free before queueing",
+            avail,
+            floor,
+        )
+        self.free_memory()
+        for _ in range(max(1, settle_polls)):
+            self._sleep(poll_seconds)
+            avail = self.free_vram_gb()
+            if avail is None or avail >= floor:
+                return avail
+        assert avail is not None
+        raise ComfyResourceError(
+            f"Free GPU VRAM ({avail:.2f} GiB) stayed below comfy.min_free_vram_gb "
+            f"({floor:.2f} GiB) after asking ComfyUI to free memory. Another process may be "
+            "using the GPU; free it or lower comfy.min_free_vram_gb, then run again."
+        )
+
+    def object_info(self, class_type: str | None = None) -> dict[str, Any]:
+        """Fetch ComfyUI ``/object_info`` metadata (all nodes or a single ``class_type``)."""
+        if class_type is not None:
+            if (
+                not class_type
+                or "/" in class_type
+                or "\\" in class_type
+                or ".." in class_type
+                or any(ord(ch) < 32 or ord(ch) == 127 for ch in class_type)
+            ):
+                raise ComfyJobError(f"Invalid ComfyUI node class_type: {class_type!r}")
+            endpoint = f"/object_info/{urllib.parse.quote(class_type, safe='')}"
+        else:
+            endpoint = "/object_info"
+        data = self._request("GET", endpoint).json()
+        return data if isinstance(data, dict) else {}
+
+    def validate_graph_live(
+        self,
+        graph: dict[str, Any],
+        *,
+        object_info: dict[str, Any] | None = None,
+        skip_inputs: set[tuple[str, str]] | None = None,
+    ) -> list[str]:
+        """Validate ``graph`` node classes and checkpoint/LoRA inputs against ``/object_info``.
+
+        Credits & Attribution:
+            Live ComfyUI ``/object_info`` pre-flight probing inspired by
+            ``VisualFrisson/ComfyUI-OneShotMV`` (``fv/setup_check.py``) and
+            ``heroesjouney/aimoviestudiov2`` (``routes_settings.py``).
+        """
+        info = self.object_info() if object_info is None else object_info
+        if not info:
+            return []
+        problems: list[str] = []
+        skip = skip_inputs or set()
+        for node_id, node in graph.items():
+            if not isinstance(node, dict):
+                continue
+            ctype = str(node.get("class_type", ""))
+            if not ctype:
+                continue
+            meta = info.get(ctype)
+            if not isinstance(meta, dict):
+                problems.append(f"node {node_id}: unknown ComfyUI node class '{ctype}'")
+                continue
+            spec_groups = meta.get("input")
+            if not isinstance(spec_groups, dict):
+                continue
+            all_specs: dict[str, Any] = {}
+            for grp in ("required", "optional"):
+                if isinstance(spec_groups.get(grp), dict):
+                    all_specs.update(spec_groups[grp])
+            for field, val in (node.get("inputs") or {}).items():
+                if (str(node_id), field) in skip:
+                    continue
+                if isinstance(val, list) or not isinstance(val, str) or not val:
+                    continue
+                spec = all_specs.get(field)
+                allowed: list[Any] | None = None
+                if isinstance(spec, list) and spec:
+                    if isinstance(spec[0], list):
+                        allowed = spec[0]
+                    elif (
+                        spec[0] == "COMBO"
+                        and len(spec) > 1
+                        and isinstance(spec[1], dict)
+                        and isinstance(spec[1].get("options"), list)
+                    ):
+                        allowed = spec[1]["options"]
+                if allowed and val not in allowed and field.endswith(("_name", "model", "ckpt")):
+                    problems.append(
+                        f"node {node_id} ({ctype}).{field}: '{val}' not installed on ComfyUI"
+                    )
+        return problems
+
     def free_memory(self, *, unload_models: bool = True, free_memory: bool = True) -> None:
         """Ask ComfyUI to unload models and free VRAM between workflow phases."""
+        self._vram_floor_checked = False
         try:
             response = self._http.post(
                 "/free",
@@ -76,34 +221,82 @@ class ComfyClient:
         except httpx.TransportError as exc:
             log.debug("ComfyUI /free request failed (%s); ignoring", exc)
 
-    def upload(self, path: Path, subfolder: str | None = None) -> str:
+    def upload(
+        self,
+        path: Path,
+        subfolder: str | None = None,
+        *,
+        content_addressed: bool | None = None,
+    ) -> str:
         """Upload a file to ComfyUI's input folder and return the name loaders expect.
 
-        ``/upload/image`` stores any file type, so it is used for audio as well.
+        ``/upload/image`` stores any file type, so it is used for audio as well. When
+        ``content_addressed`` (or ``comfy.dedup_uploads``) is enabled, uploads use a SHA-256
+        suffixed name and probe ``HEAD /view`` first to avoid redundant transfers of unchanged
+        reference assets (inspired by ``afj176/open-cinema-studio``).
         """
         target_subfolder = self._upload_subfolder if subfolder is None else subfolder
+        dedup = self._config.dedup_uploads if content_addressed is None else content_addressed
+        upload_name = path.name
+        if dedup and path.is_file():
+            digest = file_sha256(path)[:12]
+            upload_name = f"{path.stem}_{digest}{path.suffix}"
+            try:
+                probe_resp = self._http.head(
+                    "/view",
+                    params={
+                        "filename": upload_name,
+                        "subfolder": target_subfolder,
+                        "type": "input",
+                    },
+                )
+                if probe_resp.status_code == 200:
+                    log.debug("ComfyUI upload dedup hit: %s/%s", target_subfolder, upload_name)
+                    return f"{target_subfolder}/{upload_name}" if target_subfolder else upload_name
+            except httpx.TransportError:
+                pass
         with path.open("rb") as handle:
             response = self._request(
                 "POST",
                 "/upload/image",
-                files={"image": (path.name, handle, "application/octet-stream")},
+                files={"image": (upload_name, handle, "application/octet-stream")},
                 data={"subfolder": target_subfolder, "overwrite": "true"},
             )
         body = response.json()
         name = body["name"]
         return f"{body['subfolder']}/{name}" if body.get("subfolder") else name
 
-    def run(self, graph: dict[str, Any], output: OutputSpec, destination: Path) -> Path:
+    def run(
+        self,
+        graph: dict[str, Any],
+        output: OutputSpec,
+        destination: Path,
+        *,
+        partial_execution_targets: list[str] | None = None,
+    ) -> Path:
         """Queue ``graph``, wait for it and download its output to ``destination``."""
-        prompt_id = self.queue(graph)
+        if not self._vram_floor_checked:
+            self.check_vram_floor()
+            self._vram_floor_checked = True
+        prompt_id = self.queue(graph, partial_execution_targets=partial_execution_targets)
         entry = self.wait(prompt_id)
         return self.download_output(entry, output, destination)
 
-    def queue(self, graph: dict[str, Any]) -> str:
+    def queue(
+        self,
+        graph: dict[str, Any],
+        *,
+        partial_execution_targets: list[str] | None = None,
+    ) -> str:
+        payload: dict[str, Any] = {"prompt": graph, "client_id": self._client_id}
+        if partial_execution_targets:
+            # Partial graph execution targeting specific output nodes (clean-room concept
+            # inspired by Edakuban/VocaVid).
+            payload["partial_execution_targets"] = list(partial_execution_targets)
         response = self._request(
             "POST",
             "/prompt",
-            json={"prompt": graph, "client_id": self._client_id},
+            json=payload,
             ok_statuses=(200, 400),
             # Never re-POST /prompt on a read timeout or 500; ComfyUI may already have queued it.
             retry_on_read_error=False,

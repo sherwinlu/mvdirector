@@ -30,6 +30,7 @@ from mvdirector import media, mix_assemble
 from mvdirector import report as report_mod
 from mvdirector import tuning as tuning_mod
 from mvdirector.audio.analysis import analyze_project
+from mvdirector.audio.broadcast_qa import BroadcastAudioReport, analyze_broadcast_audio
 from mvdirector.audio.lyrics import Transcriber
 from mvdirector.audio.mix_analysis import analyze_mix_project
 from mvdirector.audio.prepare import PrepareResult, prepare_project
@@ -69,6 +70,7 @@ from mvdirector.review import policy as review_policy
 __all__ = [
     # types
     "BriefResult",
+    "BroadcastAudioReport",
     "CleanupPlan",
     "GenerateResult",
     "LLMCheckOutcome",
@@ -81,6 +83,7 @@ __all__ = [
     "analyze",
     "approve",
     "assemble",
+    "audio_qc",
     "brief",
     "calibrate",
     "check_llm",
@@ -250,14 +253,48 @@ def validate_project(
         workflow_names = ["t2i", "still", "i2v"]
     else:
         workflow_names = list(project.config.comfy.workflows)
+    loaded_templates = {}
     for name in workflow_names:
-        attempt(f"workflow '{name}'", partial(load_templates, project, [name]))
+        try:
+            loaded = load_templates(project, [name])
+            loaded_templates.update(loaded)
+            checks.append(ValidationCheck(f"workflow '{name}'"))
+        except MVDError as exc:
+            checks.append(ValidationCheck(f"workflow '{name}'", str(exc)))
 
-    def ping() -> None:
+    live_wf_checks: list[ValidationCheck] = []
+
+    def ping_and_probe() -> None:
         with _lease(project, comfy_provider) as comfy:
             comfy.ping()
+            # Live /object_info node/model validation when server exposes /object_info
+            # (inspired by VisualFrisson/ComfyUI-OneShotMV setup_check.py).
+            info_fn = getattr(comfy, "object_info", None)
+            if callable(info_fn):
+                try:
+                    info = info_fn()
+                except MVDError:
+                    info = {}
+                if isinstance(info, dict) and info:
+                    for wf_name, tpl in loaded_templates.items():
+                        bound_targets = {
+                            (str(t.node), t.field)
+                            for targets in tpl.bindings.inputs.values()
+                            for t in targets
+                        }
+                        issues = comfy.validate_graph_live(
+                            tpl.graph, object_info=info, skip_inputs=bound_targets
+                        )
+                        if issues:
+                            live_wf_checks.append(
+                                ValidationCheck(
+                                    f"ComfyUI dependencies for '{wf_name}'",
+                                    "; ".join(issues[:5]),
+                                )
+                            )
 
-    attempt(f"ComfyUI at {project.config.comfy.base_url}", ping)
+    attempt(f"ComfyUI at {project.config.comfy.base_url}", ping_and_probe)
+    checks.extend(live_wf_checks)
     llm_config = project.config.llm
     if llm_config.enabled:
         attempt(
@@ -1023,6 +1060,30 @@ def assemble(
 
 
 # --- reports ----------------------------------------------------------------------------------
+
+
+def audio_qc(project_dir: ProjectRef, audio_path: Path | None = None) -> BroadcastAudioReport:
+    """Measure broadcast loudness (LUFS), 4x True Peak, and splice clicks on the project mix."""
+    project = open_project(project_dir, pull=False)
+    target = (
+        audio_path
+        if audio_path is not None
+        else project.input_path(project.config.inputs.mix, "mix")
+    )
+    boundary_times: list[float] | None = None
+    drum_onsets: list[float] = []
+    try:
+        analysis = project.load_analysis()
+        drum_onsets = list(analysis.beats)
+        if analysis.chapters:
+            boundary_times = [ch.start for ch in analysis.chapters if ch.start > 0.0]
+    except MVDError:
+        pass
+    return analyze_broadcast_audio(
+        target,
+        boundary_times=boundary_times,
+        drum_onset_times=drum_onsets,
+    )
 
 
 def qc_report(project_dir: ProjectRef, markdown: bool = False) -> str:

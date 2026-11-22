@@ -262,6 +262,10 @@ class ImageQC:
                 ),
                 metrics={"face_height_fraction": round(singer.height_fraction, 4)},
             )
-        present = CheckResult(name="face_present", status=CheckStatus.PASSED, hard=True)
+        present = CheckResult(
+            name="face_present",
+            status=CheckStatus.PASSED,
+            hard=True,
+        )
         identity = identity_check(similarity, self._cfg.identity_hard_min, self._cfg.identity_good)
         return [present, framing, identity]

@@ -28,6 +28,7 @@ from mvdirector import assemble as assemble_mod
 from mvdirector import calibrate as calibrate_mod
 from mvdirector import media, mix_assemble
 from mvdirector import report as report_mod
+from mvdirector import setup as setup_mod
 from mvdirector import tuning as tuning_mod
 from mvdirector.audio.analysis import analyze_project
 from mvdirector.audio.broadcast_qa import BroadcastAudioReport, analyze_broadcast_audio
@@ -72,11 +73,13 @@ __all__ = [
     "BriefResult",
     "BroadcastAudioReport",
     "CleanupPlan",
+    "EnvironmentReport",
     "GenerateResult",
     "LLMCheckOutcome",
     "Observer",
     "PrepareResult",
     "ProjectRef",
+    "SetupOptions",
     "TuneResult",
     "ValidationCheck",
     # stages
@@ -96,6 +99,7 @@ __all__ = [
     "generate_reference_candidates",
     "generate_reference_videos",
     "init_project",
+    "inspect_environment",
     "load_status",
     "lock_plate",
     "lock_previz",
@@ -108,6 +112,7 @@ __all__ = [
     "qc_report",
     "refine_previz",
     "reject",
+    "setup_project",
     "status_counts",
     "tune",
     "upscale",
@@ -215,6 +220,32 @@ def init_project(directory: Path, *, mode: ProjectMode = ProjectMode.STANDARD) -
         tracklist_file.write_text(
             json.dumps(_STARTER_MIX_TRACKLIST, indent=2) + "\n", encoding="utf-8"
         )
+    return directory
+
+
+EnvironmentReport = setup_mod.EnvironmentReport
+SetupOptions = setup_mod.SetupOptions
+
+
+def inspect_environment(
+    *,
+    comfy_url: str | None = None,
+    ollama_url: str | None = None,
+) -> EnvironmentReport:
+    """Inspect local tools, Python extras, Ollama, and ComfyUI readiness."""
+    return setup_mod.inspect_environment(comfy_url=comfy_url, ollama_url=ollama_url)
+
+
+def setup_project(
+    directory: Path,
+    options: SetupOptions,
+    *,
+    mode: ProjectMode = ProjectMode.STANDARD,
+) -> Path:
+    """Initialize ``directory`` if needed and apply ``options`` to its ``project.yaml``."""
+    if not (directory / CONFIG_FILENAME).exists():
+        init_project(directory, mode=options.mode or mode)
+    setup_mod.apply_setup_config(directory, options)
     return directory
 
 

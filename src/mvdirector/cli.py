@@ -16,7 +16,8 @@ from pathlib import Path
 import typer
 
 from mvdirector import api, mix_assemble
-from mvdirector.config import ReviewMode
+from mvdirector import setup as setup_mod
+from mvdirector.config import CONFIG_FILENAME, ReviewMode, load_config
 from mvdirector.errors import MVDError
 from mvdirector.generation.runner import RunEvent
 from mvdirector.models import AssetKind, Character, Manifest, ProjectMode, VideoStyle
@@ -129,6 +130,254 @@ def init(
         else "add your audio to inputs/, then read workflows/README.md."
     )
     typer.echo(f"Created {mode.value} project in {directory}. Next: {next_hint}")
+
+
+_VALID_SETUP_PROVIDERS = ("ollama", "openai_compatible", "anthropic", "openai", "gemini", "none")
+_CLOUD_KEY_HINTS = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+}
+
+
+def _default_project_title(directory: Path) -> str:
+    cfg_path = directory / CONFIG_FILENAME
+    if cfg_path.is_file():
+        try:
+            return load_config(cfg_path).title
+        except MVDError:
+            pass
+    name = directory.resolve().name
+    cleaned = name.replace("-", " ").replace("_", " ").strip()
+    return cleaned.title() if cleaned and cleaned != "." else "My Song"
+
+
+@app.command()
+def setup(
+    directory: Path = typer.Argument(
+        Path("."), help="Project folder to create or configure."
+    ),
+    mode: ProjectMode = typer.Option(
+        ProjectMode.STANDARD,
+        "--mode",
+        help="Pipeline mode when creating a new project: 'standard' or 'mix'.",
+    ),
+    title: str | None = typer.Option(None, "--title", help="Project title."),
+    comfy_url: str | None = typer.Option(
+        None, "--comfy-url", help="ComfyUI server URL (default: COMFY_URL or http://127.0.0.1:8188)."
+    ),
+    ollama_url: str | None = typer.Option(
+        None,
+        "--ollama-url",
+        help="Ollama server URL to probe (default: MVD_LLM_URL or http://127.0.0.1:11434).",
+    ),
+    llm_provider: str | None = typer.Option(
+        None,
+        "--llm-provider",
+        help="LLM provider: ollama, openai_compatible, anthropic, openai, gemini, or none.",
+    ),
+    llm_model: str | None = typer.Option(
+        None, "--llm-model", help="LLM model name (e.g. gemma3:12b)."
+    ),
+    llm_base_url: str | None = typer.Option(
+        None, "--llm-base-url", help="Custom LLM base URL (required for openai_compatible)."
+    ),
+    video_preset: str | None = typer.Option(
+        None,
+        "--video-preset",
+        help="Video model family preset: ltx, wan, wan-i2v, or custom.",
+    ),
+    non_interactive: bool = typer.Option(
+        False,
+        "--non-interactive",
+        help="Apply detected defaults and flags without prompting.",
+    ),
+    check_only: bool = typer.Option(
+        False,
+        "--check-only",
+        help="Only inspect local tools and services, without creating or editing a project.",
+    ),
+) -> None:
+    """Inspect local prerequisites and interactively configure a project."""
+    report = api.inspect_environment(comfy_url=comfy_url, ollama_url=ollama_url)
+    typer.echo(setup_mod.render_environment_report(report))
+
+    if check_only:
+        if not report.tools_ok or not report.comfy.reachable or not report.ollama.reachable:
+            raise typer.Exit(code=1)
+        return
+
+    typer.echo("")
+    is_new = not (directory / CONFIG_FILENAME).is_file()
+    if (
+        is_new
+        and not non_interactive
+        and not typer.confirm(
+            f"Create a new {mode.value} project in '{directory}'?", default=True
+        )
+    ):
+        typer.echo("Cancelled.")
+        raise typer.Exit(code=0)
+
+    chosen_title = title or _default_project_title(directory)
+    chosen_comfy = comfy_url or report.comfy.url
+    chosen_provider = (llm_provider or setup_mod.DEFAULT_LLM_PROVIDER).strip().lower()
+    if chosen_provider not in _VALID_SETUP_PROVIDERS:
+        valid = ", ".join(_VALID_SETUP_PROVIDERS)
+        raise _fail(
+            MVDError(f"Unsupported --llm-provider {chosen_provider!r}. Choose from: {valid}")
+        )
+
+    chosen_preset = (video_preset or ("custom" if not is_new else "ltx")).strip().lower()
+    if chosen_preset not in setup_mod.VIDEO_PRESETS:
+        valid = ", ".join(setup_mod.VIDEO_PRESETS)
+        raise _fail(
+            MVDError(f"Unsupported --video-preset {chosen_preset!r}. Choose from: {valid}")
+        )
+
+    if not non_interactive:
+        chosen_title = typer.prompt("Project title", default=chosen_title).strip()
+        chosen_comfy = typer.prompt("ComfyUI URL", default=chosen_comfy).strip()
+
+        providers_label = "/".join(_VALID_SETUP_PROVIDERS)
+        while True:
+            raw_provider = (
+                typer.prompt(f"LLM provider ({providers_label})", default=chosen_provider)
+                .strip()
+                .lower()
+            )
+            if raw_provider in _VALID_SETUP_PROVIDERS:
+                chosen_provider = raw_provider
+                break
+            _yellow(f"Choose one of: {', '.join(_VALID_SETUP_PROVIDERS)}")
+
+    chosen_llm_enabled = chosen_provider != "none"
+    chosen_model: str | None = llm_model
+    chosen_llm_base_url: str | None = llm_base_url
+    chosen_vision: bool | None = None
+
+    if chosen_llm_enabled:
+        if chosen_provider == "ollama":
+            default_model = chosen_model or setup_mod.pick_default_ollama_model(
+                report.ollama.models
+            )
+            if not non_interactive:
+                if report.ollama.models:
+                    typer.echo(f"  Installed Ollama models: {', '.join(report.ollama.models[:8])}")
+                chosen_model = typer.prompt("Ollama model", default=default_model).strip()
+            else:
+                chosen_model = default_model
+            if chosen_llm_base_url is None:
+                chosen_llm_base_url = ollama_url if ollama_url else ""
+        elif chosen_provider == "openai_compatible":
+            default_base = chosen_llm_base_url or "http://127.0.0.1:1234/v1"
+            if not non_interactive:
+                chosen_llm_base_url = typer.prompt(
+                    "OpenAI-compatible base URL", default=default_base
+                ).strip()
+                chosen_model = typer.prompt(
+                    "Model name", default=chosen_model or "local-model"
+                ).strip()
+            else:
+                chosen_llm_base_url = default_base
+                chosen_model = chosen_model or "local-model"
+        else:
+            if not non_interactive:
+                chosen_model = typer.prompt(
+                    f"{chosen_provider} model name",
+                    default=chosen_model or "",
+                ).strip()
+            elif not chosen_model:
+                raise _fail(
+                    MVDError(
+                        "--llm-model is required with --non-interactive when "
+                        f"--llm-provider={chosen_provider}."
+                    )
+                )
+    else:
+        chosen_provider = setup_mod.DEFAULT_LLM_PROVIDER
+        chosen_model = None
+        chosen_vision = False
+
+    if not non_interactive:
+        typer.echo("Video model family presets:")
+        for key, preset in setup_mod.VIDEO_PRESETS.items():
+            typer.echo(f"  {key:<8} {preset.label}")
+        preset_keys = "/".join(setup_mod.VIDEO_PRESETS)
+        while True:
+            raw_preset = (
+                typer.prompt(f"Video preset ({preset_keys})", default=chosen_preset)
+                .strip()
+                .lower()
+            )
+            if raw_preset in setup_mod.VIDEO_PRESETS:
+                chosen_preset = raw_preset
+                break
+            _yellow(f"Choose one of: {', '.join(setup_mod.VIDEO_PRESETS)}")
+
+    qc_missing_policy: str | None = None
+    if (
+        not report.extra_installed("qc")
+        and not non_interactive
+        and typer.confirm(
+            "MediaPipe (`qc` extra) is not installed. "
+            "Set qc.on_missing_dependency to 'skip' for now?",
+            default=False,
+        )
+    ):
+        qc_missing_policy = "skip"
+
+    options = api.SetupOptions(
+        title=chosen_title,
+        mode=mode if is_new else None,
+        comfy_url=chosen_comfy,
+        llm_enabled=chosen_llm_enabled,
+        llm_provider=chosen_provider,
+        llm_model=chosen_model,
+        llm_base_url=chosen_llm_base_url,
+        qc_on_missing_dependency=qc_missing_policy,
+        qc_vision_enabled=chosen_vision,
+        video_preset=chosen_preset,
+    )
+
+    try:
+        api.setup_project(directory, options, mode=mode)
+    except MVDError as exc:
+        raise _fail(exc) from exc
+
+    action_word = "Created and configured" if is_new else "Updated"
+    typer.secho(f"\n{action_word} {directory / CONFIG_FILENAME}", fg=typer.colors.GREEN)
+
+    preset_obj = setup_mod.VIDEO_PRESETS[chosen_preset]
+    if preset_obj.workflow_note:
+        _yellow(f"Note ({chosen_preset}): {preset_obj.workflow_note}")
+
+    if chosen_llm_enabled and chosen_provider in _CLOUD_KEY_HINTS:
+        env_var = _CLOUD_KEY_HINTS[chosen_provider]
+        if not os.environ.get(env_var):
+            _yellow(f"Note: export {env_var}=<your-key> before running `mvd llm-check`.")
+
+    if (
+        chosen_llm_enabled
+        and chosen_provider == "ollama"
+        and chosen_model
+        and report.ollama.reachable
+        and chosen_model not in report.ollama.models
+    ):
+        _yellow(
+            f"Note: '{chosen_model}' was not found in Ollama. Run: ollama pull {chosen_model}"
+        )
+
+    typer.echo("\nNext steps:")
+    typer.echo(f"  1. cd {directory}")
+    if mode is ProjectMode.MIX and is_new:
+        typer.echo("  2. Add inputs/mix.wav and edit inputs/tracklist.json")
+    else:
+        typer.echo("  2. Add audio to inputs/ (or run `mvd prepare /path/to/song.mp3`)")
+    typer.echo(
+        "  3. Export your ComfyUI workflows (.api.json) into workflows/ (see workflows/README.md)"
+    )
+    typer.echo("  4. Run `mvd validate` and `mvd llm-check` before `mvd analyze`")
 
 
 @app.command()

@@ -48,6 +48,8 @@ Everything revolves around one file, `manifest.json`. Each stage reads it, does 
 
 ## Quick start
 
+> Running everything locally for the first time? Follow the step-by-step [Local Quickstart Guide](docs/local-quickstart.md) or run `mvd setup` to inspect your environment and configure a project interactively.
+
 ```bash
 brew install ffmpeg
 python -m venv .venv && source .venv/bin/activate
@@ -55,7 +57,7 @@ pip install -c constraints.txt -e ".[qc,align,ui,dev]"      # add "anthropic" to
 ollama pull gemma3:12b                                      # default local LLM, see docs/setup.md for cloud providers
 export COMFY_URL=http://127.0.0.1:8188                      # or your remote ComfyUI HTTPS URL
 
-mvd init projects/my-song                    # or `mvd init --mode mix projects/my-mix` for 30-90+ min continuous mixes
+mvd setup projects/my-song                   # or `mvd init projects/my-song` (add `--mode mix` for 30-90+ min mixes)
 cd projects/my-song
 ```
 
@@ -89,6 +91,7 @@ mvd assemble                                              # output/<title>.mp4
 
 ## Documentation
 
+- [Local Quickstart Guide](docs/local-quickstart.md) — Step-by-step walkthrough for running everything locally (Apple Silicon Mac, Linux/Windows NVIDIA GPU, `mvd setup`, workflow exports, and your first 2-shot `--draft` render).
 - [Installation, Docker & Language Models](docs/setup.md) — Python extras, commercial licensing (`mediapipe` vs `insightface`), Docker Compose profiles & all-in-one GPU image, Apple Silicon setup, and configuring/testing LLM providers (`anthropic`, `openai`, `gemini`, `ollama`, `openai_compatible`).
 - [ComfyUI Workflows & Model Bindings](docs/workflows.md) — Mapping `.api.json` + `.bindings.json`, `reference_notation` (`prose` vs `tags`), `audio_video` black-screen wrapper, model-family `video:` settings table, paid cloud API nodes, and `${ENV}` allowlist.
 - [Pipeline, Assets, Quality Checks & Review](docs/pipeline-and-qc.md) — Project layout, `mvd prepare`, `mvd brief`, track auto-tuning (`mvd tune`), visual bible & deterministic rules, reference sheets & turnaround videos, derived/embedded set plates & hero props, 3D blocking previz, `--draft` & `mvd upscale`, `allow_cuts` montage, QC gates, retry ladder, calibration, `light`/`strict` review, and Long-Form Mix Mode (`mode: mix`).

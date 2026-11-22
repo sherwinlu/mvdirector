@@ -162,8 +162,8 @@ def _find_breakdown_candidate(
 def _shift_cue(value: float | None, offset: float, duration: float) -> float | None:
     if value is None or not math.isfinite(value):
         return None
-    clamped = max(0.0, min(duration, value))
-    return round(offset + clamped, 3)
+    shifted = offset + max(0.0, min(duration, value))
+    return round(shifted, 3) if math.isfinite(shifted) else None
 
 
 def detect_audio_cues(

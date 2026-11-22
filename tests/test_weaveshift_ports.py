@@ -260,6 +260,28 @@ def test_csv_without_timeline_start_raises_actionable_error(tmp_path: Path) -> N
     with pytest.raises(ConfigError, match="--timeline"):
         load_tracklist(csv_path)
 
+    overflow_csv = tmp_path / "overflow.csv"
+    overflow_csv.write_text("title,final_start_sec,main_peak_source_sec\nA,1e308,1e308\n")
+    with pytest.raises(ConfigError, match="Overflow"):
+        load_tracklist(overflow_csv)
+
+    giant_csv = tmp_path / "giant.csv"
+    giant_csv.write_text("title,final_start_sec\n" + ("A" * 200_000) + ",0.0\n")
+    with pytest.raises(ConfigError, match="Could not parse CSV tracklist"):
+        load_tracklist(giant_csv)
+
+    bad_entry = tmp_path / "non_dict.json"
+    bad_entry.write_text(
+        json.dumps(
+            {
+                "tracks": [123, {"title": "B"}],
+                "transitions": [{"mix_transition_start_sec": 10.0}],
+            }
+        )
+    )
+    with pytest.raises(ConfigError, match="must be an object/mapping"):
+        load_tracklist(bad_entry)
+
 
 # --------------------------------------------------------------------------- DSP ports
 

@@ -300,27 +300,23 @@ def _normalize_weaveshift_setlist_report(raw: dict[str, Any]) -> dict[str, Any] 
             if total_duration is not None and total_duration > 0.0:
                 start = min(start, total_duration)
 
-        if isinstance(item, dict):
-            fallback_title = _stem_from_path_str(item.get("path"))
-            raw_title = item.get("title")
-            if raw_title is not None and not isinstance(raw_title, str):
-                raise ValueError(f"Track #{idx + 1} title must be a string.")
-            title = (raw_title or "").strip() or fallback_title or f"Track {idx + 1:02d}"
-            artist_val = item.get("artist")
-            if artist_val is not None and not isinstance(artist_val, str):
-                raise ValueError(f"Track #{idx + 1} artist must be a string.")
-            artist = (artist_val or "").strip() or None
-            bpm_raw = _finite_float(item.get("bpm"))
-            bpm = round(bpm_raw, 2) if bpm_raw is not None and 20.0 < bpm_raw < 300.0 else None
-            key_val = item.get("key")
-            if key_val is not None and not isinstance(key_val, str):
-                raise ValueError(f"Track #{idx + 1} key must be a string.")
-            key = (key_val or "").strip() or None
-        else:
-            title = f"Track {idx + 1:02d}"
-            artist = None
-            bpm = None
-            key = None
+        if not isinstance(item, dict):
+            raise ValueError(f"Track #{idx + 1} in WeaveShift report must be an object/mapping.")
+        fallback_title = _stem_from_path_str(item.get("path"))
+        raw_title = item.get("title")
+        if raw_title is not None and not isinstance(raw_title, str):
+            raise ValueError(f"Track #{idx + 1} title must be a string.")
+        title = (raw_title or "").strip() or fallback_title or f"Track {idx + 1:02d}"
+        artist_val = item.get("artist")
+        if artist_val is not None and not isinstance(artist_val, str):
+            raise ValueError(f"Track #{idx + 1} artist must be a string.")
+        artist = (artist_val or "").strip() or None
+        bpm_raw = _finite_float(item.get("bpm"))
+        bpm = round(bpm_raw, 2) if bpm_raw is not None and 20.0 < bpm_raw < 300.0 else None
+        key_val = item.get("key")
+        if key_val is not None and not isinstance(key_val, str):
+            raise ValueError(f"Track #{idx + 1} key must be a string.")
+        key = (key_val or "").strip() or None
 
         entry: dict[str, Any] = {"start": round(start, 3), "title": title}
         if artist:
@@ -564,7 +560,10 @@ def _parse_csv_cues(row: dict[str, str], track_start: float) -> AudioCues | None
             continue
         source_raw = _csv_first(row, (f"{cue}_source_sec", f"{cue}_source_timestamp"))
         if source_raw:
-            found[cue] = round(track_start + parse_timestamp(source_raw), 3)
+            shifted = track_start + parse_timestamp(source_raw)
+            if not math.isfinite(shifted):
+                raise ConfigError(f"Overflow computing {cue} timestamp from {source_raw!r}.")
+            found[cue] = round(shifted, 3)
             continue
         bare_raw = _csv_first(row, (cue,))
         found[cue] = parse_timestamp(bare_raw) if bare_raw else None
@@ -586,12 +585,16 @@ def _parse_csv_cues(row: dict[str, str], track_start: float) -> AudioCues | None
 
 def _parse_csv_tracklist(text: str) -> TracklistSpec:
     """Parse ``weaveshift_cues.csv`` or any CSV tracklist with timestamp columns."""
-    reader = csv.DictReader(io.StringIO(text))
-    if not reader.fieldnames:
-        raise ConfigError("CSV tracklist is empty or missing a header row.")
+    try:
+        reader = csv.DictReader(io.StringIO(text))
+        if not reader.fieldnames:
+            raise ConfigError("CSV tracklist is empty or missing a header row.")
+        raw_rows = list(enumerate(reader, start=2))
+    except csv.Error as exc:
+        raise ConfigError(f"Could not parse CSV tracklist: {exc}") from exc
 
     tracks: list[dict[str, Any]] = []
-    for row_no, raw_row in enumerate(reader, start=2):
+    for row_no, raw_row in raw_rows:
         row = {
             k.strip().lower(): _unescape_csv_cell(v)
             for k, v in raw_row.items()

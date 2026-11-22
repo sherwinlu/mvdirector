@@ -17,7 +17,7 @@ inputs:
   lyrics: inputs/lyrics.txt
   style: inputs/style.md
   word_timestamps: null          # optional JSON [{word, start, end}], skips transcription
-  tracklist: null                # optional cue sheet / WeaveShift tracklist (.json, .yaml, .cue, .txt) for mode: mix
+  tracklist: null                # optional cue sheet / WeaveShift tracklist (.json, .yaml, .cue, .txt, .csv) for mode: mix
 
 prepare:
   stem_model: htdemucs           # Demucs model for `mvd prepare` stem separation

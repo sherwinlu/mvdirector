@@ -22,6 +22,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mvdirector import tuning as tuning_mod
+from mvdirector.audio.cues import format_cues_summary
 from mvdirector.audio.lyrics import (
     is_hook_section,
     is_syllabic_char,
@@ -406,6 +407,9 @@ def _write_bible(
             )
         if analysis.stems and analysis.stems.summary:
             parts.append(f"ARRANGEMENT & INSTRUMENTATION:\n{analysis.stems.summary}")
+        cue_summary = format_cues_summary(analysis.cues)
+        if cue_summary:
+            parts.append(f"STRUCTURAL CUES:\n{cue_summary}")
     parts.append(f"SONG SECTIONS, IN ORDER:\n{section_list}")
     parts.append(f"LYRICS:\n{lyrics_text}")
     if video_style is VideoStyle.VISUAL:

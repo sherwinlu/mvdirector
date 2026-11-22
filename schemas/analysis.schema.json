@@ -82,6 +82,18 @@
           "title": "Bpm",
           "type": "number"
         },
+        "key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Key"
+        },
         "downbeat_offset": {
           "default": 0.0,
           "minimum": 0.0,
@@ -139,6 +151,18 @@
           ],
           "default": null,
           "title": "Lyrics"
+        },
+        "cues": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AudioCues"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Structural energy landmarks (lift, peaks, breakdown) within this chapter."
         }
       },
       "required": [
@@ -150,6 +174,81 @@
         "bpm"
       ],
       "title": "AnalyzedChapter",
+      "type": "object"
+    },
+    "AudioCues": {
+      "additionalProperties": false,
+      "description": "Structural energy landmarks detected from audio (no lyrics required).\n\nCredits & Attribution:\n    Composite energy/onset/brightness landmark detection ported from\n    ``sherwinlu/weaveshift`` (``weaveshift/cues.py``).",
+      "properties": {
+        "first_lift": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "First sustained energy lift above intro baseline, in seconds.",
+          "title": "First Lift"
+        },
+        "main_peak": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Primary energy/onset/brightness peak (drop or main chorus), in seconds.",
+          "title": "Main Peak"
+        },
+        "second_peak": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Secondary structural peak separated from main_peak, in seconds.",
+          "title": "Second Peak"
+        },
+        "breakdown": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Lowest-energy mid-track valley/breakdown candidate, in seconds.",
+          "title": "Breakdown"
+        },
+        "confidence": {
+          "default": "low",
+          "description": "Peak prominence confidence ('low', 'medium', or 'high').",
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Confidence",
+          "type": "string"
+        }
+      },
+      "title": "AudioCues",
       "type": "object"
     },
     "BroadcastAudioQA": {
@@ -272,6 +371,19 @@
           "default": null,
           "description": "Estimated harmonic mode ('major' or 'minor'), or null if unclear.",
           "title": "Mode"
+        },
+        "camelot": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Camelot wheel key notation (e.g. '8A', '8B'), or null if unclear.",
+          "title": "Camelot"
         },
         "brightness": {
           "default": "balanced",
@@ -733,6 +845,18 @@
       ],
       "default": null,
       "description": "Acoustic musical qualities (key, mode, brightness, percussiveness, dynamics)."
+    },
+    "cues": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AudioCues"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Structural energy landmarks (first lift, peaks, breakdown) in seconds."
     },
     "stems": {
       "anyOf": [

@@ -79,7 +79,14 @@ class DemucsSeparator:
         self.model = model
         self.device = device
 
-    def _build_command(self, mix_path: Path, output_dir: Path, *, include_drums: bool) -> list[str]:
+    def _build_command(
+        self,
+        mix_path: Path,
+        output_dir: Path,
+        *,
+        include_drums: bool,
+        device_override: str | None = None,
+    ) -> list[str]:
         cmd = [
             sys.executable,
             "-m",
@@ -91,9 +98,10 @@ class DemucsSeparator:
         ]
         if not include_drums:
             cmd.extend(["--two-stems", "vocals"])
-        if self.device != "auto":
-            cmd.extend(["-d", self.device])
-        cmd.append(str(mix_path.resolve()))
+        effective_device = device_override if device_override is not None else self.device
+        if effective_device != "auto":
+            cmd.extend(["-d", effective_device])
+        cmd.extend(["--", str(mix_path.resolve())])
         return cmd
 
     def separate(
@@ -121,6 +129,26 @@ class DemucsSeparator:
             )
             log.debug("exec: %s", " ".join(cmd))
             result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            should_retry_cpu = result.returncode != 0 and (
+                self.device == "mps"
+                or (
+                    self.device == "auto"
+                    and any(tok in result.stderr.lower() for tok in ("mps", "metal"))
+                )
+            )
+            if should_retry_cpu:
+                log.warning(
+                    "Demucs failed on %s (exit %d); retrying on CPU.",
+                    self.device,
+                    result.returncode,
+                )
+                out_root = Path(tmp) / "cpu_retry"
+                out_root.mkdir(parents=True, exist_ok=True)
+                cpu_cmd = self._build_command(
+                    mix_path, out_root, include_drums=include_drums, device_override="cpu"
+                )
+                log.debug("exec: %s", " ".join(cpu_cmd))
+                result = subprocess.run(cpu_cmd, capture_output=True, text=True, check=False)
             if result.returncode != 0:
                 tail = "\n".join(result.stderr.strip().splitlines()[-10:])
                 raise MediaToolError(f"demucs failed (exit {result.returncode}):\n{tail}")

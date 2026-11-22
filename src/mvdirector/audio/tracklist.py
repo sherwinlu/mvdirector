@@ -11,21 +11,23 @@ segmentation when no cue file is supplied.
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import math
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from mvdirector.errors import ConfigError
-from mvdirector.models import AnalyzedChapter, MixChapter
+from mvdirector.models import AnalyzedChapter, AudioCues, MixChapter
 
-SUPPORTED_TRACKLIST_SUFFIXES = {".json", ".yaml", ".yml", ".cue", ".txt"}
+SUPPORTED_TRACKLIST_SUFFIXES = {".json", ".yaml", ".yml", ".cue", ".txt", ".csv"}
 
 _TIMECODE_RE = re.compile(r"^(?:(\d+):)?(\d{1,4}):(\d{2}(?:\.\d+)?)$")
 _CUE_INDEX_RE = re.compile(r"^INDEX\s+0?1\s+(\d+):(\d{2}):(\d{2})\s*$", flags=re.IGNORECASE)
@@ -132,6 +134,7 @@ class TrackEntryInput(BaseModel):
     theme_prompt: str | None = None
     clip_prompts: list[str] = Field(default_factory=list)
     lyrics: str | None = None
+    cues: AudioCues | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -213,6 +216,120 @@ class TrackEntryInput(BaseModel):
         return self
 
 
+_START_KEYS = (
+    "start",
+    "start_time",
+    "start_sec",
+    "start_seconds",
+    "timestamp",
+    "cue_in",
+    "mix_in",
+    "offset",
+)
+
+
+def _finite_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    return num if math.isfinite(num) else None
+
+
+def _normalize_weaveshift_setlist_report(raw: dict[str, Any]) -> dict[str, Any] | None:
+    """Detect and normalize a ``.weaveshift_setlist_report.json`` payload into a TracklistSpec dict.
+
+    Matches the timeline derivation in ``sherwinlu/weaveshift``
+    (``weaveshift/chapters.py:chapters_from_setlist_report``) without accessing any file paths
+    referenced inside the report.
+    """
+    raw_tracks = raw.get("tracks")
+    if not isinstance(raw_tracks, list) or not raw_tracks:
+        return None
+    raw_transitions = raw.get("transitions")
+    raw_zeros = raw.get("track_source_zero_in_mix_sec")
+    transitions: list[Any] = raw_transitions if isinstance(raw_transitions, list) else []
+    zeros: list[Any] = raw_zeros if isinstance(raw_zeros, list) else []
+    if not (isinstance(raw_transitions, list) or isinstance(raw_zeros, list)):
+        return None
+    # Regular tracklists already supply per-track start timestamps.
+    if any(
+        isinstance(item, dict) and any(item.get(k) is not None for k in _START_KEYS)
+        for item in raw_tracks
+    ):
+        return None
+
+    total_duration = _finite_float(raw.get("output_duration_sec"))
+
+    normalized: list[dict[str, Any]] = []
+    for idx, item in enumerate(raw_tracks):
+        if idx == 0:
+            start = 0.0
+        else:
+            start_opt: float | None = None
+            if idx - 1 < len(transitions) and isinstance(transitions[idx - 1], dict):
+                tr = transitions[idx - 1]
+                next_zero = _finite_float(tr.get("next_track_source_zero_in_mix_sec"))
+                b_cue = _finite_float(tr.get("source_b_cue_sec"))
+                if next_zero is not None and b_cue is not None:
+                    start_opt = next_zero + b_cue
+                else:
+                    start_opt = _finite_float(tr.get("mix_transition_start_sec"))
+            if start_opt is None and idx < len(zeros):
+                start_opt = _finite_float(zeros[idx])
+            if start_opt is None:
+                raise ValueError(
+                    f"WeaveShift setlist report is missing timeline start for track #{idx + 1}."
+                )
+            start = max(0.0, start_opt)
+            if total_duration is not None and total_duration > 0.0:
+                start = min(start, total_duration)
+
+        if isinstance(item, dict):
+            raw_path = item.get("path")
+            fallback_title = (
+                Path(raw_path.replace("\\", "/")).stem
+                if isinstance(raw_path, str) and raw_path.strip()
+                else ""
+            )
+            raw_title = item.get("title")
+            if raw_title is not None and not isinstance(raw_title, str):
+                raise ValueError(f"Track #{idx + 1} title must be a string.")
+            title = (raw_title or "").strip() or fallback_title or f"Track {idx + 1:02d}"
+            artist_val = item.get("artist")
+            artist = str(artist_val) if isinstance(artist_val, str) and artist_val.strip() else None
+            bpm_raw = _finite_float(item.get("bpm"))
+            bpm = round(bpm_raw, 2) if bpm_raw is not None and 20.0 < bpm_raw < 300.0 else None
+            key_val = item.get("key")
+            key = str(key_val) if isinstance(key_val, str) and key_val.strip() else None
+        else:
+            title = f"Track {idx + 1:02d}"
+            artist = None
+            bpm = None
+            key = None
+
+        entry: dict[str, Any] = {"start": round(start, 3), "title": title}
+        if artist:
+            entry["artist"] = artist
+        if bpm is not None:
+            entry["bpm"] = bpm
+        if key:
+            entry["key"] = key
+        normalized.append(entry)
+
+    out_file = raw.get("output_file")
+    doc_title = raw.get("title") or (
+        Path(out_file).stem if isinstance(out_file, str) and out_file.strip() else None
+    )
+    return {
+        "title": doc_title,
+        "source": "weaveshift_report",
+        "tracks": normalized,
+    }
+
+
 class TracklistSpec(BaseModel):
     """Parsed and validated tracklist document."""
 
@@ -230,6 +347,9 @@ class TracklistSpec(BaseModel):
             return {"tracks": raw}
         if not isinstance(raw, dict):
             raise ValueError("Tracklist must be a JSON/YAML object or array of track entries.")
+        ws_report = _normalize_weaveshift_setlist_report(raw)
+        if ws_report is not None:
+            return ws_report
         data = dict(raw)
         _pick_alias(data, "tracks", ("segments", "chapters", "cues", "setlist"))
         _pick_alias(data, "title", ("mix_title", "name"))
@@ -256,12 +376,14 @@ class ResolvedTrack:
     title: str
     artist: str | None = None
     bpm: float | None = None
+    key: str | None = None
     energy: float | None = None
     mood_tags: list[str] = field(default_factory=list)
     genre_tags: list[str] = field(default_factory=list)
     theme_prompt: str | None = None
     clip_prompts: list[str] = field(default_factory=list)
     lyrics: str | None = None
+    cues: AudioCues | None = None
 
 
 def _parse_cue_sheet(text: str) -> TracklistSpec:
@@ -403,8 +525,146 @@ def _parse_txt_tracklist(text: str) -> TracklistSpec:
         raise ConfigError(f"Invalid text tracklist:\n{exc}") from exc
 
 
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _unescape_csv_cell(value: str | None) -> str:
+    """Strip WeaveShift's leading-apostrophe formula guard while preserving normal apostrophes."""
+    if not value:
+        return ""
+    text = value.strip()
+    if len(text) >= 2 and text[0] == "'" and text[1] in _CSV_FORMULA_PREFIXES:
+        text = text[1:]
+    return text.strip()
+
+
+def _csv_first(row: dict[str, str], keys: Sequence[str]) -> str:
+    for key in keys:
+        val = row.get(key)
+        if val:
+            return val
+    return ""
+
+
+def _parse_csv_cues(row: dict[str, str], track_start: float) -> AudioCues | None:
+    found: dict[str, float | None] = {}
+    for cue in ("first_lift", "main_peak", "second_peak", "breakdown"):
+        final_raw = _csv_first(row, (f"{cue}_final_sec", f"{cue}_final_timestamp"))
+        if final_raw:
+            found[cue] = parse_timestamp(final_raw)
+            continue
+        source_raw = _csv_first(row, (f"{cue}_source_sec", f"{cue}_source_timestamp"))
+        if source_raw:
+            found[cue] = round(track_start + parse_timestamp(source_raw), 3)
+            continue
+        bare_raw = _csv_first(row, (cue,))
+        found[cue] = parse_timestamp(bare_raw) if bare_raw else None
+
+    if all(v is None for v in found.values()):
+        return None
+    conf_raw = row.get("confidence", "").lower()
+    confidence: Literal["low", "medium", "high"] = (
+        conf_raw if conf_raw in ("low", "medium", "high") else "low"  # type: ignore[assignment]
+    )
+    return AudioCues(
+        first_lift=found["first_lift"],
+        main_peak=found["main_peak"],
+        second_peak=found["second_peak"],
+        breakdown=found["breakdown"],
+        confidence=confidence,
+    )
+
+
+def _parse_csv_tracklist(text: str) -> TracklistSpec:
+    """Parse ``weaveshift_cues.csv`` or any CSV tracklist with timestamp columns."""
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        raise ConfigError("CSV tracklist is empty or missing a header row.")
+
+    tracks: list[dict[str, Any]] = []
+    for row_no, raw_row in enumerate(reader, start=2):
+        row = {
+            k.strip().lower(): _unescape_csv_cell(v)
+            for k, v in raw_row.items()
+            if k is not None and k.strip()
+        }
+        if not any(row.values()):
+            continue
+
+        start_raw = _csv_first(
+            row,
+            (
+                "final_start_sec",
+                "final_start_timestamp",
+                "track_source_zero_in_mix_sec",
+                "start_sec",
+                "start_timestamp",
+                "start",
+                "start_time",
+                "mix_start_sec",
+            ),
+        )
+        if not start_raw:
+            raise ConfigError(
+                f"CSV tracklist row {row_no} is missing a start timestamp "
+                "(e.g. final_start_sec / start_sec; for weaveshift-cues, re-run with --timeline)."
+            )
+        start = parse_timestamp(start_raw)
+
+        end_raw = _csv_first(row, ("end_sec", "end_timestamp", "end", "end_time"))
+        end = parse_timestamp(end_raw) if end_raw else None
+
+        path_raw = _csv_first(row, ("path", "file", "filepath", "audio_path"))
+        fallback_title = Path(path_raw).stem if path_raw else ""
+        title = (
+            _csv_first(row, ("title", "track", "name", "track_title"))
+            or fallback_title
+            or f"Track {len(tracks) + 1:02d}"
+        )
+        artist = _csv_first(row, ("artist", "performer")) or None
+
+        bpm: float | None = None
+        for bpm_col in ("bpm_manifest", "bpm", "tempo", "bpm_detected"):
+            bpm_raw = row.get(bpm_col, "")
+            if not bpm_raw:
+                continue
+            cand = _finite_float(bpm_raw)
+            if cand is not None and 20.0 < cand < 300.0:
+                bpm = round(cand, 2)
+                break
+
+        key = _csv_first(row, ("key", "camelot_key", "musical_key")) or None
+        mood = _csv_first(row, ("visual_mood", "mood", "mood_tags", "vibe"))
+        genre = _csv_first(row, ("genre", "genres", "genre_tags"))
+        cues = _parse_csv_cues(row, start)
+
+        entry: dict[str, Any] = {"start": start, "title": title}
+        if end is not None:
+            entry["end"] = end
+        if artist:
+            entry["artist"] = artist
+        if bpm is not None:
+            entry["bpm"] = bpm
+        if key:
+            entry["key"] = key
+        if mood:
+            entry["mood_tags"] = mood
+        if genre:
+            entry["genre_tags"] = genre
+        if cues is not None:
+            entry["cues"] = cues
+        tracks.append(entry)
+
+    if not tracks:
+        raise ConfigError("CSV tracklist contains no track rows.")
+    try:
+        return TracklistSpec.model_validate({"source": "csv", "tracks": tracks})
+    except ValidationError as exc:
+        raise ConfigError(f"Invalid CSV tracklist:\n{exc}") from exc
+
+
 def load_tracklist(path: Path) -> TracklistSpec:
-    """Load and validate a tracklist from ``.json``, ``.yaml``/``.yml``, ``.cue``, or ``.txt``."""
+    """Load and validate a tracklist (``.json``, ``.yaml``, ``.cue``, ``.txt``, or ``.csv``)."""
     if not path.is_file():
         raise ConfigError(f"Tracklist file not found: {path}")
     suffix = path.suffix.lower()
@@ -418,6 +678,8 @@ def load_tracklist(path: Path) -> TracklistSpec:
         return _parse_cue_sheet(text)
     if suffix == ".txt":
         return _parse_txt_tracklist(text)
+    if suffix == ".csv":
+        return _parse_csv_tracklist(text)
 
     try:
         raw = json.loads(text) if suffix == ".json" else yaml.safe_load(text)
@@ -535,12 +797,14 @@ def resolve_chapters(
                 title=item.title,
                 artist=item.artist or spec.artist,
                 bpm=item.bpm,
+                key=item.key,
                 energy=item.energy,
                 mood_tags=list(item.mood_tags),
                 genre_tags=list(item.genre_tags),
                 theme_prompt=item.theme_prompt,
                 clip_prompts=list(item.clip_prompts),
                 lyrics=item.lyrics,
+                cues=item.cues,
             )
         )
     return resolved

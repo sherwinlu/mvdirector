@@ -34,7 +34,12 @@ from mvdirector.comfy.workflow import (
     prune_switch_branches,
 )
 from mvdirector.config import ComfyConfig, ProjectConfig, VideoConfig
-from mvdirector.errors import ComfyJobError, ComfyResourceError
+from mvdirector.errors import (
+    ComfyJobError,
+    ComfyResourceError,
+    ConfigError,
+    MediaToolError,
+)
 from mvdirector.generation import previz as previz_gen
 from mvdirector.generation.runner import RunBudget, ShotRunner, load_templates
 from mvdirector.models import (
@@ -927,14 +932,15 @@ def test_qa_security_boundaries_cache_suffix_object_info_and_foley_nan(tmp_path:
     comfy.close()
 
     # Non-finite foley cue fields are ignored rather than emitting malformed FFmpeg expressions.
-    expr = foley.ducking_volume_expression(
+    gain = foley.ducking_gain(
+        np.linspace(0.0, 3.0, 50),
         [
             foley.DiegeticCue(
                 audio_path=tmp_path / "x.wav", start=float("nan"), end=2.0, duck_db=-6.0
             )
-        ]
+        ],
     )
-    assert expr == "1"
+    assert np.all(gain == 1.0)
 
 
 def test_qa_audit_regressions(tmp_path: Path):
@@ -1658,3 +1664,152 @@ def test_vram_floor_waits_for_async_free_and_is_checked_once_per_phase(
         comfy.free_memory()  # next phase
         comfy.run({}, None, tmp_path / "c.png")  # type: ignore[arg-type]
         assert checks == [1, 1]
+
+
+# ------------------------------------------------------- QA / stress / security regression tests
+
+
+def test_broadcast_qa_rejects_nan_audio_instead_of_reporting_silence(tmp_path: Path):
+    sr = 48000
+    tone = 0.3 * np.sin(2 * np.pi * 440 * np.arange(sr * 2) / sr)
+    tone[1000:1100] = np.nan
+    bad = tmp_path / "nan.wav"
+    sf.write(str(bad), tone.astype(np.float32), sr, subtype="FLOAT")
+    with pytest.raises(MediaToolError, match="NaN or infinite"):
+        broadcast_qa.analyze_broadcast_audio(bad)
+    with pytest.raises(MediaToolError, match="nan.wav"):
+        from mvdirector.audio.analysis import load_mono
+
+        load_mono(bad)
+
+    silent = broadcast_qa.BroadcastAudioReport(integrated_lufs=-70.0, true_peak_dbtp=-120.0)
+    assert silent.problems() == ["silent"] and silent.summary().endswith("(silent)")
+    clean = broadcast_qa.BroadcastAudioReport(integrated_lufs=-14.0, true_peak_dbtp=-1.0)
+    assert clean.problems() == [] and clean.summary().endswith("(clean)")
+
+
+def test_analyze_reports_nan_mix_as_a_clean_error(project: Project):
+    sr = 22050
+    mix = 0.3 * np.sin(2 * np.pi * 220 * np.arange(sr * 6) / sr)
+    mix[sr : sr + 40] = np.inf
+    sf.write(str(project.root / "inputs" / "mix.wav"), mix.astype(np.float32), sr, subtype="FLOAT")
+    with pytest.raises(MediaToolError, match="mix.wav"):
+        analyze_project(project)
+
+
+def test_transitions_assemble_pairwise_without_opening_every_clip(
+    project: Project, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    colors = ["red", "lime", "blue"]
+    shots = []
+    for i, color in enumerate(colors):
+        clip = project.root / "assets" / "videos" / f"s00{i + 1}_a01.mp4"
+        make_video(clip, duration=1.5, fps=24, width=64, height=36, color=color)
+        shots.append(
+            Shot(
+                id=f"s00{i + 1}",
+                index=i,
+                start=float(i),
+                end=float(i + 1),
+                type=ShotType.BROLL,
+                audio_slice=AudioSlice(path="a.wav", start=float(i), end=i + 1.25, head_handle=0.0),
+                num_frames=37,
+                video=AssetState(
+                    status=AssetStatus.PASSED,
+                    selected_attempt=1,
+                    attempts=[_clip(f"assets/videos/s00{i + 1}_a01.mp4")],
+                ),
+            )
+        )
+    cfg = project.config.model_copy(deep=True)
+    cfg.video.width, cfg.video.height, cfg.video.fps = 64, 36, 24
+    cfg.video.transition, cfg.video.transition_seconds = "blend", 0.25
+    proj = Project(project.root, cfg)
+    manifest = Manifest(title="Blend", duration=3.0, fps=24, shots=shots)
+
+    max_video_inputs = 0
+    real_run = media.run
+
+    def counting_run(cmd: list[str], **kwargs: Any) -> Any:
+        nonlocal max_video_inputs
+        inputs = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "-i"]
+        max_video_inputs = max(max_video_inputs, sum(1 for p in inputs if p.endswith(".mp4")))
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(media, "run", counting_run)
+    out = tmp_path / "blend.mp4"
+    assemble.assemble(proj, manifest, out, force=True)
+    # Memory no longer grows with the shot count: at most two clips are decoded at once.
+    assert max_video_inputs <= 2
+    frames = media.extract_frames(out, 16)
+    assert len(frames) == 72  # 3 shots x 24 frames, beat-locked
+    rgb = [tuple(float(c) for c in f.reshape(-1, 3).mean(axis=0)) for f in frames]
+    assert rgb[10][0] > 200 and rgb[30][1] > 200 and rgb[60][2] > 200  # bodies
+    assert rgb[26][0] > 40 and rgb[26][1] > 40  # mid-crossfade from red into green
+
+
+def test_ducking_scales_past_one_hundred_cues(tmp_path: Path):
+    sr = 22050
+    music = tmp_path / "music.wav"
+    sf.write(str(music), 0.4 * np.sin(2 * np.pi * 220 * np.arange(sr * 180) / sr), sr)
+    hush = tmp_path / "hush.wav"
+    sf.write(str(hush), np.zeros(sr), sr)
+    cues = [
+        foley.DiegeticCue(hush, start=i * 1.2, end=i * 1.2 + 1.0, duck_db=-12.0) for i in range(140)
+    ]
+    out = foley.build_ducked_audio_mix(music, cues, tmp_path / "ducked.wav")
+    mixed, out_sr = sf.read(str(out), dtype="float64")
+    mixed = mixed if mixed.ndim == 1 else mixed.mean(axis=1)
+
+    def rms(t0: float, t1: float) -> float:
+        seg = mixed[int(t0 * out_sr) : int(t1 * out_sr)]
+        return float(np.sqrt(np.mean(seg * seg)))
+
+    # Flat middle of cue 50 (60.0-61.0 s) is ~12 dB down from the untouched tail of the song.
+    assert rms(60.35, 60.65) < 0.4 * rms(170.0, 175.0)
+
+
+def test_leveled_foley_reads_only_the_used_span(tmp_path: Path):
+    sr = 22050
+    long_sfx = tmp_path / "long.wav"
+    sf.write(str(long_sfx), 0.2 * np.sin(2 * np.pi * 500 * np.arange(sr * 30) / sr), sr)
+    out = foley.write_leveled_foley(long_sfx, tmp_path / "lvl.wav", max_seconds=1.0)
+    assert sf.info(str(out)).duration == pytest.approx(1.0, abs=0.01)
+
+
+def test_render_cache_refuses_a_symlink_out_of_the_project(
+    project: Project, tmp_path: Path, sample_png: bytes
+):
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (project.root / ".comfy_cache").symlink_to(outside, target_is_directory=True)
+    cfg = project.config.model_copy(deep=True)
+    cfg.comfy.cache_enabled = True
+    proj = Project(project.root, cfg)
+    manifest = Manifest(title="Cache", duration=1.0, fps=24, shots=[])
+    with pytest.raises(ConfigError, match="escapes the project folder"):
+        ShotRunner(
+            proj,
+            manifest,
+            ComfyClient(proj.config.comfy, transport=FakeComfy(png=sample_png).transport()),
+            QualityGates(image=None, video=None, face_analyzer=None),  # type: ignore[arg-type]
+            RetryPolicy(proj.config.retry, proj.config.seed, llm=None),
+            {},
+            RunBudget(1),
+        )
+
+
+def test_ducking_ramps_are_click_free(tmp_path: Path):
+    sr = 44100
+    music = tmp_path / "sine.wav"
+    sf.write(str(music), 0.3 * np.sin(2 * np.pi * 220 * np.arange(sr * 6) / sr), sr)
+    hush = tmp_path / "hush.wav"
+    sf.write(str(hush), np.zeros(sr), sr)
+    cues = [foley.DiegeticCue(hush, start=1.0 + 2.5 * i, end=2.0 + 2.5 * i) for i in range(2)]
+    out = foley.build_ducked_audio_mix(music, cues, tmp_path / "ducked.wav")
+    mixed, _ = sf.read(str(out), dtype="float64")
+    mixed = mixed if mixed.ndim == 1 else mixed.mean(axis=1)
+    # A per-frame gain staircase (4096-sample WAV frames) jumped ~10x the sine's own step.
+    natural_step = 0.3 * 2 * np.pi * 220 / sr
+    assert float(np.max(np.abs(np.diff(mixed)))) < 1.5 * natural_step
+    assert broadcast_qa.analyze_broadcast_audio(out).splice_clicks == []

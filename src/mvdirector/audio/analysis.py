@@ -22,6 +22,7 @@ from mvdirector.audio import alignment_qa as alignment_qa_mod
 from mvdirector.audio import broadcast_qa as broadcast_qa_mod
 from mvdirector.audio import lyrics as lyrics_mod
 from mvdirector.audio import stem_pack as stem_pack_mod
+from mvdirector.errors import MediaToolError
 from mvdirector.models import (
     BOTH_VOICES,
     Analysis,
@@ -54,7 +55,16 @@ _MIN_KEY_CORRELATION = 0.25
 def load_mono(path: Path, sr: int = ANALYSIS_SR) -> np.ndarray:
     import librosa  # imported lazily: slow to import and unused by most commands
 
-    samples, _ = librosa.load(str(path), sr=sr, mono=True)
+    try:
+        samples, _ = librosa.load(str(path), sr=sr, mono=True)
+    except librosa.util.exceptions.ParameterError as exc:
+        raise MediaToolError(
+            f"{path.name} cannot be analyzed ({exc}); re-export it, e.g. as 24-bit PCM WAV."
+        ) from exc
+    if not np.all(np.isfinite(samples)):
+        raise MediaToolError(
+            f"{path.name} contains NaN or infinite samples; re-export it, e.g. as 24-bit PCM WAV."
+        )
     return samples
 
 
@@ -903,19 +913,8 @@ def analyze_project(project: Project) -> Analysis:
             true_peak_dbtp=bqa_report.true_peak_dbtp,
             splice_clicks=bqa_report.splice_clicks,
         )
-        if bqa_report.true_peak_dbtp > -0.5 or bqa_report.splice_clicks:
-            log.warning(
-                "Broadcast audio QA: %.1f LUFS, %.2f dBTP, %d splice click(s)",
-                bqa_report.integrated_lufs,
-                bqa_report.true_peak_dbtp,
-                len(bqa_report.splice_clicks),
-            )
-        else:
-            log.info(
-                "Broadcast audio QA: %.1f LUFS, %.2f dBTP (clean)",
-                bqa_report.integrated_lufs,
-                bqa_report.true_peak_dbtp,
-            )
+        level = logging.WARNING if bqa_report.problems() else logging.INFO
+        log.log(level, "Broadcast audio QA: %s", bqa_report.summary())
 
     analysis = Analysis(
         duration=round(duration, 3),

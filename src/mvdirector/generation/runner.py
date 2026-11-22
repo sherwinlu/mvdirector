@@ -142,7 +142,7 @@ class ShotRunner:
         self._warned: set[str] = set()
         self._analysis_beats: list[float] | None = None
         self._cache: ComfyRenderCache | None = (
-            ComfyRenderCache(project.root / ".comfy_cache")
+            ComfyRenderCache(project.path(".comfy_cache"))
             if project.config.comfy.cache_enabled
             else None
         )

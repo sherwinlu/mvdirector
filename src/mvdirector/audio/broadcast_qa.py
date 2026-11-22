@@ -22,6 +22,8 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+from mvdirector.errors import MediaToolError
+
 
 @dataclass(frozen=True)
 class BroadcastAudioReport:
@@ -30,6 +32,26 @@ class BroadcastAudioReport:
     integrated_lufs: float
     true_peak_dbtp: float
     splice_clicks: list[float] = field(default_factory=list)
+
+    def problems(self) -> list[str]:
+        """Human-readable reasons this audio needs attention (empty when it is clean)."""
+        found = []
+        if self.integrated_lufs <= _SILENCE_LUFS:
+            found.append("silent")
+        if self.true_peak_dbtp > _TRUE_PEAK_CEILING_DBTP:
+            found.append(f"true peak above {_TRUE_PEAK_CEILING_DBTP:.1f} dBTP")
+        if self.splice_clicks:
+            found.append(f"{len(self.splice_clicks)} splice click(s)")
+        return found
+
+    def summary(self) -> str:
+        """One log line: loudness, true peak, and the problems found (or 'clean')."""
+        detail = "; ".join(self.problems()) or "clean"
+        return f"{self.integrated_lufs:.1f} LUFS, {self.true_peak_dbtp:.2f} dBTP ({detail})"
+
+
+_SILENCE_LUFS = -70.0  # BS.1770 absolute gate: nothing louder was measured
+_TRUE_PEAK_CEILING_DBTP = -0.5
 
 
 def _biquad_stateful(
@@ -134,7 +156,7 @@ def _channel_weights(n_channels: int) -> np.ndarray:
 def integrated_lufs(samples: np.ndarray, sr: int) -> float:
     """Compute ITU-R BS.1770-4 gated integrated loudness in LUFS.
 
-    Returns ``-70.0`` for silent or ultra-short (<400 ms) signals.
+    Returns ``-70.0`` for silence. A signal shorter than one 400 ms block is measured ungated.
     """
     arr = np.asarray(samples, dtype=np.float64)
     if arr.ndim == 1:
@@ -292,12 +314,14 @@ def analyze_broadcast_audio(
     *,
     boundary_times: Sequence[float] | None = None,
     drum_onset_times: Sequence[float] = (),
-    chunk_seconds: float = 30.0,
+    chunk_seconds: float = 10.0,
 ) -> BroadcastAudioReport:
     """Measure LUFS, 4x True Peak, and splice clicks on an audio file in bounded-memory chunks.
 
-    Streaming keeps RAM usage ~25 MB even on multi-hour 48 kHz WAV/FLAC mixes while preserving
-    filter state and overlap across chunk boundaries for exact BS.1770-4 results.
+    Memory is bounded by ``chunk_seconds`` whatever the file's length (about 100 MB of working
+    buffers for 10 s of 48 kHz stereo), while filter state and overlaps carry across chunk
+    boundaries for exact BS.1770-4 results. Raises ``MediaToolError`` when the audio contains
+    NaN or infinite samples, which would otherwise read as silence.
     """
     try:
         return _analyze_broadcast_soundfile(
@@ -326,7 +350,7 @@ def _analyze_broadcast_soundfile(
     *,
     boundary_times: Sequence[float] | None = None,
     drum_onset_times: Sequence[float] = (),
-    chunk_seconds: float = 30.0,
+    chunk_seconds: float = 10.0,
 ) -> BroadcastAudioReport:
     with sf.SoundFile(str(audio_path)) as handle:
         sr = int(handle.samplerate)
@@ -370,6 +394,13 @@ def _analyze_broadcast_soundfile(
             chunk = handle.read(chunk_frames, dtype="float64", always_2d=True)
             if chunk.size == 0:
                 break
+            if not np.all(np.isfinite(chunk)):
+                # One NaN poisons the K-weighting filter state for the rest of the file and
+                # would report the whole mix as silent and clean.
+                raise MediaToolError(
+                    f"{audio_path.name} contains NaN or infinite samples (from about "
+                    f"{total_frames / sr:.1f}s); re-export it, e.g. as 24-bit PCM WAV."
+                )
             chunk_start_sample = total_frames
             total_frames += chunk.shape[0]
             short_sq_sum += np.sum(chunk * chunk, axis=0)

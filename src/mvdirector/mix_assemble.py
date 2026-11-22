@@ -925,21 +925,10 @@ def assemble_mix(
         bqa = broadcast_qa_mod.analyze_broadcast_audio(
             mix_path, boundary_times=chapter_boundaries or None
         )
-        if bqa.true_peak_dbtp > -0.5 or bqa.splice_clicks:
-            log.warning(
-                "Mix audio QA: %.1f LUFS, %.2f dBTP, %d splice click(s) near chapter joins",
-                bqa.integrated_lufs,
-                bqa.true_peak_dbtp,
-                len(bqa.splice_clicks),
-            )
-        else:
-            log.info(
-                "Mix audio QA: %.1f LUFS, %.2f dBTP (clean)",
-                bqa.integrated_lufs,
-                bqa.true_peak_dbtp,
-            )
+        level = logging.WARNING if bqa.problems() else logging.INFO
+        log.log(level, "Mix audio QA (clicks checked at chapter joins): %s", bqa.summary())
     except Exception as exc:  # noqa: BLE001
-        log.debug("Skipped mix broadcast audio QA on %s: %s", mix_path.name, exc)
+        log.warning("Skipped mix broadcast audio QA on %s: %s", mix_path.name, exc)
 
     log.info(
         "Wrote %s (%d chapters: %d rendered, %d cached)",

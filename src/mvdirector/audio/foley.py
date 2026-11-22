@@ -12,9 +12,10 @@ Credits & Attribution:
     - Active-RMS loudness leveling and onset hit re-timing inspired by
       ``thefullnacho/on-the-one`` (https://github.com/thefullnacho/on-the-one —
       ``on_the_one/foley.py``, ``on_the_one/foleymix.py``).
-    - Single-pass FFmpeg linear per-scene song ducking inspired by
-      ``tsondo/musicvision`` (https://github.com/tsondo/musicvision —
-      ``src/musicvision/utils/audio.py:build_mixed_audio``).
+    - Linear per-scene song ducking inspired by ``tsondo/musicvision``
+      (https://github.com/tsondo/musicvision —
+      ``src/musicvision/utils/audio.py:build_mixed_audio``), applied here as a sample-accurate
+      NumPy gain envelope before a single FFmpeg mix.
 """
 
 from __future__ import annotations
@@ -30,6 +31,8 @@ import numpy as np
 import soundfile as sf
 
 from mvdirector import media
+
+_DUCK_BLOCK_SECONDS = 10.0
 
 
 @dataclass(frozen=True)
@@ -179,38 +182,73 @@ def retime_foley_hits(
     return np.clip(out, -1.0, 1.0)
 
 
-def ducking_volume_expression(cues: Sequence[DiegeticCue]) -> str:
-    """Build a single-pass FFmpeg per-frame linear ducking ``volume`` expression."""
-    factors: list[str] = []
-    for cue in cues:
-        if (
-            not (
-                math.isfinite(cue.start)
-                and math.isfinite(cue.end)
-                and math.isfinite(cue.duck_db)
-                and math.isfinite(cue.fade_seconds)
-            )
-            or cue.end <= cue.start
-            or cue.start < 0.0
-            or cue.duck_db >= 0.0
-        ):
-            continue
-        safe_duck = max(-40.0, min(-0.1, cue.duck_db))
-        duck_gain = 10.0 ** (safe_duck / 20.0)
-        fade = max(0.01, min(cue.fade_seconds, (cue.end - cue.start) * 0.45))
-        s = cue.start
-        e = cue.end
-        s_in = s + fade
-        e_out = e - fade
-        expr = (
-            f"if(between(t,{s:.4f},{s_in:.4f}),"
-            f"1-(1-{duck_gain:.4f})*(t-{s:.4f})/{fade:.4f},"
-            f"if(between(t,{s_in:.4f},{e_out:.4f}),{duck_gain:.4f},"
-            f"if(between(t,{e_out:.4f},{e:.4f}),"
-            f"{duck_gain:.4f}+(1-{duck_gain:.4f})*(t-{e_out:.4f})/{fade:.4f},1)))"
+def _cue_duck_shape(cue: DiegeticCue) -> tuple[float, float, float, float] | None:
+    """``(start, end, fade, duck_gain)`` of the song duck under ``cue``, or None if it cannot."""
+    if (
+        not (
+            math.isfinite(cue.start)
+            and math.isfinite(cue.end)
+            and math.isfinite(cue.duck_db)
+            and math.isfinite(cue.fade_seconds)
         )
-        factors.append(f"({expr})")
-    return "*".join(factors) if factors else "1"
+        or cue.end <= cue.start
+        or cue.start < 0.0
+        or cue.duck_db >= 0.0
+    ):
+        return None
+    duck_gain = 10.0 ** (max(-40.0, min(-0.1, cue.duck_db)) / 20.0)
+    fade = max(0.01, min(cue.fade_seconds, (cue.end - cue.start) * 0.45))
+    return cue.start, cue.end, fade, duck_gain
+
+
+def ducking_gain(times: np.ndarray, cues: Sequence[DiegeticCue]) -> np.ndarray:
+    """Song gain at ascending ``times`` (seconds): 1 untouched, ramping linearly into each duck.
+
+    Overlapping cues multiply their ducks. Computed per sample, so fades have no gain steps.
+    """
+    gain = np.ones(times.shape, dtype=np.float64)
+    for cue in cues:
+        shape = _cue_duck_shape(cue)
+        if shape is None:
+            continue
+        start, end, fade, duck = shape
+        lo, hi = np.searchsorted(times, [start, end])
+        if hi <= lo:
+            continue
+        t = times[lo:hi]
+        factor = np.full(t.shape, duck)
+        ramp_in = t < start + fade
+        factor[ramp_in] = 1.0 - (1.0 - duck) * (t[ramp_in] - start) / fade
+        ramp_out = t > end - fade
+        factor[ramp_out] = duck + (1.0 - duck) * (t[ramp_out] - (end - fade)) / fade
+        gain[lo:hi] *= factor
+    return gain
+
+
+def _write_ducked_music(music_path: Path, cues: Sequence[DiegeticCue], dst: Path) -> Path:
+    """Stream ``music_path`` through :func:`ducking_gain` into a float WAV at ``dst``."""
+    try:
+        source = sf.SoundFile(str(music_path))
+    except sf.LibsndfileError:
+        decoded = media.transcode_to_wav(music_path, dst.with_name(f"{dst.stem}_src.wav"))
+        source = sf.SoundFile(str(decoded))
+    with (
+        source,
+        sf.SoundFile(
+            str(dst), "w", samplerate=source.samplerate, channels=source.channels, subtype="FLOAT"
+        ) as out,
+    ):
+        sr = source.samplerate
+        block = max(1, int(_DUCK_BLOCK_SECONDS * sr))
+        position = 0
+        while True:
+            samples = source.read(block, dtype="float64", always_2d=True)
+            if samples.size == 0:
+                break
+            times = (position + np.arange(samples.shape[0])) / sr
+            out.write(samples * ducking_gain(times, cues)[:, None])
+            position += samples.shape[0]
+    return dst
 
 
 def build_ducked_audio_mix(
@@ -238,14 +276,28 @@ def build_ducked_audio_mix(
     safe_limit = max(0.1, min(1.0, float(limiter_limit))) if math.isfinite(limiter_limit) else 0.98
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(music_path.resolve())]
-    for cue in valid_cues:
+    work = Path(tempfile.mkdtemp(prefix=".mvd_duck_", dir=output_path.parent))
+    try:
+        ducked = _write_ducked_music(music_path, valid_cues, work / "ducked.wav")
+        _mix_cues_over(ducked, valid_cues, output_path, safe_limit)
+    finally:
+        for leftover in work.iterdir():
+            leftover.unlink(missing_ok=True)
+        work.rmdir()
+    return output_path
+
+
+def _mix_cues_over(
+    ducked: Path, cues: Sequence[DiegeticCue], output_path: Path, limit: float
+) -> None:
+    """Mix faded, gained ``cues`` over the already-ducked song and true-peak limit the result."""
+    cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(ducked.resolve())]
+    for cue in cues:
         cmd.extend(["-i", str(cue.audio_path.resolve())])
 
-    vol_expr = ducking_volume_expression(valid_cues)
-    filters = [f"[0:a]volume='{vol_expr}':eval=frame[music]"]
-    mix_labels = ["[music]"]
-    for idx, cue in enumerate(valid_cues, start=1):
+    filters: list[str] = []
+    mix_labels = ["[0:a]"]
+    for idx, cue in enumerate(cues, start=1):
         delay_ms = max(0, int(round(cue.start * 1000.0)))
         dur = max(0.05, cue.end - cue.start)
         fade = max(0.01, min(cue.fade_seconds, dur * 0.45))
@@ -261,7 +313,7 @@ def build_ducked_audio_mix(
 
     filters.append(
         f"{''.join(mix_labels)}amix=inputs={len(mix_labels)}:duration=first:normalize=0,"
-        f"alimiter=limit={safe_limit:.3f}[out]"
+        f"alimiter=limit={limit:.3f}[out]"
     )
 
     fd, tmp_name = tempfile.mkstemp(prefix=".mvd_foley_", suffix=".wav", dir=output_path.parent)
@@ -284,28 +336,38 @@ def build_ducked_audio_mix(
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
-    return output_path
 
 
-def _read_audio(src: Path) -> tuple[np.ndarray, int]:
-    """Decode ``src`` to float64 ``(N, C)`` samples, via ffmpeg for formats libsndfile lacks."""
+def _read_audio(src: Path, max_seconds: float | None = None) -> tuple[np.ndarray, int]:
+    """Decode up to ``max_seconds`` of ``src`` to float64 ``(N, C)`` samples.
+
+    Falls back to ffmpeg for formats libsndfile cannot read. Bounding the read keeps a long or
+    oversized SFX file from being loaded whole when only a shot's length of it is used.
+    """
+
+    def _read(path: Path) -> tuple[np.ndarray, int]:
+        with sf.SoundFile(str(path)) as handle:
+            frames = -1 if max_seconds is None else int(math.ceil(max_seconds * handle.samplerate))
+            return handle.read(frames, dtype="float64", always_2d=True), int(handle.samplerate)
+
     try:
-        samples, sr = sf.read(str(src), dtype="float64", always_2d=True)
-        return samples, int(sr)
+        return _read(src)
     except sf.LibsndfileError:
         with tempfile.TemporaryDirectory(prefix="mvd_sfx_") as tmp:
             wav_path = media.transcode_to_wav(src, Path(tmp) / "sfx.wav")
-            samples, sr = sf.read(str(wav_path), dtype="float64", always_2d=True)
-            return samples, int(sr)
+            return _read(wav_path)
 
 
-def write_leveled_foley(src: Path, dst: Path, *, target_db: float = -26.0) -> Path:
+def write_leveled_foley(
+    src: Path, dst: Path, *, target_db: float = -26.0, max_seconds: float | None = None
+) -> Path:
     """Level ``src`` by active RMS and write it atomically to ``dst`` as 24-bit PCM WAV.
 
     Accepts any format ffmpeg can decode (MP3, Opus, AAC/M4A, ...), not only WAV/FLAC: the
     output is always PCM because compressed source subtypes are not valid inside a WAV file.
+    Only the first ``max_seconds`` are read, levelled and written when it is given.
     """
-    samples, sr = _read_audio(src)
+    samples, sr = _read_audio(src, max_seconds)
     leveled = level_active_rms(samples, sr, target_db=target_db)
     dst.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=".mvd_lvl_", suffix=".wav", dir=dst.parent)

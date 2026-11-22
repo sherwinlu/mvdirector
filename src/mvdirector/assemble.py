@@ -280,6 +280,75 @@ def _fit_active_pair(
     return np.asarray(prev_active), np.asarray(curr_active)
 
 
+def _transition_pieces(
+    clips: list[tuple[ClipPlan, Path, int]], work: Path, fps: int, transition: str
+) -> list[Path]:
+    """Body and crossfade pieces that concatenate into the frame-exact, beat-locked timeline.
+
+    Clip ``i`` was conformed with ``overlap_i`` spare tail frames. Its crossfade into clip
+    ``i + 1`` blends exactly those frames with the first ``overlap_i`` frames of the next clip,
+    which then continues from frame ``overlap_i``. Each crossfade is rendered from just its two
+    clips: one ffmpeg graph over every clip holds a decoder per shot open at once and needs
+    gigabytes of memory for a full-length video at 1080p.
+    """
+    tb = f"1/{fps}"
+    pieces: list[Path] = []
+    head_skip = 0  # frames of this clip already shown inside the previous crossfade
+    for idx, (plan, clip_path, overlap) in enumerate(clips):
+        if plan.frames > head_skip:
+            body = work / f"{clip_path.stem}_body.mp4"
+            media.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-v",
+                    "error",
+                    "-i",
+                    str(clip_path.resolve()),
+                    "-vf",
+                    f"trim=start_frame={head_skip}:end_frame={plan.frames},setpts=PTS-STARTPTS",
+                    "-frames:v",
+                    str(plan.frames - head_skip),
+                    *_ENCODE,
+                    str(body.resolve()),
+                ]
+            )
+            pieces.append(body)
+        head_skip = 0
+        if overlap > 0 and idx + 1 < len(clips):
+            blend = work / f"{clip_path.stem}_xfade.mp4"
+            tail_end = plan.frames + overlap
+            graph = (
+                f"[0:v]trim=start_frame={plan.frames}:end_frame={tail_end},"
+                f"setpts=PTS-STARTPTS,settb={tb}[a];"
+                f"[1:v]trim=start_frame=0:end_frame={overlap},setpts=PTS-STARTPTS,settb={tb}[b];"
+                f"[a][b]xfade=transition={transition}:duration={overlap / fps:.6f}:offset=0[v]"
+            )
+            media.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-v",
+                    "error",
+                    "-i",
+                    str(clip_path.resolve()),
+                    "-i",
+                    str(clips[idx + 1][1].resolve()),
+                    "-filter_complex",
+                    graph,
+                    "-map",
+                    "[v]",
+                    "-frames:v",
+                    str(overlap),
+                    *_ENCODE,
+                    str(blend.resolve()),
+                ]
+            )
+            pieces.append(blend)
+            head_skip = overlap
+    return pieces
+
+
 def assemble(
     project: Project,
     manifest: Manifest,
@@ -385,73 +454,29 @@ def assemble(
         silent = work / "picture.mp4"
         post_grade_vf = grade_vf if video_cfg.color_drift_correction else None
         has_any_xfade = use_xfade and len(clips) > 1 and any(ov > 0 for _, _, ov in clips[:-1])
-        if has_any_xfade and xfade_name is not None:
-            inputs_argv: list[str] = []
-            for _, clip_path, _ in clips:
-                inputs_argv.extend(["-i", str(clip_path.resolve())])
-            tb = f"1/{manifest.fps}"
-            filter_parts: list[str] = [
-                f"[{i}:v]fps={manifest.fps},settb={tb}[in{i}]" for i in range(len(clips))
+        pieces = (
+            _transition_pieces(clips, work, manifest.fps, xfade_name)
+            if has_any_xfade and xfade_name is not None
+            else [clip_path for _, clip_path, _ in clips]
+        )
+        entries = [f"file '{piece.name}'" for piece in pieces]
+        concat_list = work / "clips.txt"
+        concat_list.write_text("\n".join(entries) + "\n", encoding="utf-8")
+        concat_codec = ["-vf", post_grade_vf, *_ENCODE] if post_grade_vf else ["-c", "copy"]
+        media.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-v",
+                "error",
+                "-f",
+                "concat",
+                "-i",
+                str(concat_list.resolve()),
+                *concat_codec,
+                str(silent.resolve()),
             ]
-            prev_label = "in0"
-            cumulative_frames = clips[0][0].frames
-            for idx in range(1, len(clips)):
-                overlap = clips[idx - 1][2]
-                out_label = "vpre" if idx == len(clips) - 1 else f"xf{idx}"
-                if overlap > 0:
-                    dur_sec = overlap / manifest.fps
-                    offset_sec = cumulative_frames / manifest.fps
-                    filter_parts.append(
-                        f"[{prev_label}][in{idx}]xfade=transition={xfade_name}:"
-                        f"duration={dur_sec:.6f}:offset={offset_sec:.6f},settb={tb}[{out_label}]"
-                    )
-                else:
-                    filter_parts.append(
-                        f"[{prev_label}][in{idx}]concat=n=2:v=1:a=0,settb={tb}[{out_label}]"
-                    )
-                prev_label = out_label
-                cumulative_frames += clips[idx][0].frames
-            if post_grade_vf:
-                filter_parts.append(f"[vpre]{post_grade_vf}[vout]")
-                final_map = "[vout]"
-            else:
-                final_map = "[vpre]"
-            media.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-v",
-                    "error",
-                    *inputs_argv,
-                    "-filter_complex",
-                    ";".join(filter_parts),
-                    "-map",
-                    final_map,
-                    "-frames:v",
-                    str(sum(p.frames for p, _, _ in clips)),
-                    *_ENCODE,
-                    str(silent.resolve()),
-                ]
-            )
-        else:
-            entries = [f"file '{clip_path.name}'" for _, clip_path, _ in clips]
-            concat_list = work / "clips.txt"
-            concat_list.write_text("\n".join(entries) + "\n", encoding="utf-8")
-            concat_codec = ["-vf", post_grade_vf, *_ENCODE] if post_grade_vf else ["-c", "copy"]
-            media.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-v",
-                    "error",
-                    "-f",
-                    "concat",
-                    "-i",
-                    str(concat_list.resolve()),
-                    *concat_codec,
-                    str(silent.resolve()),
-                ]
-            )
+        )
         # Automatically level & duck diegetic SFX cues over the mix when any shot carries sfx_path.
         mux_audio = mix
         sfx_cues: list[foley_mod.DiegeticCue] = []
@@ -464,7 +489,10 @@ def assemble(
                 continue
             safe_sfx_id = require_safe_id(shot.id, "shot id")
             leveled_sfx = work / f"{safe_sfx_id}_sfx.wav"
-            foley_mod.write_leveled_foley(sfx_src, leveled_sfx)
+            # Only the shot's span of the SFX is played, so only that much is read and levelled.
+            foley_mod.write_leveled_foley(
+                sfx_src, leveled_sfx, max_seconds=max(0.05, shot.end - shot.start)
+            )
             sfx_cues.append(
                 foley_mod.DiegeticCue(
                     audio_path=leveled_sfx,
@@ -480,15 +508,10 @@ def assemble(
 
         try:
             bqa = broadcast_qa_mod.analyze_broadcast_audio(mux_audio)
-            if bqa.true_peak_dbtp > -0.5 or bqa.splice_clicks:
-                log.warning(
-                    "Final audio QA: %.1f LUFS, %.2f dBTP, %d splice click(s)",
-                    bqa.integrated_lufs,
-                    bqa.true_peak_dbtp,
-                    len(bqa.splice_clicks),
-                )
+            if bqa.problems():
+                log.warning("Final audio QA: %s", bqa.summary())
         except Exception as exc:  # noqa: BLE001
-            log.debug("Skipped broadcast audio QA on %s: %s", mux_audio.name, exc)
+            log.warning("Skipped broadcast audio QA on %s: %s", mux_audio.name, exc)
 
         mux_cmd = [
             "ffmpeg",

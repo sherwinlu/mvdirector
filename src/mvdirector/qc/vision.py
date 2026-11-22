@@ -67,6 +67,48 @@ DETAIL_BY_FRAMING = {
 }
 
 
+_BLIND_OBSERVER_SYSTEM = """You are a neutral visual observer describing {subject} for a
+downstream continuity auditor. You are NOT given any target specification. Report ONLY what is
+actually visible in {frames_word}—never guess or assume unseen details.
+
+Describe concretely:
+- people_count: integer count of visible people or human figures (0 if empty scene).
+- framing: observed shot distance (extreme_close_up, close_up, medium_close, medium, wide).
+- subjects: who is visible, their pose, facing direction, mouth state (open/singing vs closed),
+  hair, clothing/accessories, and anatomical proportions (hands, limbs, face, body scale).
+- setting: visible location, architecture, lighting sources, and mood.
+- props_and_objects: notable foreground/midground objects and their physical state (e.g. lit vs
+  unlit, intact vs broken, hands on a clock).
+- artifacts_or_text: any visible garbled text, subtitles, watermarks, warped faces/hands,
+  unnatural body compression, or morphing across frames (empty list if none)."""
+
+_BLIND_AUDITOR_SYSTEM = """You are a strict continuity auditor comparing neutral visual
+observations (produced by a blind observer who never saw the requirements) against a shot
+specification. You do NOT see the image; rely ONLY on the observed facts and the specification.
+
+Score from 0 to 1:
+- spec_match: whether observed framing, people count, setting, props, vocal delivery, and all
+  explicit exclusions ('Must NOT appear') satisfy the specification. If a forbidden element was
+  observed, or a required element clearly contradicted the observation, score <= 0.2.
+- artifact_free: whether observed anatomy, proportions, faces, hands, and absence of garbled
+  text/watermarks/morphing are clean.
+- character_match: whether observed appearance, hair, pinned details, and wardrobe match the
+  character specification (use null when the spec says no singer should be visible).
+
+List concrete contradictions in 'issues' (empty if none). In 'fix', give one affirmative prompt
+instruction avoiding the worst contradiction without repeating 'no <part>'."""
+
+
+class _BlindObservation(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    people_count: int = Field(default=0, ge=0)
+    framing: str = ""
+    subjects: str = ""
+    setting: str = ""
+    props_and_objects: str = ""
+    artifacts_or_text: list[str] = Field(default_factory=list)
+
+
 class VisionVerdict(BaseModel):
     model_config = ConfigDict(extra="ignore")
     spec_match: float = Field(ge=0.0, le=1.0)
@@ -80,8 +122,19 @@ MAX_UNAVAILABLE_IN_A_ROW = 3
 
 
 class VisionJudge:
-    def __init__(self, llm: LLMClient) -> None:
+    """Model-based visual judge supporting single-pass and two-pass Blind-Observer auditing.
+
+    Credits & Attribution:
+        Two-pass Blind-Observer / Split-Auditor verification (eliminating VLM confirmation bias
+        by decoupling neutral image observation from text-only spec auditing) inspired by
+        ``afj176/open-cinema-studio``
+        (https://github.com/afj176/open-cinema-studio —
+        ``custom_nodes/comfyui-open-cinema/director.py`` & ``app/graphs.py``).
+    """
+
+    def __init__(self, llm: LLMClient, *, blind_observer: bool = False) -> None:
         self._llm = llm
+        self._blind_observer = blind_observer
         self._disabled_reason: str | None = None
         self._unavailable_in_a_row = 0
 
@@ -123,6 +176,15 @@ class VisionJudge:
         extra_references: list[tuple[str, Path]] | None = None,
     ) -> VisionVerdict:
         is_video = kind is AssetKind.VIDEO
+        if self._blind_observer:
+            return self._judge_blind(
+                images,
+                shot,
+                manifest,
+                is_video=is_video,
+                reference_image=reference_image,
+                extra_references=extra_references,
+            )
         system = _SYSTEM.format(
             subject=(
                 f"{len(images)} frames sampled in order from one clip"
@@ -162,6 +224,69 @@ class VisionJudge:
             text_block(self.specification(shot, manifest)),
         ]
         verdict = self._llm.complete_json(system=system, content=content, schema=VisionVerdict)
+        self.record_success()
+        return verdict
+
+    def _judge_blind(
+        self,
+        images: list[Path | np.ndarray],
+        shot: Shot,
+        manifest: Manifest,
+        *,
+        is_video: bool,
+        reference_image: Path | None = None,
+        extra_references: list[tuple[str, Path]] | None = None,
+    ) -> VisionVerdict:
+        """Two-pass blind-observer / split-auditor VLM check eliminating confirmation bias."""
+        subject = (
+            f"{len(images)} frames sampled in order from one clip"
+            if is_video
+            else "one still image"
+        )
+        frames_word = "the frames" if is_video else "the image"
+        obs_system = _BLIND_OBSERVER_SYSTEM.format(subject=subject, frames_word=frames_word)
+        obs_content = []
+        if reference_image is not None and shot.type.shows_singer:
+            obs_content += [
+                text_block(
+                    "REFERENCE PORTRAIT (compare whether the person in the target image looks "
+                    "like the same individual and report similarities/differences neutrally):"
+                ),
+                image_block(reference_image),
+            ]
+        if extra_references:
+            for label, ref_path in extra_references:
+                if label.startswith("Prop:"):
+                    obs_content += [
+                        text_block(f"REFERENCE for {label}:"),
+                        image_block(ref_path),
+                    ]
+                elif shot.type.shows_singer:
+                    obs_content += [
+                        text_block(f"REFERENCE for additional character ({label}):"),
+                        image_block(ref_path),
+                    ]
+        obs_content += [
+            text_block("IMAGE TO OBSERVE:" if not is_video else "FRAMES TO OBSERVE, in order:"),
+            *(image_block(img) for img in images),
+        ]
+        observation = self._llm.complete_json(
+            system=obs_system, content=obs_content, schema=_BlindObservation
+        )
+        obs_summary = (
+            "BLIND OBSERVER REPORT\n"
+            f"People count: {observation.people_count}\n"
+            f"Framing: {observation.framing}\n"
+            f"Subjects: {observation.subjects}\n"
+            f"Setting: {observation.setting}\n"
+            f"Props & objects: {observation.props_and_objects}\n"
+            f"Artifacts/text: {', '.join(observation.artifacts_or_text) or 'none'}"
+        )
+        verdict = self._llm.complete_json(
+            system=_BLIND_AUDITOR_SYSTEM,
+            content=[text_block(obs_summary), text_block(self.specification(shot, manifest))],
+            schema=VisionVerdict,
+        )
         self.record_success()
         return verdict
 

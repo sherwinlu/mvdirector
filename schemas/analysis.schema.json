@@ -1,5 +1,43 @@
 {
   "$defs": {
+    "AlignmentWarning": {
+      "additionalProperties": false,
+      "description": "Pre-spend alignment anomaly surfaced during audio/lyric verification.\n\nInspired by ``JavaDerek/music-video-pipeline`` (``alignment_quality.py``, ``join_witness.py``).",
+      "properties": {
+        "kind": {
+          "enum": [
+            "unvoiced_lyric",
+            "high_consonant_bleed",
+            "unaligned_vocal_window",
+            "boundary_word_cut"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "start": {
+          "minimum": 0.0,
+          "title": "Start",
+          "type": "number"
+        },
+        "end": {
+          "minimum": 0.0,
+          "title": "End",
+          "type": "number"
+        },
+        "detail": {
+          "default": "",
+          "title": "Detail",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "start",
+        "end"
+      ],
+      "title": "AlignmentWarning",
+      "type": "object"
+    },
     "AnalyzedChapter": {
       "additionalProperties": false,
       "description": "Per-track or fixed-interval segment measured during long-form mix audio analysis.",
@@ -112,6 +150,33 @@
         "bpm"
       ],
       "title": "AnalyzedChapter",
+      "type": "object"
+    },
+    "BroadcastAudioQA": {
+      "additionalProperties": false,
+      "description": "Broadcast loudness (ITU-R BS.1770-4 LUFS), 4x True Peak, and splice-click diagnostics.",
+      "properties": {
+        "integrated_lufs": {
+          "title": "Integrated Lufs",
+          "type": "number"
+        },
+        "true_peak_dbtp": {
+          "title": "True Peak Dbtp",
+          "type": "number"
+        },
+        "splice_clicks": {
+          "items": {
+            "type": "number"
+          },
+          "title": "Splice Clicks",
+          "type": "array"
+        }
+      },
+      "required": [
+        "integrated_lufs",
+        "true_peak_dbtp"
+      ],
+      "title": "BroadcastAudioQA",
       "type": "object"
     },
     "LyricLine": {
@@ -624,6 +689,26 @@
       },
       "title": "Lyric Lines",
       "type": "array"
+    },
+    "alignment_warnings": {
+      "description": "Pre-spend acoustic/boundary lyric alignment diagnostics.",
+      "items": {
+        "$ref": "#/$defs/AlignmentWarning"
+      },
+      "title": "Alignment Warnings",
+      "type": "array"
+    },
+    "broadcast_qa": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BroadcastAudioQA"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Broadcast loudness, 4x true-peak headroom, and splice-click diagnostics."
     },
     "track_profile": {
       "anyOf": [

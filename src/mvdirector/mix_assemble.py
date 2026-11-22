@@ -296,6 +296,7 @@ def _build_chapter_stamp(
         "visual_source": mix_cfg.visual_source,
         "clip_seconds": round(mix_cfg.clip_seconds, 4),
         "xfade_seconds": round(mix_cfg.xfade_seconds, 4),
+        "loop_blend": mix_cfg.loop_blend,
         "chapter_fade_seconds": round(mix_cfg.chapter_fade_seconds, 4),
         "beat_pulse": round(mix_cfg.beat_pulse, 4),
         "hud": hud_cfg.model_dump(mode="json"),
@@ -512,11 +513,18 @@ def _build_seamless_loop(
     )
 
     prev_label = "s0"
+    # Optional Hermite smoothstep S-curve (3P^2 - 2P^3) forward-only loop blend
+    # (inspired by atomtanstudio/sound-and-vision server/sv/video/loops.py).
+    xfade_mode = (
+        "transition=custom:expr='A*(1-(3*P*P-2*P*P*P))+B*(3*P*P-2*P*P*P)'"
+        if mix_cfg.loop_blend == "smoothstep"
+        else "transition=fade"
+    )
     for step in range(1, k + 1):
         out_label = "vloop" if step == k else f"xf{step}"
         offset_sec = ((step - 1) * stride_frames) / fps
         filter_parts.append(
-            f"[{prev_label}][s{step}]xfade=transition=fade:"
+            f"[{prev_label}][s{step}]xfade={xfade_mode}:"
             f"duration={xfade_sec:.6f}:offset={offset_sec:.6f}[{out_label}]"
         )
         prev_label = out_label
@@ -902,6 +910,29 @@ def assemble_mix(
         sidecar = chapters_sidecar_path(output)
         atomic_write(sidecar, yt_text)
         log.info("Wrote YouTube chapters sidecar: %s", sidecar)
+
+    from mvdirector.audio import broadcast_qa as broadcast_qa_mod
+
+    chapter_boundaries = [ch.start for ch in manifest.chapters if ch.start > 0.0]
+    try:
+        bqa = broadcast_qa_mod.analyze_broadcast_audio(
+            mix_path, boundary_times=chapter_boundaries or None
+        )
+        if bqa.true_peak_dbtp > -0.5 or bqa.splice_clicks:
+            log.warning(
+                "Mix audio QA: %.1f LUFS, %.2f dBTP, %d splice click(s) near chapter joins",
+                bqa.integrated_lufs,
+                bqa.true_peak_dbtp,
+                len(bqa.splice_clicks),
+            )
+        else:
+            log.info(
+                "Mix audio QA: %.1f LUFS, %.2f dBTP (clean)",
+                bqa.integrated_lufs,
+                bqa.true_peak_dbtp,
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.debug("Skipped mix broadcast audio QA on %s: %s", mix_path.name, exc)
 
     log.info(
         "Wrote %s (%d chapters: %d rendered, %d cached)",

@@ -15,15 +15,68 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+from PIL import Image
+
 from mvdirector import media
+from mvdirector.audio import broadcast_qa as broadcast_qa_mod
+from mvdirector.audio import foley as foley_mod
 from mvdirector.errors import ConfigError, MVDError
-from mvdirector.models import Manifest, Shot
+from mvdirector.models import ContinuityMode, Manifest, RetryStrategy, Shot
 from mvdirector.project import Project, require_safe_id
+from mvdirector.qc.color_drift import fit_color_drift_affine
 from mvdirector.review.policy import is_ready, refresh_reviews
 
 log = logging.getLogger(__name__)
 
 _ENCODE = ["-an", "-c:v", "libx264", "-preset", "medium", "-crf", "16", "-pix_fmt", "yuv420p"]
+_XFADE_MAP = {
+    "blend": "fade",
+    "whip": "smoothleft",
+    "flash": "fadewhite",
+}
+
+
+def color_grade_filter(grade: str, film_grain: float = 0.0) -> str | None:
+    """Build an RGB-space (``gbrp``) FFmpeg film color grade + optional grain filter chain.
+
+    Orders YUV ``eq`` strictly before ``format=gbrp`` before RGB curves/colorbalance so highlight
+    shifts never introduce a YUV chroma magenta cast.
+
+    Credits & Attribution:
+        RGB-space (``gbrp``) film grading ordering and presets inspired by
+        ``hexeosis-prime/nightshift``
+        (https://github.com/hexeosis-prime/nightshift — ``nightshift/grade.py``).
+    """
+    stages: list[str] = []
+    if grade == "portra_dusk":
+        stages.append(
+            "eq=contrast=1.04:saturation=1.06,format=gbrp,"
+            "colorbalance=rs=0.03:gs=0.01:bs=-0.02:rm=0.02:gm=0.0:bm=-0.03:rh=0.04:gh=0.02:bh=-0.03,"
+            "format=yuv420p"
+        )
+    elif grade == "cinestill_night":
+        stages.append(
+            "eq=contrast=1.08:saturation=1.08,format=gbrp,"
+            "colorbalance=rs=-0.04:gs=0.01:bs=0.05:rm=-0.02:gm=0.0:bm=0.03:rh=0.05:gh=0.01:bh=-0.02,"
+            "format=yuv420p"
+        )
+    elif grade == "faded_pastel":
+        stages.append(
+            "eq=contrast=0.92:brightness=0.02:saturation=0.88,format=gbrp,"
+            "colorbalance=rs=0.02:gs=0.02:bs=0.03:rh=0.02:gh=0.01:bh=0.0,"
+            "format=yuv420p"
+        )
+    elif grade == "neutral_film":
+        stages.append(
+            "eq=contrast=1.03:saturation=0.98,format=gbrp,"
+            "colorbalance=rs=0.01:bs=-0.01:rh=0.01:bh=-0.01,"
+            "format=yuv420p"
+        )
+    if film_grain > 0.0:
+        strength = max(0.0, min(25.0, float(film_grain)))
+        stages.append(f"noise=alls={strength:.2f}:allf=t+u")
+    return ",".join(stages) if stages else None
 
 
 class NotReadyError(MVDError):
@@ -37,6 +90,10 @@ class ClipPlan:
     source: Path | None  # video clip, still image, or None for black
     is_video: bool
     head_handle: float
+    sync_delay: float = 0.0
+    drop_first_frame: bool = False
+    continuity: ContinuityMode = ContinuityMode.CUT
+    tail_handle: float = 0.0
 
 
 def frame_counts(shots: list[Shot], fps: int) -> list[int]:
@@ -53,11 +110,13 @@ def plan_clips(
             f"{len(blocked)} shot(s) are unfinished or awaiting review: {', '.join(blocked[:12])}"
             f"{' ...' if len(blocked) > 12 else ''}. Finish them, or pass --force for a draft."
         )
+    use_sync_delay = project.config.video.sync_delay_compensation
     plans = []
     for shot, frames in zip(manifest.shots, frame_counts(manifest.shots, manifest.fps)):
         shot_id = require_safe_id(shot.id, "shot id")
         video = shot.video.selected or shot.video.best_attempt()
         still = shot.still.selected or shot.still.best_attempt()
+        tail_handle = max(0.0, shot.audio_slice.end - shot.end)
         if video is not None and video.path:
             source_rel = video.path
             if (
@@ -67,9 +126,25 @@ def plan_clips(
                 and project.path(shot.video.upscaled_path).is_file()
             ):
                 source_rel = shot.video.upscaled_path
+            raw_delay = video.sync_delay_seconds if use_sync_delay else 0.0
+            clamped_delay = max(-shot.audio_slice.head_handle, min(tail_handle, raw_delay))
+            used_handoff = (
+                shot.index > 0
+                and shot.continuity is ContinuityMode.CONTINUE
+                and still is not None
+                and still.strategy is RetryStrategy.HANDOFF
+            )
             plans.append(
                 ClipPlan(
-                    shot_id, frames, project.path(source_rel), True, shot.audio_slice.head_handle
+                    shot_id,
+                    frames,
+                    project.path(source_rel),
+                    True,
+                    shot.audio_slice.head_handle,
+                    sync_delay=round(clamped_delay, 4),
+                    drop_first_frame=used_handoff and shot.audio_slice.head_handle == 0.0,
+                    continuity=shot.continuity,
+                    tail_handle=tail_handle,
                 )
             )
         elif still is not None and still.path:  # draft: hold the still
@@ -79,22 +154,45 @@ def plan_clips(
     return plans
 
 
-def clip_command(plan: ClipPlan, output: Path, width: int, height: int, fps: int) -> list[str]:
-    """ffmpeg command that conforms one source to exactly ``plan.frames`` frames."""
+def clip_command(
+    plan: ClipPlan,
+    output: Path,
+    width: int,
+    height: int,
+    fps: int,
+    *,
+    extra_frames: int = 0,
+    extra_vf: str | None = None,
+) -> list[str]:
+    """ffmpeg command that conforms one source to ``plan.frames + extra_frames`` frames.
+
+    Applies per-take ``sync_delay`` offset compensation (inspired by
+    ``VisualFrisson/ComfyUI-OneShotMV``) and ``trim=start_frame=1`` seam-frame drop on
+    ``CONTINUE`` one-take shots (inspired by ``afj176/open-cinema-studio``).
+    """
     fit = (
         f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1"
     )
+    target_frames = plan.frames + max(0, extra_frames)
     if plan.source is None:
         source = ["-f", "lavfi", "-i", f"color=c=black:s={width}x{height}:r={fps}"]
         filters = "setsar=1"
     elif plan.is_video:
-        source = ["-ss", f"{plan.head_handle:.4f}", "-i", str(plan.source)]
-        # tpad repeats the last frame if a clip came back slightly short.
-        filters = f"fps={fps},tpad=stop_mode=clone:stop_duration=2,{fit}"
+        effective_ss = max(0.0, plan.head_handle + plan.sync_delay)
+        source = ["-ss", f"{effective_ss:.4f}", "-i", str(plan.source)]
+        # Drop duplicated handoff frame 0 on CONTINUE one-take chains; tpad covers slight shorts.
+        chain = [f"fps={fps}"]
+        if plan.drop_first_frame and target_frames > 1:
+            chain.append("trim=start_frame=1,setpts=PTS-STARTPTS")
+        chain.append("tpad=stop_mode=clone:stop_duration=2")
+        chain.append(fit)
+        filters = ",".join(chain)
     else:
         source = ["-loop", "1", "-framerate", str(fps), "-i", str(plan.source)]
         filters = fit
+    if extra_vf:
+        filters = f"{filters},{extra_vf}"
     return [
         "ffmpeg",
         "-y",
@@ -104,7 +202,7 @@ def clip_command(plan: ClipPlan, output: Path, width: int, height: int, fps: int
         "-vf",
         filters,
         "-frames:v",
-        str(plan.frames),
+        str(target_frames),
         *_ENCODE,
         str(output),
     ]
@@ -125,6 +223,24 @@ def _resolve_output_size(
     return video.generation_size(draft=True) if draft else (video.width, video.height)
 
 
+def _fit_active_pair(
+    prev_img: Image.Image, curr_img: Image.Image, out_w: int, out_h: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Conform ``curr_img`` identically to FFmpeg scale+pad and crop out letterbox margins."""
+    prev_rgb = prev_img.convert("RGB")
+    curr_rgb = curr_img.convert("RGB")
+    scale = min(out_w / max(1, curr_rgb.width), out_h / max(1, curr_rgb.height))
+    nw = max(1, int(round(curr_rgb.width * scale)))
+    nh = max(1, int(round(curr_rgb.height * scale)))
+    ox = max(0, (out_w - nw) // 2)
+    oy = max(0, (out_h - nh) // 2)
+    if prev_rgb.size != (out_w, out_h):
+        prev_rgb = prev_rgb.resize((out_w, out_h), Image.Resampling.BILINEAR)
+    prev_active = prev_rgb.crop((ox, oy, ox + nw, oy + nh))
+    curr_active = curr_rgb.resize((nw, nh), Image.Resampling.BILINEAR)
+    return np.asarray(prev_active), np.asarray(curr_active)
+
+
 def assemble(
     project: Project,
     manifest: Manifest,
@@ -142,61 +258,221 @@ def assemble(
     mix = project.input_path(project.config.inputs.mix, "mix")
     output.parent.mkdir(parents=True, exist_ok=True)
 
+    video_cfg = project.config.video
+    grade_vf = color_grade_filter(video_cfg.color_grade, video_cfg.film_grain)
+    xfade_name = _XFADE_MAP.get(video_cfg.transition)
+    use_xfade = xfade_name is not None and video_cfg.transition_seconds > 0.0
+
     with tempfile.TemporaryDirectory(prefix="mvd_assemble_") as tmp:
         work = Path(tmp)
-        entries = []
-        for plan in plans:
-            if plan.frames <= 0:
-                continue
+        active_plans = [p for p in plans if p.frames > 0]
+        if not active_plans:
+            raise MVDError("No shots with frames to assemble.")
+
+        xfade_frames = (
+            max(1, round(video_cfg.transition_seconds * manifest.fps)) if use_xfade else 0
+        )
+        clips: list[tuple[ClipPlan, Path, int]] = []
+        prev_clip_info: tuple[Path, int] | None = None
+        for idx, plan in enumerate(active_plans):
             safe_id = require_safe_id(plan.shot_id, "shot id")
             clip = work / f"{safe_id}.mp4"
-            media.run(clip_command(plan, clip, out_w, out_h, manifest.fps))
-            entries.append(f"file '{clip.name}'")
-        if not entries:
-            raise MVDError("No shots with frames to assemble.")
-        concat_list = work / "clips.txt"
-        concat_list.write_text("\n".join(entries) + "\n", encoding="utf-8")
+            is_last = idx == len(active_plans) - 1
+            # Beat-preserving xfade tail borrowing (inspired by thefullnacho/on-the-one conform.py):
+            # borrow extra tail frames on shot i so shot i+1 still starts at its exact musical beat.
+            next_plan = active_plans[idx + 1] if not is_last else None
+            next_frames = next_plan.frames if next_plan is not None else 0
+            next_is_continue = (
+                next_plan is not None and next_plan.continuity is ContinuityMode.CONTINUE
+            )
+            if (
+                use_xfade
+                and not is_last
+                and not next_is_continue
+                and plan.frames >= 3
+                and next_frames >= 3
+            ):
+                overlap = min(xfade_frames, plan.frames // 3, next_frames // 3)
+                if plan.is_video:
+                    avail_tail = max(
+                        0, round((plan.tail_handle - max(0.0, plan.sync_delay)) * manifest.fps)
+                    )
+                    overlap = min(overlap, avail_tail)
+            else:
+                overlap = 0
+            vf_parts: list[str] = []
+            if (
+                video_cfg.color_drift_correction
+                and plan.continuity is ContinuityMode.CONTINUE
+                and prev_clip_info is not None
+                and plan.is_video
+                and plan.source is not None
+            ):
+                # Clean-room VAE color-drift affine match using exact boundary frames only
+                # (inspired by SonderSaid/ComfyUI-Sonder-Editor color_correction.py).
+                prev_path, prev_last_idx = prev_clip_info
+                prev_png = work / f"{safe_id}_prev_ref.png"
+                curr_png = work / f"{safe_id}_curr_ref.png"
+                start_idx = max(0, int(round((plan.head_handle + plan.sync_delay) * manifest.fps)))
+                media.extract_frame_at_index(prev_path, max(0, prev_last_idx), prev_png)
+                media.extract_frame_at_index(plan.source, start_idx, curr_png)
+                with Image.open(prev_png) as p_img, Image.open(curr_png) as c_img:
+                    prev_arr, curr_arr = _fit_active_pair(p_img, c_img, out_w, out_h)
+                affine = fit_color_drift_affine([curr_arr], [prev_arr])
+                if mixer := affine.to_ffmpeg_colorchannelmixer():
+                    vf_parts.append(mixer)
+            # When color_drift_correction is enabled, apply grade_vf once after concat/xfade so
+            # chained CONTINUE clips are never double-graded against already-graded neighbors.
+            if grade_vf and not video_cfg.color_drift_correction:
+                vf_parts.append(grade_vf)
+            media.run(
+                clip_command(
+                    plan,
+                    clip,
+                    out_w,
+                    out_h,
+                    manifest.fps,
+                    extra_frames=overlap,
+                    extra_vf=",".join(vf_parts) if vf_parts else None,
+                )
+            )
+            clips.append((plan, clip, overlap))
+            prev_clip_info = (
+                (clip, plan.frames - 1) if (plan.is_video and plan.source is not None) else None
+            )
+
         silent = work / "picture.mp4"
-        media.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-v",
-                "error",
-                "-f",
-                "concat",
-                "-i",
-                str(concat_list.resolve()),
-                "-c",
-                "copy",
-                str(silent.resolve()),
+        post_grade_vf = grade_vf if video_cfg.color_drift_correction else None
+        has_any_xfade = use_xfade and len(clips) > 1 and any(ov > 0 for _, _, ov in clips[:-1])
+        if has_any_xfade and xfade_name is not None:
+            inputs_argv: list[str] = []
+            for _, clip_path, _ in clips:
+                inputs_argv.extend(["-i", str(clip_path.resolve())])
+            tb = f"1/{manifest.fps}"
+            filter_parts: list[str] = [
+                f"[{i}:v]fps={manifest.fps},settb={tb}[in{i}]" for i in range(len(clips))
             ]
-        )
-        media.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-v",
-                "error",
-                "-i",
-                str(silent.resolve()),
-                "-i",
-                str(mix.resolve()),
-                "-map",
-                "0:v:0",
-                "-map",
-                "1:a:0",
-                "-c:v",
-                "copy",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "320k",
-                "-shortest",
-                "-movflags",
-                "+faststart",
-                str(output.resolve()),
-            ]
-        )
+            prev_label = "in0"
+            cumulative_frames = clips[0][0].frames
+            for idx in range(1, len(clips)):
+                overlap = clips[idx - 1][2]
+                out_label = "vpre" if idx == len(clips) - 1 else f"xf{idx}"
+                if overlap > 0:
+                    dur_sec = overlap / manifest.fps
+                    offset_sec = cumulative_frames / manifest.fps
+                    filter_parts.append(
+                        f"[{prev_label}][in{idx}]xfade=transition={xfade_name}:"
+                        f"duration={dur_sec:.6f}:offset={offset_sec:.6f},settb={tb}[{out_label}]"
+                    )
+                else:
+                    filter_parts.append(
+                        f"[{prev_label}][in{idx}]concat=n=2:v=1:a=0,settb={tb}[{out_label}]"
+                    )
+                prev_label = out_label
+                cumulative_frames += clips[idx][0].frames
+            if post_grade_vf:
+                filter_parts.append(f"[vpre]{post_grade_vf}[vout]")
+                final_map = "[vout]"
+            else:
+                final_map = "[vpre]"
+            media.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-v",
+                    "error",
+                    *inputs_argv,
+                    "-filter_complex",
+                    ";".join(filter_parts),
+                    "-map",
+                    final_map,
+                    "-frames:v",
+                    str(sum(p.frames for p, _, _ in clips)),
+                    *_ENCODE,
+                    str(silent.resolve()),
+                ]
+            )
+        else:
+            entries = [f"file '{clip_path.name}'" for _, clip_path, _ in clips]
+            concat_list = work / "clips.txt"
+            concat_list.write_text("\n".join(entries) + "\n", encoding="utf-8")
+            concat_codec = ["-vf", post_grade_vf, *_ENCODE] if post_grade_vf else ["-c", "copy"]
+            media.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-v",
+                    "error",
+                    "-f",
+                    "concat",
+                    "-i",
+                    str(concat_list.resolve()),
+                    *concat_codec,
+                    str(silent.resolve()),
+                ]
+            )
+        # Automatically level & duck diegetic SFX cues over the mix when any shot carries sfx_path.
+        mux_audio = mix
+        sfx_cues: list[foley_mod.DiegeticCue] = []
+        for shot in manifest.shots:
+            if not shot.sfx_path:
+                continue
+            sfx_src = project.path(shot.sfx_path)
+            if not sfx_src.is_file():
+                log.warning("%s: sfx_path not found (%s); skipping cue", shot.id, shot.sfx_path)
+                continue
+            safe_sfx_id = require_safe_id(shot.id, "shot id")
+            leveled_sfx = work / f"{safe_sfx_id}_sfx.wav"
+            foley_mod.write_leveled_foley(sfx_src, leveled_sfx)
+            sfx_cues.append(
+                foley_mod.DiegeticCue(
+                    audio_path=leveled_sfx,
+                    start=shot.start,
+                    end=shot.end,
+                    gain_db=shot.sfx_gain_db,
+                    duck_db=shot.sfx_duck_db,
+                )
+            )
+        if sfx_cues:
+            mux_audio = foley_mod.build_ducked_audio_mix(mix, sfx_cues, work / "mix_ducked.wav")
+            log.info("Blended %d diegetic SFX cue(s) with automatic song ducking", len(sfx_cues))
+
+        try:
+            bqa = broadcast_qa_mod.analyze_broadcast_audio(mux_audio)
+            if bqa.true_peak_dbtp > -0.5 or bqa.splice_clicks:
+                log.warning(
+                    "Final audio QA: %.1f LUFS, %.2f dBTP, %d splice click(s)",
+                    bqa.integrated_lufs,
+                    bqa.true_peak_dbtp,
+                    len(bqa.splice_clicks),
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Skipped broadcast audio QA on %s: %s", mux_audio.name, exc)
+
+        mux_cmd = [
+            "ffmpeg",
+            "-y",
+            "-v",
+            "error",
+            "-i",
+            str(silent.resolve()),
+            "-i",
+            str(mux_audio.resolve()),
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "320k",
+            "-shortest",
+        ]
+        if video_cfg.strip_metadata:
+            mux_cmd.extend(["-map_metadata", "-1"])
+        mux_cmd.extend(["-movflags", "+faststart", str(output.resolve())])
+        media.run(mux_cmd)
     log.info("Wrote %s (%d shots)", output, len(plans))
     return output

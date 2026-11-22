@@ -18,11 +18,14 @@ from typing import Literal
 import numpy as np
 
 from mvdirector import tuning as tuning_mod
+from mvdirector.audio import alignment_qa as alignment_qa_mod
+from mvdirector.audio import broadcast_qa as broadcast_qa_mod
 from mvdirector.audio import lyrics as lyrics_mod
 from mvdirector.audio import stem_pack as stem_pack_mod
 from mvdirector.models import (
     BOTH_VOICES,
     Analysis,
+    BroadcastAudioQA,
     MusicalFeatures,
     TimeSpan,
     VideoStyle,
@@ -739,7 +742,8 @@ def analyze_project(project: Project) -> Analysis:
     """Analyze the project's mix and stems and return the result (does not save it)."""
     inputs, video = project.config.inputs, project.config.video
     require_vocals = project.config.planning.video_style is VideoStyle.LIPSYNC
-    mix = load_mono(project.input_path(inputs.mix, "mix"))
+    mix_path = project.input_path(inputs.mix, "mix")
+    mix = load_mono(mix_path)
     vocals_path = project.path(inputs.vocals) if inputs.vocals else None
     if require_vocals:
         vocals: np.ndarray | None = load_mono(project.input_path(inputs.vocals, "vocals"))
@@ -833,6 +837,20 @@ def analyze_project(project: Project) -> Analysis:
         lines = lyrics_mod.align_lines_to_words(lines, words)
     lines = lyrics_mod.estimate_missing_timings(lines, windows)
 
+    alignment_warnings = (
+        alignment_qa_mod.audit_lyric_alignment(vocals, ANALYSIS_SR, lines, windows)
+        if vocals is not None and lines
+        else []
+    )
+    if words and bars:
+        word_spans = [(w.word, w.start, w.end) for w in words]
+        alignment_warnings.extend(alignment_qa_mod.detect_boundary_word_cuts(bars, word_spans))
+    if alignment_warnings:
+        log.info(
+            "Pre-spend alignment QA flagged %d warning(s) (see analysis.json alignment_warnings)",
+            len(alignment_warnings),
+        )
+
     multi_singer_hint = lyrics_mod.labels_have_multiple_singers(line.section for line in lines)
     vocal_turns = (
         detect_vocal_turns(vocals, ANALYSIS_SR, force_two_voices=multi_singer_hint)
@@ -873,6 +891,29 @@ def analyze_project(project: Project) -> Analysis:
     if stem_arrangement and stem_arrangement.summary:
         log.info("Stem arrangement: %s", stem_arrangement.summary)
 
+    bqa_report = broadcast_qa_mod.analyze_broadcast_audio(
+        mix_path,
+        drum_onset_times=beats,
+    )
+    broadcast_qa_model = BroadcastAudioQA(
+        integrated_lufs=bqa_report.integrated_lufs,
+        true_peak_dbtp=bqa_report.true_peak_dbtp,
+        splice_clicks=bqa_report.splice_clicks,
+    )
+    if bqa_report.true_peak_dbtp > -0.5 or bqa_report.splice_clicks:
+        log.warning(
+            "Broadcast audio QA: %.1f LUFS, %.2f dBTP, %d splice click(s)",
+            bqa_report.integrated_lufs,
+            bqa_report.true_peak_dbtp,
+            len(bqa_report.splice_clicks),
+        )
+    else:
+        log.info(
+            "Broadcast audio QA: %.1f LUFS, %.2f dBTP (clean)",
+            bqa_report.integrated_lufs,
+            bqa_report.true_peak_dbtp,
+        )
+
     analysis = Analysis(
         duration=round(duration, 3),
         tempo_bpm=round(tempo, 2),
@@ -882,6 +923,8 @@ def analyze_project(project: Project) -> Analysis:
         vocal_windows=windows,
         vocal_turns=vocal_turns,
         lyric_lines=lines,
+        alignment_warnings=alignment_warnings,
+        broadcast_qa=broadcast_qa_model,
         musical_features=musical_features,
         stems=stem_arrangement,
     )

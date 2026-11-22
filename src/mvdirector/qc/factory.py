@@ -131,7 +131,11 @@ def build_quality_gates(config: ProjectConfig, llm: LLMClient | None) -> Quality
         if callable(closer):
             closer()
         raise
-    vision = VisionJudge(llm) if (llm is not None and config.qc.vision_enabled) else None
+    vision = (
+        VisionJudge(llm, blind_observer=config.qc.vision_blind_observer)
+        if (llm is not None and config.qc.vision_enabled)
+        else None
+    )
     vision_reason: str | None = None
     if vision is None:
         vision_reason = "llm.enabled is false" if llm is None else "qc.vision_enabled is false"

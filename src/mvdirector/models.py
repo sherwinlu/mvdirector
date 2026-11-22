@@ -362,6 +362,31 @@ class StemArrangement(StrictModel):
     )
 
 
+class AlignmentWarning(StrictModel):
+    """Pre-spend alignment anomaly surfaced during audio/lyric verification.
+
+    Inspired by ``JavaDerek/music-video-pipeline`` (``alignment_quality.py``, ``join_witness.py``).
+    """
+
+    kind: Literal[
+        "unvoiced_lyric",
+        "high_consonant_bleed",
+        "unaligned_vocal_window",
+        "boundary_word_cut",
+    ]
+    start: float = Field(ge=0.0, allow_inf_nan=False)
+    end: float = Field(ge=0.0, allow_inf_nan=False)
+    detail: str = ""
+
+
+class BroadcastAudioQA(StrictModel):
+    """Broadcast loudness (ITU-R BS.1770-4 LUFS), 4x True Peak, and splice-click diagnostics."""
+
+    integrated_lufs: float = Field(allow_inf_nan=False)
+    true_peak_dbtp: float = Field(allow_inf_nan=False)
+    splice_clicks: list[float] = Field(default_factory=list)
+
+
 class Analysis(StrictModel):
     schema_version: int = ANALYSIS_SCHEMA_VERSION
     duration: float
@@ -375,6 +400,14 @@ class Analysis(StrictModel):
         description="Diarized vocal turns grouped by acoustic voice pitch and timbre.",
     )
     lyric_lines: list[LyricLine] = Field(default_factory=list)
+    alignment_warnings: list[AlignmentWarning] = Field(
+        default_factory=list,
+        description="Pre-spend acoustic/boundary lyric alignment diagnostics.",
+    )
+    broadcast_qa: BroadcastAudioQA | None = Field(
+        default=None,
+        description="Broadcast loudness, 4x true-peak headroom, and splice-click diagnostics.",
+    )
     track_profile: TrackProfile | None = Field(
         default=None,
         description="Detected musical/vocal/language profile used for automatic parameter tuning.",
@@ -480,10 +513,23 @@ class AssetStatus(str, Enum):
     EXHAUSTED = "exhausted"  # attempts used up without a pass; best attempt is kept
 
 
+class ContinuityMode(str, Enum):
+    """How a shot connects visually to the preceding shot.
+
+    Inspired by ``afj176/open-cinema-studio`` (``cut`` / ``reframe`` / ``continue``).
+    """
+
+    CUT = "cut"  # independent hard cut (default)
+    REFRAME = "reframe"  # edit previous shot's end frame into a new camera angle
+    CONTINUE = "continue"  # one-take continuation starting from previous shot's post-trim frame
+
+
 class RetryStrategy(str, Enum):
     INITIAL = "initial"
+    HANDOFF = "handoff"
     NEW_SEED = "new_seed"
     REWRITE_PROMPT = "rewrite_prompt"
+    REPAIR_STILL = "repair_still"
     ADJUST_PARAMS = "adjust_params"
 
 
@@ -495,6 +541,21 @@ class Attempt(StrictModel):
     params: dict[str, Any] = Field(default_factory=dict)
     path: str | None = None
     qc: QCReport | None = None
+    sync_delay_seconds: float = Field(
+        default=0.0,
+        allow_inf_nan=False,
+        description=(
+            "Measured audio-video lip-sync offset applied to clip in-point during assembly "
+            "(inspired by VisualFrisson/ComfyUI-OneShotMV)."
+        ),
+    )
+    regressed: bool = Field(
+        default=False,
+        description=(
+            "True when an in-place repair did not strictly improve on the previous attempt and "
+            "should be excluded from best_attempt selection."
+        ),
+    )
     error: str | None = None
     created_at: str = Field(default_factory=utc_now)
 
@@ -532,14 +593,23 @@ class AssetState(StrictModel):
         """Attempts belonging to the active pass (after a fallback conversion, if any)."""
         if not after_fallback:
             return self.attempts
-        starts = [i for i, a in enumerate(self.attempts) if a.strategy is RetryStrategy.INITIAL]
+        starts = [
+            i
+            for i, a in enumerate(self.attempts)
+            if a.strategy in (RetryStrategy.INITIAL, RetryStrategy.HANDOFF)
+        ]
         return self.attempts[starts[-1] :] if len(starts) >= 2 else []
 
     def best_attempt(self) -> Attempt | None:
-        """Highest-scoring attempt that produced a file; hard failures rank last."""
-        starts = [i for i, a in enumerate(self.attempts) if a.strategy is RetryStrategy.INITIAL]
+        """Highest-scoring non-regressed attempt with a file; hard failures rank last."""
+        starts = [
+            i
+            for i, a in enumerate(self.attempts)
+            if a.strategy in (RetryStrategy.INITIAL, RetryStrategy.HANDOFF)
+        ]
         current_pass = self.attempts[starts[-1] :] if starts else self.attempts
-        usable = [a for a in current_pass if a.path and a.qc]
+        candidates = [a for a in current_pass if a.path and a.qc]
+        usable = [a for a in candidates if not a.regressed] or candidates
         if not usable:
             return None
         return max(usable, key=lambda a: (not a.qc.has_hard_failure, a.qc.score))  # type: ignore[union-attr]
@@ -649,9 +719,55 @@ class Shot(StrictModel):
         default=None,
         description="Optional 3D blocking / previz video path guiding camera motion and staging.",
     )
+    previz_depth_video: str | None = Field(
+        default=None,
+        description=(
+            "Optional linear view-space depth pass rendered alongside previz_video "
+            "(white=near, black=far; inspired by heroesjouney/aimoviestudiov2)."
+        ),
+    )
     previz_mapping: str = Field(
         default="",
         description="Stand-in mapping from blocking shapes in previz_video to real subjects/props.",
+    )
+    continuity: ContinuityMode = Field(
+        default=ContinuityMode.CUT,
+        description="Shot continuity link to the preceding shot ('cut', 'reframe', or 'continue').",
+    )
+    end_frame_path: str | None = Field(
+        default=None,
+        description="Optional target end-frame image path for first/last-frame (FLF2V) workflows.",
+    )
+    camera_path_zoom: float | None = Field(
+        default=None,
+        gt=1.0,
+        le=3.0,
+        allow_inf_nan=False,
+        description=(
+            "Optional Lanczos zoom factor for an auto-generated end-frame camera-path guide on "
+            "empty wide shots (inspired by afj176/open-cinema-studio)."
+        ),
+    )
+    sfx_path: str | None = Field(
+        default=None,
+        description=(
+            "Optional project-relative diegetic SFX/foley audio file leveled and blended over "
+            "the music track with smooth ducking during assembly."
+        ),
+    )
+    sfx_gain_db: float = Field(
+        default=0.0,
+        ge=-40.0,
+        le=24.0,
+        allow_inf_nan=False,
+        description="Playback gain in dB for shot.sfx_path after active-RMS leveling.",
+    )
+    sfx_duck_db: float = Field(
+        default=-6.0,
+        ge=-40.0,
+        le=0.0,
+        allow_inf_nan=False,
+        description="Music ducking attenuation in dB while shot.sfx_path plays.",
     )
     audio_slice: AudioSlice
     num_frames: int
@@ -914,6 +1030,19 @@ class SongInterpretation(StrictModel):
     )
 
 
+class WorldFact(StrictModel):
+    """A mutable or irreversible physical world-state fact tracked across shots.
+
+    Inspired by ``afj176/open-cinema-studio`` and ``JavaDerek/music-video-pipeline``.
+    """
+
+    entity: str = Field(min_length=1)
+    attribute: str = Field(min_length=1)
+    value: str = Field(min_length=1)
+    start_shot: int = Field(default=0, ge=0)
+    irreversible: bool = False
+
+
 class VisualBible(StrictModel):
     interpretation: SongInterpretation | None = Field(
         default=None,
@@ -928,6 +1057,10 @@ class VisualBible(StrictModel):
     negative_prompt: str = ""
     settings: list[SetDesign] = Field(default_factory=list)
     props: list[PropDesign] = Field(default_factory=list)
+    world_facts: list[WorldFact] = Field(
+        default_factory=list,
+        description="Tracked physical world/prop/lighting states across shot indices.",
+    )
     rules: list[str] = Field(
         default_factory=list, description="Rules every shot follows, shown to the director model."
     )

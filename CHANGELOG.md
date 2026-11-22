@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/). While the version is 0.x, a minor release may still change the public API; every such change is listed here.
 
+## [Unreleased]
+
+### Added
+- **Audio & Lip-Sync Precision:**
+  - `video.audio_vae_offset_seconds` (default `0.0`) and `video.audio_mirror_pad` (default `false`) for rational VAE front-crop audio shift alignment (including lead-silence padding for negative offsets at `start == 0`) and periodic triangle-wave mirror tail padding without silence cliffs.
+  - `video.sync_delay_compensation` (default `true`), `qc.video.lipsync_min_confidence`, `qc.video.desync_face_fraction_min`, and `Attempt.sync_delay_seconds` to apply measured per-take lip-sync lag compensation (clamped to audio handles) during assembly and compute viewer-visible `desync_risk`.
+  - Pre-spend lyric alignment diagnostics (`mvdirector.audio.alignment_qa`, `Analysis.alignment_warnings`) flagging unvoiced/noisy vocal spans, consonant-heavy spans, and lyric words cut across bar lines.
+  - Hardened Whisper transcription (`condition_on_previous_text=False`, optional `initial_prompt` vocabulary seeding, bounded stall-timeout watchdog, and 4+ consecutive n-gram repetition collapsing in both segment text and word timestamps).
+  - Global shortest-path phrase-aware DP slicing (`video.phrase_dp_slicing`, default `false`) and local vocal-onset cut shifting (`video.prefer_vocal_onset`, default `false`).
+  - Streaming ITU-R BS.1770-4 LUFS loudness, 4× True Peak, and splice-click QA (`mvdirector.audio.broadcast_qa`, `Analysis.broadcast_qa`, `mvd audio-qc`), automatically run during `mvd analyze`, `mvd assemble`, and mix assembly with bounded memory for multi-hour mixes.
+  - Automatic diegetic SFX / foley active-RMS leveling and single-pass FFmpeg song ducking (`mvdirector.audio.foley`, `Shot.sfx_path`, `Shot.sfx_gain_db`, `Shot.sfx_duck_db`) blended automatically during `mvd assemble`.
+- **Visual Continuity, Prompting & Quality Gates:**
+  - Shot continuity chaining (`Shot.continuity`: `cut`, `reframe`, `continue`) with dependency-wave scheduling in `ShotRunner` (batching independent `CUT` shots while running chained depths in order with `free_memory()` between phases), explicit `RetryStrategy.HANDOFF` tracking with zeroed head-handle alignment, and optional `previous_frame` / `end_image` / `camera_path_zoom` workflow bindings.
+  - Ridge-regularized 3×4 RGB affine VAE color-drift cancellation across `CONTINUE` joins (`video.color_drift_correction`, default `false`) with letterbox-free active-region fitting and FFmpeg `colorchannelmixer` + `lutrgb` emission.
+  - Automatic advisory `join_continuity` (phase-correlation velocity jump / duplicate frame / speed dip) and `beat_motion` (Gaussian beat-pulse cross-correlation with permutation z-score) checks in `VideoQC` (`mvdirector.qc.continuity`).
+  - Targeted in-place still repair (`retry.in_place_repair`, `RetryStrategy.REPAIR_STILL`) gated on templates accepting `reference_image`, with `Attempt.regressed` exclusion from `best_attempt()` when repairs fail to reduce QC issues.
+  - Smart Cutaway Rescue (`retry.smart_cutaway_rescue`, `retry.smart_cutaway_max_correlation`) converting weak lip-sync takes into atmospheric b-roll cutaways within the 2-cutaway run limit, with full exception-safe rollback.
+  - Two-pass blind-observer / split-auditor VLM judging (`qc.vision_blind_observer`, default `false`) forwarding primary and extra references without confirmation bias.
+  - Monotonic World-State Ledger (`VisualBible.world_facts`, `WorldFact`, `mvdirector.planning.world_state`) filtering contradicted state adjectives from scene looks across shots, plus rear-view facial detail scrubbing and multi-reference `Picture N` disambiguation in `prompts.py`.
+  - Linear view-space depth previz pass (`Shot.previz_depth_video`) and automatic silent AAC audio track injection (`media.ensure_audio_track`) on previz and reference videos for ComfyUI video-loader compatibility.
+- **Assembly, Mix Mode & ComfyUI Infrastructure:**
+  - RGB-space (`gbrp`) cinematic color grade presets (`video.color_grade`, `video.film_grain`), beat-preserving `xfade` transitions (`video.transition`, `video.transition_seconds`, capped to real tail handles and disabled across `CONTINUE` seams), and metadata stripping (`video.strip_metadata`).
+  - Smoothstep seamless loop cross-dissolve option (`mix.loop_blend`: `linear` | `smoothstep`) for long-form mix chapters.
+  - Opt-in content-addressed ComfyUI render cache (`comfy.cache_enabled`, default `false`, stored under `<project>/.comfy_cache`, purged by `mvd clean`), content-addressed upload deduplication (`comfy.dedup_uploads`), batch cache sorting (`comfy.sort_batch_for_cache`), VRAM floor probing (`comfy.min_free_vram_gb`), prompt length budgeting (`comfy.max_prompt_chars`), ComfyUI UI-to-API workflow conversion (`convert_ui_workflow`), and live `/object_info` pre-flight dependency checks in `mvd validate`.
+
 ## [0.7.0] - 2026-11-22
 
 ### Added

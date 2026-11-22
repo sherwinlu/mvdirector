@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import re
+import threading
 import unicodedata
 from collections.abc import Iterable
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import librosa
 from pydantic import BaseModel
@@ -74,8 +76,139 @@ class Transcriber(Protocol):
     def transcribe(self, audio_path: Path) -> Transcript: ...
 
 
+def collapse_repetitions(text: str, *, max_ngram: int = 8, min_repeats: int = 4) -> str:
+    """Collapse runaway consecutive n-gram repetitions produced by Whisper decoding loops.
+
+    Preserves legitimate chorus hooks (up to 3 repeats by default) while truncating pathological
+    4+ consecutive verbatim loops back down to two occurrences.
+
+    Credits & Attribution:
+        Inspired by ``GeekatplayStudio/ComfyUI-Music-to-Video``
+        (https://github.com/GeekatplayStudio/ComfyUI-Music-to-Video,
+        ``nodes.py:_collapse_repetitions``).
+    """
+    min_repeats = max(2, min_repeats)
+    tokens = text.split()
+    if len(tokens) < min_repeats:
+        return text.strip()
+    out: list[str] = []
+    i = 0
+    n = len(tokens)
+    while i < n:
+        collapsed = False
+        upper_k = min(max_ngram, (n - i) // min_repeats)
+        for k in range(upper_k, 0, -1):
+            phrase = [t.casefold() for t in tokens[i : i + k]]
+            reps = 1
+            while (
+                i + (reps + 1) * k <= n
+                and [t.casefold() for t in tokens[i + reps * k : i + (reps + 1) * k]] == phrase
+            ):
+                reps += 1
+            if reps >= min_repeats:
+                out.extend(tokens[i : i + 2 * k])
+                i += reps * k
+                collapsed = True
+                break
+        if not collapsed:
+            out.append(tokens[i])
+            i += 1
+    return " ".join(out)
+
+
+def collapse_word_repetitions(
+    words: list[Word], *, max_ngram: int = 6, min_repeats: int = 4
+) -> list[Word]:
+    """Collapse pathological consecutive verbatim word-sequence loops in Whisper timestamps."""
+    min_repeats = max(2, min_repeats)
+    if len(words) < min_repeats:
+        return list(words)
+    out: list[Word] = []
+    i = 0
+    n = len(words)
+    norm = [w.word.strip().casefold() for w in words]
+    while i < n:
+        collapsed = False
+        upper_k = min(max_ngram, (n - i) // min_repeats)
+        for k in range(upper_k, 0, -1):
+            phrase = norm[i : i + k]
+            if not any(phrase):
+                continue
+            reps = 1
+            while i + (reps + 1) * k <= n and norm[i + reps * k : i + (reps + 1) * k] == phrase:
+                reps += 1
+            if reps >= min_repeats:
+                out.extend(words[i : i + 2 * k])
+                i += reps * k
+                collapsed = True
+                break
+        if not collapsed:
+            out.append(words[i])
+            i += 1
+    return out
+
+
+def _drain_segments_with_timeout(raw_segments: Iterable[Any], timeout_seconds: float) -> list[Any]:
+    """Drain a faster-whisper segment generator with a per-segment stall timeout watchdog.
+
+    Credits & Attribution:
+        Stall-timeout watchdog inspired by ``GeekatplayStudio/ComfyUI-Music-to-Video``
+        (https://github.com/GeekatplayStudio/ComfyUI-Music-to-Video,
+        ``nodes.py:_drain_whisper_segments``).
+    """
+    if timeout_seconds <= 0:
+        return list(raw_segments)
+    sentinel = object()
+    q: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=4)
+    cancelled = threading.Event()
+
+    def _put(item: tuple[str, Any]) -> bool:
+        while not cancelled.is_set():
+            try:
+                q.put(item, timeout=0.1)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def _worker() -> None:
+        try:
+            for item in raw_segments:
+                if cancelled.is_set() or not _put(("item", item)):
+                    return
+            _put(("done", sentinel))
+        except BaseException as exc:  # noqa: BLE001
+            _put(("error", exc))
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    collected: list[Any] = []
+    try:
+        while True:
+            try:
+                kind, payload = q.get(timeout=timeout_seconds)
+            except queue.Empty as exc:
+                cancelled.set()
+                raise TimeoutError(
+                    f"Whisper decoder stalled for >{timeout_seconds:.0f}s "
+                    "without producing a segment."
+                ) from exc
+            if kind == "done":
+                return collected
+            if kind == "error":
+                raise payload
+            collected.append(payload)
+    finally:
+        cancelled.set()
+
+
 class WhisperTranscriber:
-    """Local vocal transcription backed by faster-whisper."""
+    """Local vocal transcription backed by faster-whisper.
+
+    Hardened with ``condition_on_previous_text=False``, optional known-lyrics ``initial_prompt``
+    vocabulary seeding, a per-segment stall watchdog, and consecutive repetition collapsing
+    (inspired by ``GeekatplayStudio/ComfyUI-Music-to-Video``).
+    """
 
     def __init__(
         self,
@@ -83,10 +216,14 @@ class WhisperTranscriber:
         language: str | None = None,
         *,
         multilingual: bool = False,
+        initial_prompt: str | None = None,
+        stall_timeout_seconds: float = 180.0,
     ) -> None:
         self.model_size = model_size
         self.language = language.strip().lower() if language else None
         self.multilingual = multilingual
+        self.initial_prompt = initial_prompt
+        self.stall_timeout_seconds = stall_timeout_seconds
 
     def transcribe(self, audio_path: Path) -> Transcript:
         if self.model_size.lower().endswith(".en") and (
@@ -115,14 +252,18 @@ class WhisperTranscriber:
         transcribe_kwargs: dict[str, object] = {
             "word_timestamps": True,
             "language": self.language,
+            "condition_on_previous_text": False,
         }
         if self.multilingual:
             transcribe_kwargs["multilingual"] = True
+        if self.initial_prompt and self.initial_prompt.strip():
+            transcribe_kwargs["initial_prompt"] = self.initial_prompt.strip()[:800]
         raw_segments, info = model.transcribe(samples, **transcribe_kwargs)  # type: ignore[arg-type]
+        drained = _drain_segments_with_timeout(raw_segments, self.stall_timeout_seconds)
         segments: list[TranscriptSegment] = []
         words: list[Word] = []
-        for seg in raw_segments:
-            text = (getattr(seg, "text", None) or "").strip()
+        for seg in drained:
+            text = collapse_repetitions((getattr(seg, "text", None) or "").strip())
             if text:
                 segments.append(
                     TranscriptSegment(
@@ -139,6 +280,7 @@ class WhisperTranscriber:
                         end=round(float(w.end), 3),
                     )
                 )
+        words = collapse_word_repetitions(words)
         detected_lang = getattr(info, "language", None) or self.language
         return Transcript(
             segments=segments,
@@ -946,10 +1088,18 @@ def load_or_transcribe_words(project: Project) -> list[Word]:
                 "Auto-tuned %s: %r -> %r (%s)", adj.key, adj.current, adj.recommended, adj.reason
             )
     vocals_path = project.input_path(inputs.vocals, "vocals")
+    vocab_hint: str | None = None
+    if inputs.lyrics:
+        lyrics_file = project.path(inputs.lyrics)
+        if lyrics_file.is_file():
+            parsed_hint = parse_lyrics(lyrics_file.read_text("utf-8-sig"))
+            if parsed_hint:
+                vocab_hint = " ".join(ln.text for ln in parsed_hint)[:800]
     transcriber = WhisperTranscriber(
         model_size=prepare_cfg.whisper_model,
         language=prepare_cfg.whisper_language,
         multilingual=prepare_cfg.whisper_multilingual,
+        initial_prompt=vocab_hint,
     )
     try:
         return transcriber.transcribe(vocals_path).words

@@ -168,11 +168,30 @@ def _camera_basis(
     return right, up, forward
 
 
-def render_blocking_frame(plan: PrevizPlan, t: float, width: int, height: int) -> Image.Image:
-    """Render one flat-shaded 3D blocking frame at timestamp ``t``."""
+def render_blocking_frame(
+    plan: PrevizPlan,
+    t: float,
+    width: int,
+    height: int,
+    *,
+    depth_pass: bool = False,
+    depth_range_m: float = 16.0,
+) -> Image.Image:
+    """Render one flat-shaded 3D blocking frame (or linear view-space depth pass) at ``t``.
+
+    When ``depth_pass=True``, renders linear view-space depth mapped ``white=near`` (255) to
+    ``black=far`` (0) over ``[0, depth_range_m]`` meters for depth-ControlNet / IC-LoRA / R2V
+    video conditioning.
+
+    Credits & Attribution:
+        Linear view-space depth pass alongside 3D camera previz (clean-room reimplementation)
+        inspired by ``heroesjouney/aimoviestudiov2``
+        (https://github.com/heroesjouney/aimoviestudiov2 — ``ViewfinderScene.tsx``).
+    """
     if width <= 0 or height <= 0:
         raise ConfigError(f"Previz frame dimensions must be positive, got {width}x{height}.")
-    img = Image.new("RGB", (width, height), tuple(plan.background_color))
+    bg_color = (0, 0, 0) if depth_pass else tuple(plan.background_color)
+    img = Image.new("RGB", (width, height), bg_color)
     draw = ImageDraw.Draw(img)
 
     eye, look_at, fov_deg = _eval_camera(plan.camera, t)
@@ -188,26 +207,28 @@ def render_blocking_frame(plan: PrevizPlan, t: float, width: int, height: int) -
         z = cam_pt[2]
         return cx + (cam_pt[0] / z) * focal, cy - (cam_pt[1] / z) * focal
 
-    # Ground plane perspective grid (Y = 0)
-    grid_rgb = tuple(plan.grid_color)
-    for coord in range(-8, 9, 2):
-        for p0_w, p1_w in (
-            (np.array([float(coord), 0.0, -10.0]), np.array([float(coord), 0.0, 10.0])),
-            (np.array([-10.0, 0.0, float(coord)]), np.array([10.0, 0.0, float(coord)])),
-        ):
-            c0, c1 = to_cam(p0_w), to_cam(p1_w)
-            if c0[2] <= _NEAR_Z and c1[2] <= _NEAR_Z:
-                continue
-            if c0[2] <= _NEAR_Z:
-                frac = (_NEAR_Z - c0[2]) / max(1e-6, c1[2] - c0[2])
-                c0 = c0 + frac * (c1 - c0)
-            elif c1[2] <= _NEAR_Z:
-                frac = (_NEAR_Z - c1[2]) / max(1e-6, c0[2] - c1[2])
-                c1 = c1 + frac * (c0 - c1)
-            draw.line([project(c0), project(c1)], fill=grid_rgb, width=1)
+    # Ground plane perspective grid (Y = 0) — omitted in clean linear depth pass.
+    if not depth_pass:
+        grid_rgb = tuple(plan.grid_color)
+        for coord in range(-8, 9, 2):
+            for p0_w, p1_w in (
+                (np.array([float(coord), 0.0, -10.0]), np.array([float(coord), 0.0, 10.0])),
+                (np.array([-10.0, 0.0, float(coord)]), np.array([10.0, 0.0, float(coord)])),
+            ):
+                c0, c1 = to_cam(p0_w), to_cam(p1_w)
+                if c0[2] <= _NEAR_Z and c1[2] <= _NEAR_Z:
+                    continue
+                if c0[2] <= _NEAR_Z:
+                    frac = (_NEAR_Z - c0[2]) / max(1e-6, c1[2] - c0[2])
+                    c0 = c0 + frac * (c1 - c0)
+                elif c1[2] <= _NEAR_Z:
+                    frac = (_NEAR_Z - c1[2]) / max(1e-6, c0[2] - c1[2])
+                    c1 = c1 + frac * (c0 - c1)
+                draw.line([project(c0), project(c1)], fill=grid_rgb, width=1)
 
     stage_polys: list[tuple[float, list[tuple[float, float]], tuple[int, int, int]]] = []
     actor_polys: list[tuple[float, list[tuple[float, float]], tuple[int, int, int]]] = []
+    safe_range = max(1.0, float(depth_range_m))
     base_colors = tuple(plan.actors)
     for actor in base_colors:
         tris, is_stage = _actor_triangles(actor, t)
@@ -216,14 +237,23 @@ def render_blocking_frame(plan: PrevizPlan, t: float, width: int, height: int) -
             c_pts = np.array([to_cam(tri[0]), to_cam(tri[1]), to_cam(tri[2])])
             if np.any(c_pts[:, 2] <= _NEAR_Z):
                 continue
-            normal = np.cross(tri[1] - tri[0], tri[2] - tri[0])
-            norm = float(np.linalg.norm(normal))
-            shade = 0.72
-            if norm > 1e-8:
-                normal /= norm
-                shade = 0.45 + 0.55 * max(0.0, float(np.dot(normal, _LIGHT_DIR)))
-            color = (min(255, int(r * shade)), min(255, int(g * shade)), min(255, int(b * shade)))
             depth = float(c_pts[:, 2].mean())
+            if depth_pass:
+                norm_d = max(0.0, min(1.0, 1.0 - (depth - _NEAR_Z) / safe_range))
+                grey = int(round(norm_d * 255.0))
+                color = (grey, grey, grey)
+            else:
+                normal = np.cross(tri[1] - tri[0], tri[2] - tri[0])
+                norm = float(np.linalg.norm(normal))
+                shade = 0.72
+                if norm > 1e-8:
+                    normal /= norm
+                    shade = 0.45 + 0.55 * max(0.0, float(np.dot(normal, _LIGHT_DIR)))
+                color = (
+                    min(255, int(r * shade)),
+                    min(255, int(g * shade)),
+                    min(255, int(b * shade)),
+                )
             poly = [project(c_pts[0]), project(c_pts[1]), project(c_pts[2])]
             (stage_polys if is_stage else actor_polys).append((depth, poly, color))
 
@@ -241,6 +271,9 @@ def render_blocking_video(
     fps: int,
     width: int = 640,
     height: int = 360,
+    *,
+    depth_pass: bool = False,
+    depth_range_m: float = 16.0,
 ) -> Path:
     """Render ``plan`` across ``duration`` seconds and encode to MP4 via ffmpeg."""
     media.require_tool("ffmpeg")
@@ -280,7 +313,14 @@ def render_blocking_video(
         try:
             for frame_idx in range(total_frames):
                 t = (frame_idx / max(1, total_frames - 1)) * duration
-                frame = render_blocking_frame(plan, t, even_w, even_h)
+                frame = render_blocking_frame(
+                    plan,
+                    t,
+                    even_w,
+                    even_h,
+                    depth_pass=depth_pass,
+                    depth_range_m=depth_range_m,
+                )
                 proc.stdin.write(frame.tobytes())
             proc.stdin.close()
             stderr = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
@@ -306,11 +346,18 @@ def _render_and_save_plan(
     render_w = max(64, int(round(video.width * scale)))
     render_h = max(64, int(round(video.height * scale)))
     dst = project.previz_path(shot.id)
+    depth_dst = dst.with_name(f"{dst.stem}_depth.mp4")
     duration = max(0.5, shot.audio_slice.end - shot.audio_slice.start)
     render_blocking_video(plan, dst, duration, video.fps, width=render_w, height=render_h)
+    media.ensure_audio_track(dst, dst)
+    render_blocking_video(
+        plan, depth_dst, duration, video.fps, width=render_w, height=render_h, depth_pass=True
+    )
+    media.ensure_audio_track(depth_dst, depth_dst)
     plan_path = project.previz_plan_path(shot.id)
     project.write_text(project.rel(plan_path), plan.model_dump_json(indent=2) + "\n")
     shot.previz_video = project.rel(dst)
+    shot.previz_depth_video = project.rel(depth_dst)
     if plan.stand_in_mapping and (overwrite_mapping or not shot.previz_mapping):
         shot.previz_mapping = plan.stand_in_mapping
     return dst

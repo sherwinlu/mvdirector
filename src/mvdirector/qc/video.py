@@ -24,6 +24,7 @@ from mvdirector.models import (
     Shot,
     ShotType,
 )
+from mvdirector.qc import continuity as continuity_mod
 from mvdirector.qc import lipsync
 from mvdirector.qc.common import dimensions_check, identity_check, vision_checks
 from mvdirector.qc.faces import FaceAnalyzer, IdentityReference, MouthTracker
@@ -77,6 +78,8 @@ class VideoQC:
         reference_image: Path | None = None,
         extra_references: list[tuple[str, Path]] | None = None,
         expected_size: tuple[int, int] | None = None,
+        prev_tail_frames: list[np.ndarray] | None = None,
+        beat_times: list[float] | None = None,
     ) -> QCReport:
         info = media.probe(path)
         technical = self._technical_checks(info, shot, expected_size=expected_size)
@@ -87,6 +90,10 @@ class VideoQC:
         frames = media.extract_frames(path, self._cfg.analysis_width)
         fps = info.fps or float(self._video.fps)
         checks = [*technical, *self._temporal_checks(frames, allow_cuts=shot.allow_cuts)]
+        if prev_tail_frames:
+            checks.append(self._join_continuity_check(prev_tail_frames, frames))
+        if beat_times and len(beat_times) >= 2:
+            checks.append(self._beat_motion_check(frames, fps, beat_times))
         if shot.type is ShotType.LIPSYNC:
             checks += self._lipsync_checks(frames, fps, shot, manifest, audio_slice)
         if shot.type.shows_singer:
@@ -104,6 +111,51 @@ class VideoQC:
             spec_hard_min=self._cfg.vision_spec_hard_min,
         )
         return aggregate(checks, self._qc.weights, self._qc.pass_score)
+
+    @staticmethod
+    def _join_continuity_check(
+        prev_tail_frames: list[np.ndarray], frames: list[np.ndarray]
+    ) -> CheckResult:
+        """Advisory camera-motion continuity audit across a CONTINUE shot join."""
+        report = continuity_mod.measure_join_continuity(prev_tail_frames, frames[:4])
+        return CheckResult(
+            name="join_continuity",
+            status=CheckStatus.PASSED if report.smooth else CheckStatus.FAILED,
+            score=None,
+            weight=0.0,
+            hard=False,
+            detail="; ".join(report.issues),
+            fix_hint=(
+                "Avoid sudden camera velocity lurches or stalled first frames at the handoff seam."
+                if report.issues
+                else None
+            ),
+            metrics={
+                "velocity_jump": report.velocity_jump,
+                "speed_dip_ratio": report.speed_dip_ratio,
+                "duplicate_boundary_frame": 1.0 if report.duplicate_boundary_frame else 0.0,
+            },
+        )
+
+    @staticmethod
+    def _beat_motion_check(
+        frames: list[np.ndarray], fps: float, beat_times: list[float]
+    ) -> CheckResult:
+        """Advisory beat-to-visual-motion cross-correlation telemetry."""
+        report = continuity_mod.measure_beat_motion_sync(frames, fps, beat_times, permutations=40)
+        return CheckResult(
+            name="beat_motion",
+            status=CheckStatus.PASSED,
+            score=None,
+            weight=0.0,
+            hard=False,
+            metrics={
+                "correlation": report.correlation,
+                "best_lag_seconds": report.best_lag_seconds,
+                "chance_baseline": report.chance_baseline,
+                "z_score": report.z_score,
+            },
+        )
 
     # ---------------------------------------------------------------- checks
 
@@ -334,12 +386,35 @@ class VideoQC:
         in_sync = result.correlation >= self._cfg.lipsync_min
         blocking = self._cfg.lipsync_blocking
         lag_fps = result.eval_fps or fps
+        lag_seconds = round(result.lag_frames / lag_fps, 3)
         sync_metrics: dict[str, float] = {
             "correlation": round(result.correlation, 4),
-            "lag_seconds": round(result.lag_frames / lag_fps, 3),
+            "lag_seconds": lag_seconds,
         }
         if result.confidence is not None:
             sync_metrics["sync_confidence"] = round(result.confidence, 4)
+        # Compute recommended playback offset compensation (sync_delay_seconds) and viewer-visible
+        # face-fraction desync_risk (inspired by VisualFrisson/ComfyUI-OneShotMV &
+        # JavaDerek/music-video-pipeline).
+        conf_ok = result.confidence is None or result.confidence >= self._cfg.lipsync_min_confidence
+        if conf_ok and result.correlation >= self._cfg.lipsync_bad:
+            sync_metrics["sync_delay_seconds"] = lag_seconds
+        else:
+            sync_metrics["sync_delay_seconds"] = 0.0
+        if self._faces is not None and frames:
+            sample_step = max(1, len(frames) // 5)
+            face_fracs = [
+                f[0].height_fraction for fr in frames[::sample_step] if (f := self._faces.faces(fr))
+            ]
+            if face_fracs:
+                med_face = float(np.median(face_fracs))
+                sync_metrics["median_face_fraction"] = round(med_face, 4)
+                visible_weight = (
+                    1.0
+                    if med_face >= self._cfg.desync_face_fraction_min
+                    else med_face / max(self._cfg.desync_face_fraction_min, 1e-6)
+                )
+                sync_metrics["desync_risk"] = round(abs(lag_seconds) * visible_weight, 4)
         if in_sync:
             sync_detail, sync_hint = "", None
         elif needed_singers >= 2 and multi_capable:

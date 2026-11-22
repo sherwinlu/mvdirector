@@ -39,6 +39,9 @@ OPTIONAL_FILE_PARAMS = frozenset(
         "audio_video",
         "reference_video",
         "previz_video",
+        "previz_depth_video",
+        "end_image",
+        "previous_frame",
     }
 )
 
@@ -113,6 +116,11 @@ class WorkflowTemplate:
             )
         return template
 
+    @property
+    def graph(self) -> dict[str, Any]:
+        """Return a shallow read view of the raw workflow graph."""
+        return self._graph
+
     def accepts(self, param: str) -> bool:
         """True if the workflow has a binding for ``param``."""
         return param in self.bindings.inputs
@@ -166,7 +174,195 @@ class WorkflowTemplate:
             if param in self.bindings.inputs and param not in self.bindings.required:
                 for target in self.bindings.inputs[param]:
                     _drop_loader(graph, target.node)
+        return prune_switch_branches(graph, output_node=self.bindings.output.node)
+
+
+_SWITCH_CLASS_TYPES = frozenset({"ComfySwitchNode", "Switch", "BooleanSwitch"})
+_OUTPUT_CLASS_HINTS = ("Save", "Preview", "VideoCombine")
+
+
+def prune_switch_branches(
+    graph: dict[str, Any], *, output_node: str | None = None
+) -> dict[str, Any]:
+    """Collapse constant ``ComfySwitchNode`` branches and prune unreachable dead loaders.
+
+    Allows a single unified ComfyUI workflow to serve multiple modes (e.g. ``i2v``, ``flf2v``,
+    ``lipsync``) without ComfyUI failing on unused dummy ``LoadImage`` / ``LoadAudio`` nodes.
+
+    Credits & Attribution:
+        Static ``ComfySwitchNode`` collapsing and backward reachability pruning inspired by
+        ``hexeosis-prime/nightshift``
+        (https://github.com/hexeosis-prime/nightshift — ``nightshift/workflows.py``).
+    """
+    has_switch = any(
+        str(node.get("class_type", "")) in _SWITCH_CLASS_TYPES
+        for node in graph.values()
+        if isinstance(node, dict)
+    )
+    if not has_switch:
         return graph
+
+    resolved = copy.deepcopy(graph)
+    rewire: dict[str, Any] = {}
+    for node_id, node in list(resolved.items()):
+        if not isinstance(node, dict):
+            continue
+        if str(node.get("class_type", "")) not in _SWITCH_CLASS_TYPES:
+            continue
+        inputs = node.get("inputs", {})
+        cond = inputs.get("switch")
+        if cond is None:
+            cond = inputs.get("boolean")
+        if not isinstance(cond, bool):
+            continue
+        chosen = inputs.get("on_true") if cond else inputs.get("on_false")
+        if chosen is not None:
+            rewire[node_id] = chosen
+
+    if not rewire:
+        return resolved
+
+    # Follow chained switches to their final non-switch source.
+    def _resolve_target(val: Any, seen: set[str]) -> Any:
+        if isinstance(val, list) and len(val) >= 1 and isinstance(val[0], str):
+            src = val[0]
+            if src in rewire and src not in seen:
+                return _resolve_target(rewire[src], seen | {src})
+        return val
+
+    for node in resolved.values():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs", {})
+        for field, val in list(inputs.items()):
+            inputs[field] = _resolve_target(val, set())
+    for sw_id in rewire:
+        resolved.pop(sw_id, None)
+
+    # Walk backward from output nodes to keep only reachable nodes.
+    roots: list[str] = []
+    if output_node is not None and output_node in resolved:
+        roots.append(output_node)
+    else:
+        for node_id, node in resolved.items():
+            ctype = str(node.get("class_type", ""))
+            if any(hint in ctype for hint in _OUTPUT_CLASS_HINTS):
+                roots.append(node_id)
+    if not roots:
+        return resolved
+
+    reachable: set[str] = set()
+    stack = list(roots)
+    while stack:
+        cur = stack.pop()
+        if cur in reachable or cur not in resolved:
+            continue
+        reachable.add(cur)
+        for val in resolved[cur].get("inputs", {}).values():
+            if isinstance(val, list) and len(val) >= 1 and isinstance(val[0], str):
+                stack.append(val[0])
+    return {nid: node for nid, node in resolved.items() if nid in reachable}
+
+
+def convert_ui_workflow(ui_graph: dict[str, Any], object_info: dict[str, Any]) -> dict[str, Any]:
+    """Convert a standard ComfyUI UI-format workflow (``nodes``/``links``) to API prompt format.
+
+    Uses ComfyUI's ``/object_info`` metadata to map positional ``widgets_values`` onto named input
+    fields while resolving graph links.
+
+    Credits & Attribution:
+        Clean-room UI-to-API workflow conversion concept inspired by ``Edakuban/VocaVid``
+        (https://github.com/Edakuban/VocaVid — ``VocaVid/comfy.py``).
+    """
+    if "nodes" not in ui_graph or "links" not in ui_graph:
+        return copy.deepcopy(ui_graph)
+
+    links_by_id: dict[int, tuple[str, int]] = {}
+    for link in ui_graph.get("links", []):
+        if isinstance(link, list) and len(link) >= 4:
+            try:
+                links_by_id[int(link[0])] = (str(link[1]), int(link[2]))
+            except (TypeError, ValueError):
+                continue
+
+    api_graph: dict[str, Any] = {}
+    for node in ui_graph.get("nodes", []):
+        if not isinstance(node, dict):
+            continue
+        # Skip muted (mode=2) or bypassed (mode=4) UI nodes.
+        if node.get("mode") in (2, 4):
+            continue
+        raw_id = node.get("id")
+        if raw_id is None:
+            continue
+        node_id = str(raw_id)
+        class_type = str(node.get("type", ""))
+        if not class_type:
+            continue
+        inputs: dict[str, Any] = {}
+        linked_names: set[str] = set()
+        for inp in node.get("inputs", []) or []:
+            if not isinstance(inp, dict):
+                continue
+            name = str(inp.get("name", ""))
+            link_id = inp.get("link")
+            if name and link_id is not None:
+                try:
+                    parsed_link = int(link_id)
+                except (TypeError, ValueError):
+                    continue
+                if parsed_link in links_by_id:
+                    src_id, src_slot = links_by_id[parsed_link]
+                    inputs[name] = [src_id, src_slot]
+                    linked_names.add(name)
+
+        raw_widgets = node.get("widgets_values")
+        if isinstance(raw_widgets, dict):
+            for k, v in raw_widgets.items():
+                if str(k) not in linked_names:
+                    inputs[str(k)] = v
+            api_graph[node_id] = {"class_type": class_type, "inputs": inputs}
+            continue
+        widgets = list(raw_widgets) if isinstance(raw_widgets, list) else []
+        meta = object_info.get(class_type, {})
+        meta_inputs = meta.get("input", {}) if isinstance(meta, dict) else {}
+        ordered_specs: list[tuple[str, Any]] = []
+        for group in ("required", "optional"):
+            section = meta_inputs.get(group, {})
+            if isinstance(section, dict):
+                ordered_specs.extend(section.items())
+
+        w_idx = 0
+        for field_name, spec in ordered_specs:
+            if field_name in linked_names:
+                continue
+            if not isinstance(spec, list) or not spec:
+                continue
+            kind = spec[0]
+            is_widget = isinstance(kind, list) or kind in (
+                "INT",
+                "FLOAT",
+                "STRING",
+                "BOOLEAN",
+                "COMBO",
+            )
+            if not is_widget:
+                continue
+            if w_idx >= len(widgets):
+                break
+            inputs[field_name] = widgets[w_idx]
+            w_idx += 1
+            # ComfyUI adds an implicit control_after_generate widget after seed/noise_seed ints.
+            if (
+                kind == "INT"
+                and field_name in ("seed", "noise_seed")
+                and w_idx < len(widgets)
+                and widgets[w_idx] in ("fixed", "increment", "decrement", "randomize")
+            ):
+                w_idx += 1
+
+        api_graph[node_id] = {"class_type": class_type, "inputs": inputs}
+    return api_graph
 
 
 def _drop_loader(graph: dict[str, Any], node_id: str) -> None:

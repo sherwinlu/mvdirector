@@ -518,6 +518,9 @@ def _timed_shots(
             shot_type = ShotType.PERFORMANCE
         else:
             shot_type = seg.type
+        num_frames = frames_for(
+            slice_end - slice_start, video.fps, video.frame_multiple, video.frame_offset
+        )
         shots.append(
             Shot(
                 id=shot_id,
@@ -534,9 +537,7 @@ def _timed_shots(
                     end=round(slice_end, 3),
                     head_handle=round(seg.start - slice_start, 3),
                 ),
-                num_frames=frames_for(
-                    slice_end - slice_start, video.fps, video.frame_multiple, video.frame_offset
-                ),
+                num_frames=num_frames,
                 still=AssetState(attempts_allowed=config.retry.max_attempts),
                 video=AssetState(attempts_allowed=config.retry.max_attempts),
             )

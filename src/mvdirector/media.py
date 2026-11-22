@@ -255,3 +255,249 @@ def extract_frames(video: Path, width: int, fps: float | None = None) -> list[np
     if not frames:
         raise MediaToolError(f"No frames could be decoded from {video}")
     return frames
+
+
+def mirror_pad_audio(samples: np.ndarray, target_length: int) -> np.ndarray:
+    """Extend ``samples`` to ``target_length`` using a periodic triangle-wave mirror gather.
+
+    Avoids zero-padding silence cliffs at clip tails even when the requested padding exceeds
+    the original signal length.
+
+    Credits & Attribution:
+        Clean-room reimplementation of periodic mirror tail padding inspired by
+        ``SonderSaid/ComfyUI-Sonder-Editor``
+        (https://github.com/SonderSaid/ComfyUI-Sonder-Editor — ``server/audio_grid.py``).
+    """
+    arr = np.asarray(samples)
+    n = arr.shape[0]
+    if target_length <= n or n == 0:
+        return arr[: max(0, target_length)].copy()
+    if n == 1:
+        reps = (target_length, *([1] * (arr.ndim - 1)))
+        return np.tile(arr, reps)
+
+    # Triangle-wave fold of sample indices onto [0, n - 1] with period 2*(n - 1).
+    period = 2 * (n - 1)
+    idx = np.arange(target_length, dtype=np.int64) % period
+    folded = np.where(idx < n, idx, period - idx)
+    return arr[folded]
+
+
+def prepare_audio_slice(
+    src: Path,
+    dst: Path,
+    start: float,
+    end: float,
+    *,
+    target_duration: float | None = None,
+    vae_offset_seconds: float = 0.0,
+    mirror_pad: bool = True,
+) -> Path:
+    """Slice ``[start, end]`` with optional rational VAE front-crop offset & mirror tail padding.
+
+    When ``vae_offset_seconds`` is non-zero (e.g. ``0.046`` for LTX-2.3/2.5 or ``0.0125`` for
+    MiniMax H3), shifts the cut window using exact ``Fraction`` sample arithmetic so ComfyUI's
+    VAE front-crop lands in phase with the video frames. When ``mirror_pad`` is true and
+    ``target_duration`` exceeds available audio, extends the tail smoothly via
+    ``mirror_pad_audio`` instead of leaving silence cliffs.
+
+    Credits & Attribution:
+        Clean-room reimplementation inspired by ``SonderSaid/ComfyUI-Sonder-Editor``
+        (https://github.com/SonderSaid/ComfyUI-Sonder-Editor — ``server/audio_grid.py``).
+    """
+    if not math.isfinite(start) or not math.isfinite(end) or end <= start:
+        raise MediaToolError(f"Invalid audio slice span [{start}, {end}].")
+    if not math.isfinite(vae_offset_seconds):
+        raise MediaToolError(f"Invalid vae_offset_seconds: {vae_offset_seconds}")
+
+    raw_start = start + vae_offset_seconds
+    adj_start = max(0.0, raw_start)
+    lead_silence = max(0.0, -raw_start)
+    raw_duration = max(0.01, end - start)
+    adj_end = adj_start + max(0.01, raw_duration - lead_silence)
+    slice_audio(src, dst, adj_start, adj_end)
+
+    needs_lead = lead_silence > 1e-6
+    needs_pad = target_duration is not None and mirror_pad and math.isfinite(target_duration)
+    if not needs_lead and not needs_pad:
+        return dst
+
+    info = sf.info(str(dst))
+    samples, sr = sf.read(str(dst), dtype="float64", always_2d=True)
+    if needs_lead:
+        lead_samples = int(round(Fraction(str(round(lead_silence, 6))) * sr))
+        if lead_samples > 0:
+            zeros = np.zeros((lead_samples, samples.shape[1]), dtype=np.float64)
+            samples = np.concatenate([zeros, samples], axis=0)
+    if needs_pad and target_duration is not None:
+        target_frac = Fraction(str(round(max(raw_duration, target_duration), 6)))
+        target_samples = int(round(target_frac * sr))
+        if samples.shape[0] < target_samples and samples.shape[0] > 0:
+            samples = mirror_pad_audio(samples, target_samples)
+    elif not needs_lead:
+        return dst
+
+    fd, tmp_name = tempfile.mkstemp(prefix=".mvd_pad_", suffix=".wav", dir=dst.parent)
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        sf.write(str(tmp_path), samples, sr, subtype=info.subtype or "PCM_16")
+        os.replace(tmp_path, dst)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    return dst
+
+
+def extract_frame_at_index(video: Path, frame_index: int, dst: Path) -> Path:
+    """Extract the exact 0-based ``frame_index`` frame from ``video`` as a PNG atomically.
+
+    Used for trim-aware cross-shot handoff frames (ensuring ``continue`` / ``reframe`` shots
+    anchor onto the exact last frame that survives FFmpeg trimming, rather than an overshoot
+    lattice frame).
+
+    Credits & Attribution:
+        Trim-aware handoff frame extraction inspired by
+        ``GeekatplayStudio/ComfyUI-Music-to-Video``
+        (https://github.com/GeekatplayStudio/ComfyUI-Music-to-Video — ``nodes.py``) and
+        ``afj176/open-cinema-studio``
+        (https://github.com/afj176/open-cinema-studio — ``app/studio.py``).
+    """
+    if not video.is_file():
+        raise MediaToolError(f"Video file not found: {video}")
+    idx = max(0, int(frame_index))
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".mvd_frame_", suffix=".png", dir=dst.parent)
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        run(
+            [
+                "ffmpeg",
+                "-y",
+                "-v",
+                "error",
+                "-i",
+                str(video.resolve()),
+                "-vf",
+                f"select=eq(n\\,{idx})",
+                "-vframes",
+                "1",
+                str(tmp_path.resolve()),
+            ]
+        )
+        if not tmp_path.is_file() or tmp_path.stat().st_size == 0:
+            # Fallback to the final decodable frame if the clip was slightly shorter than idx.
+            run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-v",
+                    "error",
+                    "-sseof",
+                    "-0.2",
+                    "-i",
+                    str(video.resolve()),
+                    "-vf",
+                    "reverse",
+                    "-vframes",
+                    "1",
+                    str(tmp_path.resolve()),
+                ]
+            )
+        if not tmp_path.is_file() or tmp_path.stat().st_size == 0:
+            raise MediaToolError(f"Could not extract frame {idx} from {video}")
+        os.replace(tmp_path, dst)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    return dst
+
+
+def zoom_crop_image(src: Path, dst: Path, *, zoom_factor: float = 1.4) -> Path:
+    """Generate a Lanczos-zoomed center crop of ``src`` for empty-wide camera-path end guides.
+
+    Credits & Attribution:
+        Zoomed-crop camera-path end guides inspired by ``afj176/open-cinema-studio``
+        (https://github.com/afj176/open-cinema-studio — ``app/studio.py:_path_guide``) and
+        ``hexeosis-prime/nightshift``
+        (https://github.com/hexeosis-prime/nightshift — ``nightshift/build.py:zoom_crop``).
+    """
+    if not src.is_file():
+        raise MediaToolError(f"Source image not found: {src}")
+    if not math.isfinite(zoom_factor) or zoom_factor <= 1.0 or zoom_factor > 4.0:
+        raise MediaToolError(f"zoom_factor must be in (1.0, 4.0], got {zoom_factor}")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with Image.open(src) as image:
+        rgb = image.convert("RGB")
+        w, h = rgb.size
+        crop_w = max(2, int(round(w / zoom_factor)))
+        crop_h = max(2, int(round(h / zoom_factor)))
+        left = (w - crop_w) // 2
+        top = (h - crop_h) // 2
+        zoomed = rgb.crop((left, top, left + crop_w, top + crop_h)).resize(
+            (w, h), Image.Resampling.LANCZOS
+        )
+        fd, tmp_name = tempfile.mkstemp(prefix=".mvd_zoom_", suffix=".png", dir=dst.parent)
+        os.close(fd)
+        tmp_path = Path(tmp_name)
+        try:
+            zoomed.save(tmp_path, format="PNG")
+            os.replace(tmp_path, dst)
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
+    return dst
+
+
+def ensure_audio_track(video_path: Path, dst: Path) -> Path:
+    """Return ``video_path`` if it has an audio stream, else write a copy with silent stereo AAC.
+
+    Prevents ComfyUI video-loader nodes (such as ``VHS_LoadVideoPath``) from crashing on silent
+    reference or previz clips.
+
+    Credits & Attribution:
+        Clean-room silent-audio guard inspired by ``heroesjouney/aimoviestudiov2``
+        (https://github.com/heroesjouney/aimoviestudiov2 — ``comfy_video.py``).
+    """
+    info = probe(video_path)
+    if info.has_audio:
+        return video_path
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".mvd_aud_", suffix=".mp4", dir=dst.parent)
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        run(
+            [
+                "ffmpeg",
+                "-y",
+                "-v",
+                "error",
+                "-i",
+                str(video_path.resolve()),
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=channel_layout=stereo:sample_rate=44100",
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-shortest",
+                "-movflags",
+                "+faststart",
+                str(tmp_path.resolve()),
+            ]
+        )
+        os.replace(tmp_path, dst)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    return dst

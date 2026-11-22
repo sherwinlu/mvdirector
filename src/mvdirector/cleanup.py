@@ -12,6 +12,7 @@ attempts keeps everything, since a person may need to choose between its takes.
 
 from __future__ import annotations
 
+import contextlib
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,11 +30,12 @@ _GENERATION_FOLDERS = ("assets/stills", "assets/videos")
 class CleanupPlan:
     superseded: list[Path] = field(default_factory=list)  # takes beaten by a selected attempt
     orphaned: list[Path] = field(default_factory=list)  # generations the manifest never mentions
+    cache_files: list[Path] = field(default_factory=list)  # local .comfy_cache render entries
     size_bytes: int = 0  # measured when planned, so it can still be reported after deleting
 
     @property
     def files(self) -> list[Path]:
-        return [*self.superseded, *self.orphaned]
+        return [*self.superseded, *self.orphaned, *self.cache_files]
 
 
 def plan_cleanup(project: Project, manifest: Manifest) -> CleanupPlan:
@@ -79,6 +81,11 @@ def plan_cleanup(project: Project, manifest: Manifest) -> CleanupPlan:
             for p in seg_root.iterdir()
             if p.is_file() and _SEGMENT_CACHE_NAME.fullmatch(p.name) and p not in active_segments
         )
+    cache_root = project.root / ".comfy_cache"
+    if cache_root.is_dir() and not cache_root.is_symlink():
+        plan.cache_files = sorted(
+            p for p in cache_root.rglob("*") if p.is_file() and not p.is_symlink()
+        )
     plan.size_bytes = sum(path.stat().st_size for path in plan.files)
     return plan
 
@@ -93,6 +100,14 @@ def apply_cleanup(project: Project, manifest: Manifest, plan: CleanupPlan) -> No
                     attempt.path = None
     for path in plan.files:
         path.unlink(missing_ok=True)
+    cache_root = project.root / ".comfy_cache"
+    if plan.cache_files and cache_root.is_dir() and not cache_root.is_symlink():
+        for subdir in sorted(cache_root.rglob("*"), reverse=True):
+            if subdir.is_dir() and not subdir.is_symlink():
+                with contextlib.suppress(OSError):
+                    subdir.rmdir()
+        with contextlib.suppress(OSError):
+            cache_root.rmdir()
 
 
 def _is_settled(state: AssetState) -> bool:

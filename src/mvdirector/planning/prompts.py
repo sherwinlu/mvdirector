@@ -15,9 +15,145 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from mvdirector.models import Character, Framing, Manifest, Shot, ShotType
+from mvdirector.planning.world_state import build_ledger_from_facts, filter_look_for_state
 
 if TYPE_CHECKING:
     from mvdirector.config import VideoConfig
+
+# Still-photography tokens that can cause I2V/FLF2V video models (e.g. LTX) to freeze or crossfade.
+# Credit: GeekatplayStudio/ComfyUI-Music-to-Video (nodes.py: STILL_WORDS).
+_STILL_WORDS_RE = re.compile(
+    r"\b(?:film\s+still|still\s+frame|still\s+photo(?:graph)?|photograph|photographic\s+still|"
+    r"static\s+photo|freeze\s+frame)\b[:,;]?\s*",
+    re.IGNORECASE,
+)
+
+# Rear-view / over-the-shoulder cues where frontal facial features cause actors to spin around.
+# Credit: afj176/open-cinema-studio (app/staging.py).
+_REAR_VIEW_RE = re.compile(
+    r"\b(?:over[\s-]+(?:the[\s-]+)?(?:[a-z]+'s\s+)?shoulder|from\s+behind|rear\s+view|"
+    r"back\s+of\s+(?:their|his|her)\s+head|seen\s+from\s+behind|facing\s+away)\b",
+    re.IGNORECASE,
+)
+_FRONTAL_FACIAL_CLAUSE_RE = re.compile(
+    r"\b(?:eyes?|eyebrows?|brows?|nose|lips?|mouth|jawline|cheeks?|freckles?|beauty\s+mark|"
+    r"eyeliner|lipstick|makeup|pupil|gaze)\b",
+    re.IGNORECASE,
+)
+
+
+def strip_still_words(motion_text: str) -> str:
+    """Remove still-photography terms from motion prompts so video models stay dynamic.
+
+    Credits & Attribution:
+        Inspired by ``GeekatplayStudio/ComfyUI-Music-to-Video``
+        (https://github.com/GeekatplayStudio/ComfyUI-Music-to-Video — ``nodes.py:STILL_WORDS``).
+    """
+    cleaned = _STILL_WORDS_RE.sub("", motion_text)
+    return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+
+def is_rear_view_prompt(text: str) -> bool:
+    """True when ``text`` specifies over-the-shoulder or back-of-head staging."""
+    return bool(_REAR_VIEW_RE.search(text))
+
+
+def scrub_frontal_facial_details(description: str) -> str:
+    """Remove frontal facial-feature clauses for rear-view/OTS or wide-shot prompt hygiene.
+
+    Credits & Attribution:
+        - Rear-view/OTS facial scrubbing inspired by ``afj176/open-cinema-studio``
+          (https://github.com/afj176/open-cinema-studio — ``app/staging.py``).
+        - Anatomy-noun wide-framing hygiene inspired by ``JavaDerek/music-video-pipeline``
+          (https://github.com/JavaDerek/music-video-pipeline — ``prompting.py``).
+    """
+    clauses = re.split(r"([,;.])", description)
+    kept: list[str] = []
+    i = 0
+    while i < len(clauses):
+        part = clauses[i]
+        sep = clauses[i + 1] if i + 1 < len(clauses) else ""
+        i += 2
+        if not part.strip():
+            continue
+        if _FRONTAL_FACIAL_CLAUSE_RE.search(part):
+            continue
+        kept.append(part.strip() + sep)
+    cleaned = " ".join(kept).strip().rstrip(",;").strip()
+    return cleaned or description
+
+
+def fit_prompt_budget(prompt: str, max_chars: int, *, keep_tail: int = 2) -> str:
+    """Trim ``prompt`` to ``max_chars`` on sentence boundaries, pinning head and continuity tail.
+
+    Credits & Attribution:
+        Head + continuity-tail prompt budgeting inspired by
+        ``GeekatplayStudio/ComfyUI-Music-to-Video``
+        (https://github.com/GeekatplayStudio/ComfyUI-Music-to-Video — ``nodes.py:_fit_prompt``).
+    """
+    text = prompt.strip()
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+    if len(sentences) <= 1 + keep_tail:
+        return text[:max_chars].rstrip()
+
+    head = sentences[0]
+    tail = sentences[-keep_tail:] if keep_tail > 0 else []
+    middle = sentences[1 : len(sentences) - len(tail)]
+    reserved = len(head) + sum(len(t) + 1 for t in tail)
+    if reserved >= max_chars:
+        joined = " ".join([head, *tail])
+        return joined[:max_chars].rstrip()
+
+    chosen_mid: list[str] = []
+    used = reserved
+    for sent in middle:
+        if used + len(sent) + 1 <= max_chars:
+            chosen_mid.append(sent)
+            used += len(sent) + 1
+    return " ".join([head, *chosen_mid, *tail])
+
+
+def inject_multicut_timestamps(
+    sub_descriptions: Sequence[str],
+    shot_duration: float,
+    beat_offsets: Sequence[float] = (),
+) -> str:
+    """Deterministically prepend beat-locked ``[Shot N] At MM:SS.mmm`` cues to multi-cut prose.
+
+    Keeps the LLM writer timestamp-free so sub-cut timings never hallucinate or drift out of
+    order.
+
+    Credits & Attribution:
+        Timestamp-free LLM writer contract inspired by ``hodgemann/mondo-music-video``
+        (https://github.com/hodgemann/mondo-music-video — ``mmv/engine/schema.py``).
+    """
+    cleaned = [s.strip() for s in sub_descriptions if s.strip()]
+    if not cleaned:
+        return ""
+    n = len(cleaned)
+    dur = max(0.2, shot_duration)
+    raw_times = [dur * k / n for k in range(n)]
+    times = [0.0]
+    for target in raw_times[1:]:
+        if beat_offsets:
+            nearest = min(beat_offsets, key=lambda b: abs(b - target))
+            chosen = (
+                nearest if abs(nearest - target) <= 0.35 and nearest > times[-1] + 0.1 else target
+            )
+        else:
+            chosen = target
+        times.append(min(dur - 0.05, max(times[-1] + 0.1, chosen)))
+
+    lines: list[str] = []
+    for idx, (t, desc) in enumerate(zip(times, cleaned), start=1):
+        mins = int(t // 60)
+        secs = t - mins * 60
+        verb = "Opens on" if idx == 1 else "Hard cut to"
+        lines.append(f"[Shot {idx}] At {mins:02d}:{secs:06.3f}, {verb}: {desc}")
+    return " ".join(lines)
+
 
 BIBLE_SYSTEM = """You are the director of a music video that balances performer shots with
 cutaways. First interpret the song's meaning and musical style, then write the visual bible that
@@ -902,9 +1038,34 @@ def compose_still_prompt(
             parts.append("Face clearly visible, mouth unobstructed.")
     if shot.type.shows_singer:
         parts.append(_FRAMING_SCALE_NOTE.get(shot.framing, CAMERA_PLACEMENT_NOTE))
+        raw_still_text = shot.still.prompt_override or shot.still_prompt
+        rear_view = shot.type is not ShotType.LIPSYNC and is_rear_view_prompt(raw_still_text)
+        hide_facial = rear_view
+        if (
+            bound_references
+            and len(visible) >= 1
+            and ("reference_image_2" in bound_references or "set_image" in bound_references)
+            and reference_notation != "tags"
+        ):
+            # Explicit Picture N identity disambiguation (clean-room concept inspired by
+            # heroesjouney/aimoviestudiov2 prompt_builder.py).
+            slot_notes: list[str] = []
+            for slot_idx, param in enumerate(bound_references, start=1):
+                if param == "reference_image":
+                    p_label = visible[0][1].name or visible[0][0] or "the primary singer"
+                    slot_notes.append(f"Picture {slot_idx} defines {p_label}'s appearance")
+                elif param == "reference_image_2" and len(visible) > 1:
+                    s_label = visible[1][1].name or visible[1][0] or "the second performer"
+                    slot_notes.append(f"Picture {slot_idx} defines {s_label}'s appearance")
+                elif param == "set_image":
+                    slot_notes.append(f"Picture {slot_idx} defines only the empty location")
+            if slot_notes:
+                parts.append("; ".join(slot_notes) + ".")
         if len(visible) == 1:
             char_id, character, state_id = visible[0]
             if look := _look(character, state_id):
+                if hide_facial:
+                    look = scrub_frontal_facial_details(look)
                 if len(manifest.characters) <= 1 or char_id is None:
                     parts.append(f"The singer: {look}")
                 else:
@@ -913,10 +1074,14 @@ def compose_still_prompt(
         elif len(visible) > 1:
             primary_id, primary_char, primary_state = visible[0]
             if look := _look(primary_char, primary_state):
+                if hide_facial:
+                    look = scrub_frontal_facial_details(look)
                 label = primary_char.name or primary_id or "lead"
                 parts.append(f"The singer ({label}, matches reference portrait): {look}")
             for sec_id, sec_char, sec_state in visible[1:]:
                 if look := _look(sec_char, sec_state):
+                    if hide_facial:
+                        look = scrub_frontal_facial_details(look)
                     sec_label = sec_char.name or sec_id or "performer"
                     role_prefix = (
                         f"Co-singer in frame ({sec_label})"
@@ -927,7 +1092,20 @@ def compose_still_prompt(
     chapter = manifest.find_chapter(shot.chapter_id)
     palette = chapter.palette if chapter and chapter.palette else bible.palette
     lighting = chapter.lighting if chapter and chapter.lighting else bible.lighting
-    parts.append(_style_line(bible.style, palette, lighting))
+    if bible.world_facts:
+        ledger = build_ledger_from_facts(
+            (f.entity, f.attribute, f.value, f.start_shot, f.irreversible)
+            for f in bible.world_facts
+        )
+        active_states = ledger.state_at(shot.index)
+        if active_states:
+            lighting = filter_look_for_state(lighting, active_states)
+            style_filtered = filter_look_for_state(bible.style, active_states)
+            parts.append(_style_line(style_filtered, palette, lighting))
+        else:
+            parts.append(_style_line(bible.style, palette, lighting))
+    else:
+        parts.append(_style_line(bible.style, palette, lighting))
     return " ".join(part.strip() for part in parts if part.strip())
 
 
@@ -954,7 +1132,7 @@ def compose_motion_prompt(
         )
         if shot.previz_mapping.strip():
             parts.append(f"Stand-in mapping: {shot.previz_mapping.strip()}")
-    parts.append(shot.video.prompt_override or shot.motion_prompt)
+    parts.append(strip_still_words(shot.video.prompt_override or shot.motion_prompt))
     if reference_notation == "tags":
         parts.append("Animate starting from @image1.")
     if shot.allow_cuts:

@@ -1507,6 +1507,16 @@ def test_continue_still_defers_in_stills_run_and_hands_off_with_unique_files(
     assert s1.still.status is AssetStatus.PASSED
     assert s2.still.status is AssetStatus.PENDING and not s2.still.attempts
 
+    # A take of s001 left mid-retry (e.g. an interrupted run) is not final: still no handoff.
+    interrupted = proj.root / "assets" / "videos" / "s001_a01.mp4"
+    interrupted.parent.mkdir(parents=True, exist_ok=True)
+    interrupted.write_bytes(clip_src.read_bytes())
+    failed = _clip("assets/videos/s001_a01.mp4")
+    failed.qc = QCReport(passed=False, score=0.2)
+    s1.video.attempts.append(failed)
+    assert s1.video.status is AssetStatus.PENDING
+    assert runner()._take_handoff_still(s2, s2.still) is True and not s2.still.attempts
+
     # `mvd videos`: s001's clip renders first, then s002 takes its handoff still on demand.
     runner().run([AssetKind.VIDEO])
     first = s2.still.selected

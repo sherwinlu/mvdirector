@@ -367,16 +367,17 @@ class ShotRunner:
                 prev.id,
             )
             return False
+        if prev.video.status is AssetStatus.PENDING:
+            # Not final yet: even an existing take may still be retried or replaced.
+            log.warning(
+                "%s: continuity 'continue' waits for %s's clip; this still will be that clip's "
+                "last frame once its video is finished (`mvd videos` or `mvd run`).",
+                shot.id,
+                prev.id,
+            )
+            return True
         tail = self._played_tail(prev)
         if tail is None:
-            if prev.video.status is AssetStatus.PENDING:
-                log.warning(
-                    "%s: continuity 'continue' waits for %s's clip; this still will be that "
-                    "clip's last frame once the video exists (`mvd videos` or `mvd run`).",
-                    shot.id,
-                    prev.id,
-                )
-                return True
             log.warning(
                 "%s: %s has no usable clip to continue from; this shot gets a newly generated "
                 "still, so the join renders as a cut.",

@@ -19,7 +19,7 @@ from mvdirector import api, mix_assemble
 from mvdirector.config import ReviewMode
 from mvdirector.errors import MVDError
 from mvdirector.generation.runner import RunEvent
-from mvdirector.models import AssetKind, Character, Manifest, ProjectMode
+from mvdirector.models import AssetKind, Character, Manifest, ProjectMode, VideoStyle
 from mvdirector.project import Project
 from mvdirector.review import policy as review_policy
 
@@ -269,11 +269,19 @@ def plan(
         "--tracklist",
         help="Cue sheet or tracklist (.json, .yaml, .cue, .txt) when planning in mix mode.",
     ),
+    style: VideoStyle | None = typer.Option(
+        None,
+        "--style",
+        help=(
+            "Override standard-mode video style: 'lipsync', 'narrative' "
+            "(characters, no lip-sync), or 'visual' (100% b-roll, no characters)."
+        ),
+    ),
 ) -> None:
     """Create the shot manifest from the analysis, lyrics/tracklist and style brief."""
     try:
         project, manifest = api.plan(
-            project_dir, overwrite=overwrite, mode=mode, tracklist=tracklist
+            project_dir, overwrite=overwrite, mode=mode, tracklist=tracklist, video_style=style
         )
     except MVDError as exc:
         raise _fail(exc) from exc

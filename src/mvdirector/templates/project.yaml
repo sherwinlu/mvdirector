@@ -101,6 +101,7 @@ llm:
   #   provider: openai_compatible base_url: http://localhost:1234/v1   (LM Studio)
 
 planning:
+  video_style: lipsync           # lipsync | narrative (characters, no lip-sync) | visual (100% b-roll, no characters)
   wardrobe_monotonic: true       # a costume change is one-way (a cape taken off stays off)
   allow_multicut_shots: false    # allow the planner to emit multi-angle montage cuts (allow_cuts)
   max_lipsync_share: 0.45        # cap on screen time the singer sings to camera: 0.7 performance,

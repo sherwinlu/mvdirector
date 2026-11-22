@@ -20,7 +20,14 @@ import numpy as np
 from mvdirector import tuning as tuning_mod
 from mvdirector.audio import lyrics as lyrics_mod
 from mvdirector.audio import stem_pack as stem_pack_mod
-from mvdirector.models import BOTH_VOICES, Analysis, MusicalFeatures, TimeSpan, VocalTurn
+from mvdirector.models import (
+    BOTH_VOICES,
+    Analysis,
+    MusicalFeatures,
+    TimeSpan,
+    VideoStyle,
+    VocalTurn,
+)
 from mvdirector.project import Project
 
 log = logging.getLogger(__name__)
@@ -107,14 +114,17 @@ def detect_vocal_windows(
     threshold_db: float = -30.0,
     min_duration: float = 0.3,
     merge_gap: float = 0.6,
+    min_peak_rms: float = 1e-3,
 ) -> list[TimeSpan]:
     """Spans where the vocal stem is louder than ``threshold_db`` relative to its peak.
 
     Gaps shorter than ``merge_gap`` (breaths) are bridged; blips shorter than
-    ``min_duration`` (stem bleed) are dropped.
+    ``min_duration`` (stem bleed) are dropped. Stems whose peak RMS is below
+    ``min_peak_rms`` (-60 dBFS by default) are treated as silent so near-zero stem bleed
+    does not register as singing.
     """
     peak = float(rms.max()) if rms.size else 0.0
-    if not math.isfinite(peak) or peak <= 0.0:
+    if not math.isfinite(peak) or peak < min_peak_rms or peak <= 0.0:
         return []
     safe_rms = np.where(np.isfinite(rms), rms, 0.0)
     active = 20.0 * np.log10(np.maximum(safe_rms, 1e-10) / peak) > threshold_db
@@ -728,13 +738,31 @@ def analyze_musical_features(
 def analyze_project(project: Project) -> Analysis:
     """Analyze the project's mix and stems and return the result (does not save it)."""
     inputs, video = project.config.inputs, project.config.video
+    require_vocals = project.config.planning.video_style is VideoStyle.LIPSYNC
     mix = load_mono(project.input_path(inputs.mix, "mix"))
-    vocals = load_mono(project.input_path(inputs.vocals, "vocals"))
+    vocals_path = project.path(inputs.vocals) if inputs.vocals else None
+    if require_vocals:
+        vocals: np.ndarray | None = load_mono(project.input_path(inputs.vocals, "vocals"))
+    elif vocals_path is not None and vocals_path.is_file():
+        vocals = load_mono(vocals_path)
+    else:
+        vocals = None
     duration = len(mix) / ANALYSIS_SR
 
-    lyrics_path = project.input_path(inputs.lyrics, "lyrics")
-    lyrics_raw = lyrics_path.read_text("utf-8-sig")
-    lyrics_for_tuning = "" if tuning_mod.is_starter_input(lyrics_path, "lyrics.txt") else lyrics_raw
+    lyrics_candidate = project.path(inputs.lyrics) if inputs.lyrics else None
+    if require_vocals:
+        lyrics_path: Path | None = project.input_path(inputs.lyrics, "lyrics")
+    elif lyrics_candidate is not None and lyrics_candidate.is_file():
+        lyrics_path = lyrics_candidate
+    else:
+        lyrics_path = None
+
+    lyrics_raw = lyrics_path.read_text("utf-8-sig") if lyrics_path is not None else ""
+    lyrics_for_tuning = (
+        ""
+        if lyrics_path is None or tuning_mod.is_starter_input(lyrics_path, "lyrics.txt")
+        else lyrics_raw
+    )
     _, style_for_tuning = tuning_mod.read_optional_project_inputs(project)
     pre_profile = tuning_mod.profile_track(
         lyrics_text=lyrics_for_tuning,
@@ -786,20 +814,31 @@ def analyze_project(project: Project) -> Analysis:
         log.warning("No usable beat grid was found; shots will be cut at equal intervals.")
 
     mix_rms, mix_times = rms_envelope(mix)
-    vocal_rms, vocal_times = rms_envelope(vocals)
-    windows = detect_vocal_windows(vocal_rms, vocal_times)
+    if vocals is not None:
+        vocal_rms, vocal_times = rms_envelope(vocals)
+        windows = detect_vocal_windows(vocal_rms, vocal_times)
+    else:
+        windows = []
     log.info(
         "Found %d vocal windows covering %.1fs", len(windows), sum(w.duration for w in windows)
     )
 
     lines = lyrics_mod.parse_lyrics(lyrics_raw)
-    words = lyrics_mod.load_or_transcribe_words(project)
+    words = (
+        lyrics_mod.load_or_transcribe_words(project)
+        if lines and (vocals is not None or inputs.word_timestamps)
+        else []
+    )
     if words:
         lines = lyrics_mod.align_lines_to_words(lines, words)
     lines = lyrics_mod.estimate_missing_timings(lines, windows)
 
     multi_singer_hint = lyrics_mod.labels_have_multiple_singers(line.section for line in lines)
-    vocal_turns = detect_vocal_turns(vocals, ANALYSIS_SR, force_two_voices=multi_singer_hint)
+    vocal_turns = (
+        detect_vocal_turns(vocals, ANALYSIS_SR, force_two_voices=multi_singer_hint)
+        if vocals is not None
+        else []
+    )
     if vocal_turns:
         log.info(
             "Detected %d vocal turns across %d distinct voice(s)",

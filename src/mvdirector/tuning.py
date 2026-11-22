@@ -26,7 +26,7 @@ from pydantic import ValidationError
 from mvdirector.audio import lyrics as lyrics_mod
 from mvdirector.config import CONFIG_FILENAME, PrepareConfig, ProjectConfig
 from mvdirector.errors import ConfigError
-from mvdirector.models import BOTH_VOICES, Analysis, TrackProfile, VocalMode
+from mvdirector.models import BOTH_VOICES, Analysis, TrackProfile, VideoStyle, VocalMode
 from mvdirector.project import Project
 from mvdirector.store import atomic_write
 
@@ -733,7 +733,8 @@ def recommend_adjustments(
             )
         )
 
-    if profile.drop_or_chop_heavy or profile.extreme_vocals:
+    lipsync_enabled = config.planning.video_style is VideoStyle.LIPSYNC
+    if lipsync_enabled and (profile.drop_or_chop_heavy or profile.extreme_vocals):
         candidates.append(
             (
                 "video.lipsync_min_vocal_fraction",
@@ -743,22 +744,23 @@ def recommend_adjustments(
         )
 
     share_caps: list[tuple[float, str]] = []
-    if profile.vocal_mode == "instrumental":
-        share_caps.append((0.0, "instrumental track needs no on-camera lip-sync shots"))
-    if profile.vocal_mode == "group":
-        share_caps.append(
-            (0.30, "group/choir vocals cannot be acoustically diarized past 2 soloists")
-        )
-    if profile.extreme_vocals:
-        share_caps.append(
-            (0.30, "whispered/harsh/FX vocals have lower lip-sync tracker reliability")
-        )
-    if profile.drop_or_chop_heavy:
-        share_caps.append(
-            (0.35, "reserve screen time for b-roll/performance on drops and vocal chops")
-        )
-    if profile.rap_or_fast_vocal:
-        share_caps.append((0.35, "balance rapid rap phrasing with performance/b-roll cutaways"))
+    if lipsync_enabled:
+        if profile.vocal_mode == "instrumental":
+            share_caps.append((0.0, "instrumental track needs no on-camera lip-sync shots"))
+        if profile.vocal_mode == "group":
+            share_caps.append(
+                (0.30, "group/choir vocals cannot be acoustically diarized past 2 soloists")
+            )
+        if profile.extreme_vocals:
+            share_caps.append(
+                (0.30, "whispered/harsh/FX vocals have lower lip-sync tracker reliability")
+            )
+        if profile.drop_or_chop_heavy:
+            share_caps.append(
+                (0.35, "reserve screen time for b-roll/performance on drops and vocal chops")
+            )
+        if profile.rap_or_fast_vocal:
+            share_caps.append((0.35, "balance rapid rap phrasing with performance/b-roll cutaways"))
     if share_caps:
         best_share, share_reason = min(share_caps, key=lambda item: item[0])
         candidates.append(("planning.max_lipsync_share", best_share, share_reason))

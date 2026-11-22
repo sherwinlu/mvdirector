@@ -54,7 +54,9 @@ from mvdirector.models import (
     Manifest,
     ProjectMode,
     ReferenceSet,
+    ShotType,
     TrackProfile,
+    VideoStyle,
 )
 from mvdirector.planning.brief import ensure_writable, generate_brief, write_brief
 from mvdirector.planning.mix_planner import build_mix_manifest
@@ -242,6 +244,10 @@ def validate_project(
         attempt(tool, partial(media.require_tool, tool))
     if project.config.mode is ProjectMode.MIX:
         workflow_names = ["t2i"] if project.config.mix.visual_source == "stills" else ["t2i", "i2v"]
+    elif project.config.planning.video_style is VideoStyle.VISUAL:
+        workflow_names = ["t2i", "i2v"]
+    elif project.config.planning.video_style is VideoStyle.NARRATIVE:
+        workflow_names = ["t2i", "still", "i2v"]
     else:
         workflow_names = list(project.config.comfy.workflows)
     for name in workflow_names:
@@ -442,6 +448,7 @@ def plan(
     *,
     mode: ProjectMode | None = None,
     tracklist: Path | None = None,
+    video_style: VideoStyle | None = None,
 ) -> tuple[Project, Manifest]:
     """Create the shot manifest from the analysis, lyrics/tracklist and style brief."""
     project = _with_mode(open_project(project_dir), mode)
@@ -450,6 +457,8 @@ def plan(
             raise MVDError("manifest.json already exists. Pass --overwrite to replace it.")
         inputs = project.config.inputs
         if project.config.mode is ProjectMode.MIX:
+            if video_style is not None:
+                raise ConfigError("--style / video_style applies to standard mode, not mix mode.")
             resolved_tracklist = _resolve_tracklist_arg(project, tracklist)
             if resolved_tracklist is not None:
                 analysis = analyze_mix_project(project, tracklist_override=resolved_tracklist)
@@ -472,14 +481,27 @@ def plan(
                 raise ConfigError(
                     "--tracklist requires mix mode (--mode mix or mode: mix in project.yaml)."
                 )
+            plan_config = project.config
+            if video_style is not None:
+                plan_config = project.config.model_copy(deep=True)
+                plan_config.planning.video_style = video_style
             mix_candidate = project.path(inputs.mix) if inputs.mix else None
             mix_path = mix_candidate if (mix_candidate and mix_candidate.is_file()) else None
+            if plan_config.planning.video_style is VideoStyle.LIPSYNC:
+                lyrics_text = project.input_path(inputs.lyrics, "lyrics").read_text("utf-8-sig")
+            else:
+                lyrics_candidate = project.path(inputs.lyrics) if inputs.lyrics else None
+                lyrics_text = (
+                    lyrics_candidate.read_text("utf-8-sig")
+                    if lyrics_candidate is not None and lyrics_candidate.is_file()
+                    else ""
+                )
             manifest = build_manifest(
-                project.config,
+                plan_config,
                 project.load_analysis(),
-                project.input_path(inputs.lyrics, "lyrics").read_text("utf-8-sig"),
+                lyrics_text,
                 project.input_path(inputs.style, "style").read_text("utf-8-sig"),
-                build_llm(project.config.llm),
+                build_llm(plan_config.llm),
                 mix_path=mix_path,
             )
         project.save_manifest(manifest)
@@ -751,8 +773,19 @@ def generate(
         names = ["t2i"] if AssetKind.STILL in effective_kinds else []
         names += ["i2v"] if AssetKind.VIDEO in effective_kinds else []
     else:
-        names = ["still", "t2i"] if AssetKind.STILL in effective_kinds else []
-        names += ["lipsync", "i2v"] if AssetKind.VIDEO in effective_kinds else []
+        active_shots = [
+            s for s in manifest.shots if selected_shots is None or s.id in selected_shots
+        ]
+        names = []
+        if AssetKind.STILL in effective_kinds:
+            if not active_shots or any(s.type.shows_singer for s in active_shots):
+                names.append("still")
+            if not active_shots or any(not s.type.shows_singer for s in active_shots):
+                names.append("t2i")
+        if AssetKind.VIDEO in effective_kinds:
+            if any(s.type is ShotType.LIPSYNC for s in active_shots):
+                names.append("lipsync")
+            names.append("i2v")
     templates = load_templates(project, names)
     if AssetKind.STILL in effective_kinds and manifest.mode is not ProjectMode.MIX:
         ready = check_assets(project, manifest, templates, selected_shots)

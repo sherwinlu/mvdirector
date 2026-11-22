@@ -186,6 +186,85 @@ Rules:
   or longer with distinct movement beats or camera shifts, you may structure motion_prompt as
   timestamped sub-beats covering the shot duration (e.g. '0-2.0s: ... 2.0-4.0s: ...')."""
 
+NARRATIVE_BIBLE_ADDENDUM = """VIDEO STYLE — NARRATIVE / NON-LIPSYNC PERFORMANCE:
+- This video has NO on-camera lip-sync. Characters NEVER sing or mouth lyrics to the camera.
+- Design recurring protagonist(s), dancer(s), or musician(s) who express the song's story and
+  emotion through movement, action, staging, and atmosphere rather than vocal lip-sync.
+- You are free to use wide staging, silhouettes, profiles, masks, choreography, and dynamic
+  camera language without close-up mouth-visibility constraints."""
+
+VISUAL_BIBLE_SYSTEM = """You are the director of a purely visual, characterless music video
+(100% b-roll: environments, architecture, light, weather, and recurring symbolic objects). First
+interpret the music's mood and meaning, then write the visual bible that every shot will follow.
+Write every field in English even when the lyrics or style brief are in another language, because
+downstream image and video models take English prompts. Every 'id' field MUST use ASCII lowercase
+letters, digits, and underscores only.
+
+- interpretation: before designing any visuals, analyze what the track is conveying as a director:
+  - meaning: two to four sentences on the emotional core, imagery, and subtext of the music (and
+    lyrics, if any).
+  - tone: one sentence on the emotional register and attitude (e.g. 'hypnotic and stark',
+    'luminous and melancholic').
+  - music_feel: one to two sentences on how the musical style, key/mood, instrumentation, and
+    dynamics translate into visual rhythm, lighting contrast, and camera movement.
+  - visual_motifs: 2 to 5 short recurring visual metaphors, objects, or natural phenomena grounded
+    in the music's mood.
+  - section_beats: one entry per song section, in order, using the EXACT section names listed
+    under SONG SECTIONS (empty list if SONG SECTIONS is '(none)'), each with section, emotion,
+    visual_beat, and camera_energy.
+- concept: two to four sentences on the overarching visual journey that ties the film together.
+- characters: ALWAYS return an empty list []. There are NO recurring human performers or singers.
+- appearance: ALWAYS return an empty string "".
+- invariants: ALWAYS return an empty string "".
+- wardrobe: ALWAYS return an empty list [].
+- style, palette, lighting: short phrases an image model can act on. Keep a consistent film stock
+  and color grade across all sets while letting practical light sources evolve per location.
+- negative_prompt: comma-separated things to avoid (include people, faces, singers, text).
+- settings: 3 to 6 distinct uninhabited environments or visual worlds. Each has a name, the
+  sections of the song it serves (sections), a concrete description of how it looks (naming one
+  primary mid-depth focal object so the lens has a clear plane of focus), how light/atmosphere and
+  the camera move there (movement), and an optional parent_set when a location is an altered
+  variant of an earlier set.
+- props: 0 to 3 recurring hero objects central to the visual storytelling (e.g. a monolith, clock,
+  prism, lantern). Each has id (short lowercase identifier), name, sections, and a concrete
+  description with approximate scale, finish, and affirmative descriptions of visible structure.
+- rules: 4 to 10 short actionable visual direction rules (camera language, physical camera
+  placement, lighting evolution, motion rhythm, no people in frame)."""
+
+NARRATIVE_SHOTS_ADDENDUM = """VIDEO STYLE — NARRATIVE / NON-LIPSYNC PERFORMANCE:
+- This video has NO lip-sync shots. Every 'performance' shot shows the character(s) acting,
+  moving, dancing, playing an instrument, or reacting with mouth closed (NEVER singing to camera).
+- Use the full range of framings (close_up, medium_close, medium, wide), angles, silhouettes, and
+  dynamic camera movements freely—there are no lip-sync mouth-visibility or steady-camera limits."""
+
+VISUAL_SHOTS_SYSTEM = """You are the director of a purely visual, characterless music video
+(100% b-roll). Timing is already fixed. For each shot you are given, choose the creative details.
+
+Rules:
+- Return exactly one entry per shot id you were given.
+- Every shot MUST keep type='broll', with character=null, characters=[], and wardrobe=null. Never
+  introduce people, singers, or human faces.
+- setting: use the exact name of one set from the visual bible, chosen for the shot's song
+  section and energy. Follow each set's sections and movement notes.
+- props: list of hero prop ids from PROPS visible in this shot (empty list when none appear).
+- framing: always choose close_up, medium_close, medium, or wide (never null). Vary framing
+  between neighbouring shots to create visual rhythm. Match detail to shot size: small textures and
+  object details belong in close_up/medium_close; architecture, scale, and atmosphere belong in
+  medium/wide.
+- State absences affirmatively (describe what IS visibly present rather than bare 'no X').
+- Physical camera placement: position the camera in open space with clear sightlines, never
+  clipping through walls, floors, or solid objects.
+- Serve the SONG INTERPRETATION (meaning, tone, music feel, visual motifs) and SECTION ARCS beat.
+  Shape energy across the track: build tension into peaks, strip back in calmer passages, and
+  close on a lingering image.
+- Use at least three distinct sets or lighting looks across the video. Something should visibly
+  evolve every 2 to 4 seconds (light shifting, particles, water, fog, shadows, camera glide).
+- still_prompt: in English, describes the first frame only—framing, camera placement, subject
+  object/environment, lighting, and atmosphere (no people or faces).
+- motion_prompt: in English, describes what moves in the scene and how the camera moves. Every
+  shot MUST remain a single continuous take with no internal cuts and no subtitles or on-screen
+  text."""
+
 REWRITE_SYSTEM = """You fix prompts for an AI image or video model after a quality check
 rejected the result. Rewrite the prompt in English so the listed problems are less likely, keeping
 the shot's intent, framing and setting.

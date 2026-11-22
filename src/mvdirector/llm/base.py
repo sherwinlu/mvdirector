@@ -241,7 +241,17 @@ class ChatBackend(ABC):
             reply = self._send(system_prompt, messages, schema)
             log.debug("Model reply (%d characters): %s", len(reply.text), reply.text[:500])
             try:
-                return schema.model_validate_json(extract_json(reply.text))
+                raw_json = extract_json(reply.text)
+                try:
+                    return schema.model_validate_json(raw_json)
+                except ValidationError as first_exc:
+                    # Open-weights models (e.g. Qwen2.5-Omni) sometimes emit literal newlines
+                    # inside multiline JSON strings like lyrics; retry with strict=False.
+                    try:
+                        parsed = json.loads(raw_json, strict=False)
+                    except json.JSONDecodeError:
+                        raise first_exc from None
+                    return schema.model_validate(parsed)
             except (ValidationError, LLMError) as exc:
                 last_error = exc
                 if reply.truncated:

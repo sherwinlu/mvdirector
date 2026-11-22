@@ -67,6 +67,14 @@ class ProjectMode(str, Enum):
     MIX = "mix"
 
 
+class VideoStyle(str, Enum):
+    """Direction style for standard-mode music videos."""
+
+    LIPSYNC = "lipsync"
+    NARRATIVE = "narrative"
+    VISUAL = "visual"
+
+
 # --------------------------------------------------------------------------- analysis
 
 

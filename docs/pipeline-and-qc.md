@@ -83,7 +83,7 @@ The shot-direction prompt also steers the creative arc: a section arc (restraine
 - **Pace checks and rule-based framing:** Without an LLM, performance shots and cutaways are framed wide, medium or medium-close by pace, with matching movement notes, and singing shots tighten from `medium_close` to `close_up` as pace rises while keeping a steady camera. `mvd plan` warns when every shot has the same framing or when shot scale runs strongly against the song's intensity (`r < -0.25`).
 - **Set fallback:** A set name not in the bible is matched loosely, else replaced with the first set.
 - **Monotonic wardrobe (`planning.wardrobe_monotonic`):** Wardrobe moves forward through each character's list by default; set to `false` if costumes change back and forth. A shot's wardrobe state is what is worn in its **first frame**.
-- **Motion prompt guards:** `video.motion_single_take` (keep shots as one continuous camera move unless `planning.allow_multicut_shots` / `Shot.allow_cuts` opts into multi-cut montage), `video.motion_no_subtitles`, `video.motion_no_music`, and `video.motion_include_lyrics` append deterministic video-generation constraints to `motion_prompt`.
+- **Motion prompt guards:** `video.motion_single_take` (keep shots as one continuous camera move unless `planning.allow_multicut_shots` / `Shot.allow_cuts` opts into multi-cut montage), `video.motion_no_subtitles`, `video.motion_no_music`, and `video.motion_include_lyrics` append deterministic video-generation constraints to `motion_prompt`. In `mode: mix`, the `No subtitles, no text.` guard is left out: mix loops are uninhabited and never carry lyrics, and naming text in a positive prompt primes distilled (`cfg: 1`) video models such as LTX-2.3 to fade in fake opening credits or title cards.
 - **Clips use handles** (`video.handle_seconds` on each side) and are trimmed to frame-exact length at `mvd assemble`, with the original mix replacing all generated audio.
 - **Stills gate videos:** No video time is spent on a still that has not passed QC or been approved by a person.
 
@@ -155,7 +155,7 @@ A failed **hard** check rejects the attempt outright. Otherwise the attempt pass
 | `no_people` | yes | Rejects unexpected faces (`>= broll_max_face_fraction`) in `broll` cutaways |
 | `identity` | yes | Face-embedding similarity to the shot's reference sheet (`qc.face_backend: insightface` only; skipped by default in favor of `vision_character`) |
 | `vision_spec` | yes | Vision LLM (`vision_spec_hard_min`): framing, set, environmental scale, action, production rules, and explicit exclusions (`no minute hand`, `no people`) |
-| `vision_artifacts` | yes | Vision LLM (`vision_hard_min`): hands, limbs, faces, anatomical height-to-width / head-to-body proportions, text, watermarks |
+| `vision_artifacts` | yes | Vision LLM (`vision_hard_min`): hands, limbs, faces, anatomical height-to-width / head-to-body proportions, garbled text, watermarks, and overlaid typography (title cards, opening credits, subtitles, captions) even when it is clean and legible |
 | `vision_character` | yes | Vision LLM, shown the reference sheet: same person, correct costume for the shot's wardrobe state, marks on the correct side (detail expectations scaled by framing) |
 
 **Videos**

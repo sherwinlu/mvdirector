@@ -1,7 +1,7 @@
 # mvdirector project configuration.
 # Every value below is the default; delete what you do not need to change.
 # Connection strings (comfy.base_url, comfy.headers, llm.base_url) may reference
-# allowed environment variables (MVD_*, COMFY_*, RUNPOD_TOKEN, or names listed in
+# allowed environment variables (MVD_*, COMFY_*, or names listed in
 # MVD_ALLOWED_ENV_VARS) via ${NAME} or ${NAME:-fallback}.
 
 title: My Song
@@ -65,8 +65,8 @@ mix:                             # used when mode: mix (30-90+ minute continuous
     position: bottom_left        # bottom_left | bottom_right | top_left | top_right
 
 comfy:
-  base_url: ${COMFY_URL:-http://127.0.0.1:8188}   # e.g. https://<pod-id>-8188.proxy.runpod.net
-  headers: {}                    # e.g. {Authorization: "Bearer ${RUNPOD_TOKEN}"}
+  base_url: ${COMFY_URL:-http://127.0.0.1:8188}   # e.g. https://<remote-comfy-host>:8188
+  headers: {}                    # e.g. {Authorization: "Bearer ${COMFY_TOKEN}"}
   request_timeout: 60
   job_timeout: 1800
   poll_interval: 3

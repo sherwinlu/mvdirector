@@ -1,5 +1,5 @@
-# All-in-one RunPod container: ComfyUI (CUDA) + Ollama (local Qwen/Gemma LLM) + mvdirector (`mvd`).
-# Designed for single-VM GPU pods (e.g. A100 80GB or RTX 6000 Ada 48GB) where RunPod runs one container.
+# All-in-one GPU container: ComfyUI (CUDA) + Ollama (local Qwen/Gemma LLM) + mvdirector (`mvd`).
+# Designed for single-VM cloud GPU instances (e.g. A100 80GB or RTX 6000 Ada 48GB) running one container.
 ARG OLLAMA_VERSION=0.40.16
 FROM ollama/ollama:${OLLAMA_VERSION} AS ollama
 
@@ -55,12 +55,12 @@ RUN pip3 install --no-cache-dir ".[qc,align,ui,anthropic]"
 ENV MVD_MEDIAPIPE_CACHE_DIR=/opt/mvdirector/models
 RUN python3 -c "from mvdirector.qc.faces import MediaPipeFaceAnalyzer, MediaPipeMouthTracker; MediaPipeFaceAnalyzer().close(); MediaPipeMouthTracker()"
 
-COPY docker/runpod-entrypoint.sh /usr/local/bin/runpod-entrypoint.sh
-RUN chmod +x /usr/local/bin/runpod-entrypoint.sh
+COPY docker/allinone-entrypoint.sh /usr/local/bin/allinone-entrypoint.sh
+RUN chmod +x /usr/local/bin/allinone-entrypoint.sh
 
 WORKDIR /workspace
 
 # 8188 = ComfyUI, 11434 = Ollama, 8501 = mvd review (Streamlit UI)
 EXPOSE 8188 11434 8501
 
-ENTRYPOINT ["/usr/local/bin/runpod-entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/allinone-entrypoint.sh"]

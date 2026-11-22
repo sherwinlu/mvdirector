@@ -5,7 +5,7 @@
 """Minimal ComfyUI HTTP client: upload inputs, queue a workflow, wait, download outputs.
 
 Polling ``/history`` is used instead of the websocket because it survives proxies
-(such as RunPod's) and reconnects without extra state.
+(such as hosted GPU proxies) and reconnects without extra state.
 """
 
 from __future__ import annotations

@@ -182,7 +182,7 @@ def test_expand_env_and_api_key_env_restrict_variable_names(
 
     monkeypatch.setenv("MVD_CUSTOM", "ok")
     monkeypatch.setenv("COMFY_API_KEY", "comfy-secret")
-    monkeypatch.setenv("RUNPOD_TOKEN", "rp-secret")
+    monkeypatch.setenv("COMFY_TOKEN", "comfy-bearer")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "top-secret")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret")
     monkeypatch.setenv("DATABASE_URL", "postgres://user:pass@db/app")
@@ -192,7 +192,7 @@ def test_expand_env_and_api_key_env_restrict_variable_names(
 
     assert expand_env("${MVD_CUSTOM}") == "ok"
     assert expand_env("${COMFY_API_KEY}") == "comfy-secret"
-    assert expand_env("${RUNPOD_TOKEN}") == "rp-secret"
+    assert expand_env("${COMFY_TOKEN}") == "comfy-bearer"
     for blocked in (
         "AWS_SECRET_ACCESS_KEY",
         "ANTHROPIC_API_KEY",

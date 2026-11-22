@@ -5,9 +5,9 @@
 
 set -euo pipefail
 
-# Persist models on RunPod's network volume (/runpod-volume) when mounted so cold starts
+# Persist models on a mounted network/data volume when present so cold starts
 # do not re-download LLM or ComfyUI weights.
-VOLUME_ROOT="${RUNPOD_VOLUME_PATH:-/runpod-volume}"
+VOLUME_ROOT="${MVD_VOLUME_PATH:-/data}"
 if [ -d "${VOLUME_ROOT}" ]; then
     export OLLAMA_MODELS="${OLLAMA_MODELS:-${VOLUME_ROOT}/ollama}"
     export HF_HOME="${HF_HOME:-${VOLUME_ROOT}/huggingface}"

@@ -13,7 +13,7 @@ Describe what happened and what you expected.
 
 - `mvdirector` version (`mvd --version` or commit hash):
 - Python version:
-- OS / Docker / RunPod:
+- OS / Docker / Cloud GPU:
 - ComfyUI workflow & models used:
 - LLM provider & model:
 

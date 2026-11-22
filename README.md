@@ -4,12 +4,12 @@ Plan, generate, quality-check and assemble a lip-synced music video from a Suno 
 
 You supply the mix, the vocal stem, the lyrics and a style brief (or generate lyrics and a brief with `mvd brief`). The pipeline analyzes the audio, has an LLM direct a shot list (a local Ollama model by default, which needs no API key; Claude, OpenAI and Gemini work too), locks character sheets, turnaround videos, set plates, hero props and optional 3D camera-blocking previz, renders stills and video clips **through ComfyUI** (open-weight GPU models like Qwen, Z-Image, Krea, LTX, Wan, or MOSS, or paid cloud API nodes like Nano Banana, Seedream, Seedance, Grok, or P-H3 / MiniMax), rejects and regenerates anything that fails its quality checks, and cuts the result to the beat with the original mix on top.
 
-The orchestrator runs on your Mac (or Linux/Windows machine). ComfyUI is the single execution engine for all image and video generation and can run anywhere with an HTTP address: a RunPod GPU pod, a local install, or a lightweight CPU-only ComfyUI instance when your workflows use paid cloud API nodes.
+The orchestrator runs on your Mac (or Linux/Windows machine). ComfyUI is the single execution engine for all image and video generation and can run anywhere with an HTTP address: a remote cloud GPU instance, a local install, or a lightweight CPU-only ComfyUI instance when your workflows use paid cloud API nodes.
 
 ## Status
 
 - **Alpha release — single-user local orchestrator:** `mvdirector` is designed for a single user running locally (talking to local or private ComfyUI/LLM endpoints). The Streamlit review UI, ComfyUI, and Ollama have no built-in authentication and bind to `127.0.0.1` by default.
-- **Orchestration verified on live ComfyUI + Ollama:** A three-character duet project has been taken end-to-end on a RunPod ComfyUI with a local Ollama model (`gemma3:12b`) doing the vision checks: `mvd analyze`, `mvd plan`, `mvd reference generate` / `lock` (four-panel sheets), `mvd stills` (Qwen-Image and Qwen-Image-Edit 2.1), `mvd videos` (Wan 2.1 + InfiniteTalk singing clips; LTX-2.5 in an earlier run), shot-by-shot review, and `mvd assemble`. Not yet verified: a complete solo-singer song on a real pod (solo paths are covered by unit tests only). LTX-2.5's audio-conditioned workflow showed lip-sync drift on singing clips, so pair it with InfiniteTalk, LatentSync or Seedance for tight mouth sync.
+- **Orchestration verified on live ComfyUI + Ollama:** A three-character duet project has been taken end-to-end on a remote GPU ComfyUI instance with a local Ollama model (`gemma3:12b`) doing the vision checks: `mvd analyze`, `mvd plan`, `mvd reference generate` / `lock` (four-panel sheets), `mvd stills` (Qwen-Image and Qwen-Image-Edit 2.1), `mvd videos` (Wan 2.1 + InfiniteTalk singing clips; LTX-2.5 in an earlier run), shot-by-shot review, and `mvd assemble`. Not yet verified: a complete solo-singer song on a real GPU host (solo paths are covered by unit tests only). LTX-2.5's audio-conditioned workflow showed lip-sync drift on singing clips, so pair it with InfiniteTalk, LatentSync or Seedance for tight mouth sync.
 - **Automated test suite:** Extensive unit and pipeline tests cover audio analysis, shot timing, single- and multi-character direction, workflow templating and bindings, `ComfyClient`, LLM backends, QC scoring and lip-sync maths, retry/review policies, path containment, safe identifier and env-var validation, schema migration, stale-lock recovery, and FFmpeg assembly (against fakes for ComfyUI and cloud LLM endpoints).
 - **You must supply the workflows.** Export your own ComfyUI API workflows and map their inputs in `<name>.bindings.json` (see [Workflows & Model Bindings](docs/workflows.md)).
 - **QC thresholds are starting points.** Calibrate thresholds on 20 to 30 of your own clips with `mvd calibrate`, and inspect `mvd qc-report` before trusting the gates. The lip-sync check is advisory by default: on sung vocals it did not predict what a person judged in sync, so a weak score sends the clip to review instead of rejecting it, and a singing shot that runs out of attempts falls back to a performance shot. See [Pipeline, Assets, Quality Checks & Review](docs/pipeline-and-qc.md).
@@ -53,7 +53,7 @@ brew install ffmpeg
 python -m venv .venv && source .venv/bin/activate
 pip install -c constraints.txt -e ".[qc,align,ui,dev]"      # add "anthropic" to use Claude
 ollama pull gemma3:12b                                      # default local LLM, see docs/setup.md for cloud providers
-export COMFY_URL=https://<pod-id>-8188.proxy.runpod.net     # or http://127.0.0.1:8188
+export COMFY_URL=http://127.0.0.1:8188                      # or your remote ComfyUI HTTPS URL
 
 mvd init projects/my-song                    # or `mvd init --mode mix projects/my-mix` for 30-90+ min continuous mixes
 cd projects/my-song
@@ -89,7 +89,7 @@ mvd assemble                                              # output/<title>.mp4
 
 ## Documentation
 
-- [Installation, Docker & Language Models](docs/setup.md) — Python extras, commercial licensing (`mediapipe` vs `insightface`), Docker Compose profiles & RunPod image, Apple Silicon setup, and configuring/testing LLM providers (`anthropic`, `openai`, `gemini`, `ollama`, `openai_compatible`).
+- [Installation, Docker & Language Models](docs/setup.md) — Python extras, commercial licensing (`mediapipe` vs `insightface`), Docker Compose profiles & all-in-one GPU image, Apple Silicon setup, and configuring/testing LLM providers (`anthropic`, `openai`, `gemini`, `ollama`, `openai_compatible`).
 - [ComfyUI Workflows & Model Bindings](docs/workflows.md) — Mapping `.api.json` + `.bindings.json`, `reference_notation` (`prose` vs `tags`), `audio_video` black-screen wrapper, model-family `video:` settings table, paid cloud API nodes, and `${ENV}` allowlist.
 - [Pipeline, Assets, Quality Checks & Review](docs/pipeline-and-qc.md) — Project layout, `mvd prepare`, `mvd brief`, track auto-tuning (`mvd tune`), visual bible & deterministic rules, reference sheets & turnaround videos, derived/embedded set plates & hero props, 3D blocking previz, `--draft` & `mvd upscale`, `allow_cuts` montage, QC gates, retry ladder, calibration, `light`/`strict` review, and Long-Form Mix Mode (`mode: mix`).
 - [Using mvdirector as a library](docs/library.md) — `mvdirector.api`, the public surface, and the `StateStore`, `AssetStorage` and `ComfyEndpointProvider` extension points.

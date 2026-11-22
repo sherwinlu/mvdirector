@@ -6,7 +6,7 @@
 
 Thresholds live here, not in code, so they can be calibrated per project.
 Connection and workflow-default strings may reference allowed environment variables
-(``MVD_*``, ``COMFY_*``, or ``RUNPOD_TOKEN``) as ``${NAME}`` or ``${NAME:-default}``.
+(``MVD_*`` or ``COMFY_*``) as ``${NAME}`` or ``${NAME:-default}``.
 """
 
 from __future__ import annotations
@@ -27,7 +27,6 @@ CONFIG_FILENAME = "project.yaml"
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ALLOWED_ENV_PREFIXES = ("MVD_", "COMFY_")
-_ALLOWED_ENV_EXACT = {"RUNPOD_TOKEN"}
 _ALLOWED_LLM_KEY_NAMES = {
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
@@ -67,21 +66,17 @@ def _extra_allowed_env_vars() -> set[str]:
 def is_allowed_env_var(name: str) -> bool:
     """Least-privilege allowlist for ``${NAME}`` expansion in connection/workflow fields.
 
-    Only ``MVD_*``, ``COMFY_*``, ``RUNPOD_TOKEN``, and names explicitly listed in
-    ``MVD_ALLOWED_ENV_VARS`` may be expanded into strings such as ``comfy.base_url``,
-    ``comfy.headers``, ``llm.base_url``, or workflow ``defaults``. LLM API keys and
-    unrelated secrets (such as ``DATABASE_URL``) are never expanded by default.
+    Only ``MVD_*``, ``COMFY_*``, and names explicitly listed in ``MVD_ALLOWED_ENV_VARS``
+    may be expanded into strings such as ``comfy.base_url``, ``comfy.headers``,
+    ``llm.base_url``, or workflow ``defaults``. LLM API keys and unrelated secrets
+    (such as ``DATABASE_URL``) are never expanded by default.
     """
     if not _ENV_NAME.match(name):
         return False
     upper = name.upper()
     if upper.startswith(_BLOCKED_ENV_PREFIXES):
         return False
-    return (
-        upper in _ALLOWED_ENV_EXACT
-        or upper.startswith(_ALLOWED_ENV_PREFIXES)
-        or upper in _extra_allowed_env_vars()
-    )
+    return upper.startswith(_ALLOWED_ENV_PREFIXES) or upper in _extra_allowed_env_vars()
 
 
 def is_allowed_api_key_env(name: str) -> bool:
@@ -791,7 +786,7 @@ def expand_env(value: Any) -> Any:
             if not is_allowed_env_var(name):
                 raise ConfigError(
                     f"Environment variable '{name}' is not allowed in {CONFIG_FILENAME}. "
-                    "Only MVD_*, COMFY_*, RUNPOD_TOKEN, or names listed in MVD_ALLOWED_ENV_VARS "
+                    "Only MVD_*, COMFY_*, or names listed in MVD_ALLOWED_ENV_VARS "
                     "may be expanded."
                 )
             resolved = os.environ.get(name, default)

@@ -16,4 +16,4 @@ body:
     id: context
     attributes:
       label: Your setup
-      description: Model provider, ComfyUI models, and whether you run locally, in Docker or on RunPod.
+      description: Model provider, ComfyUI models, and whether you run locally, in Docker, or on a remote cloud GPU.

@@ -9,7 +9,7 @@ brew install ffmpeg
 python -m venv .venv && source .venv/bin/activate
 pip install -c constraints.txt -e ".[qc,align,ui,dev]"      # add "anthropic" to use llm.provider: anthropic
 ollama pull gemma3:12b                                      # the default local model; or set the key for a cloud provider
-export COMFY_URL=https://<pod-id>-8188.proxy.runpod.net     # or http://127.0.0.1:8188
+export COMFY_URL=http://127.0.0.1:8188                      # or your remote ComfyUI HTTPS URL
 ```
 
 The extras let you install only what you use; by default `qc.on_missing_dependency` is `fail` so missing `qc` packages never downgrade checks silently (set `qc.on_missing_dependency: skip` in `project.yaml` to opt out):
@@ -27,7 +27,7 @@ The extras let you install only what you use; by default `qc.on_missing_dependen
 
 ---
 
-## Running with Docker (Local or RunPod Stack)
+## Running with Docker (Local or Cloud GPU Stack)
 
 `docker/` provides three image definitions and a profile-driven `docker-compose.yml`:
 
@@ -35,7 +35,7 @@ The extras let you install only what you use; by default `qc.on_missing_dependen
 |---|---|
 | `docker/Dockerfile.mvd` | `mvd` CLI + `ffmpeg` + MediaPipe QC + `faster-whisper` + Streamlit review UI (`:8501`) |
 | `docker/Dockerfile.comfy` | Multi-target ComfyUI image: `gpu` target (NVIDIA CUDA + `--reserve-vram`) and `cpu` target (for laptops using paid cloud API nodes) |
-| `docker/Dockerfile.runpod` | Single-container all-in-one image (ComfyUI + Ollama + `mvd`) for RunPod GPU pods (`A100 80GB`, `RTX 6000 Ada 48GB`) with `/runpod-volume` caching |
+| `docker/Dockerfile.allinone` | Single-container all-in-one image (ComfyUI + Ollama + `mvd`) for single-VM cloud GPU instances (`A100 80GB`, `RTX 6000 Ada 48GB`) with persistent volume caching (`MVD_VOLUME_PATH`, default `/data`) |
 
 Pick and choose which services run via `docker compose --profile`:
 
@@ -60,7 +60,7 @@ docker compose run --rm mvd validate -p /workspace/projects/my-song
 
 **Apple Silicon (M1–M4) MacBooks:** Docker Desktop on macOS runs containers inside a Linux VM without Apple Metal/MPS GPU passthrough. To use your Mac's GPU for local open-weight models (`qwen2.5vl:7b`, `gemma3:12b`), run Ollama and ComfyUI natively on macOS and point the `mvd` container at `COMFY_URL=http://host.docker.internal:8188` and `MVD_LLM_URL=http://host.docker.internal:11434`.
 
-**RunPod proxy notes.** The pod's ComfyUI is started only if `COMFYUI_PASSWORD` is at least 12 characters. The proxy answers 403 to Python's default `User-Agent`; `mvd` is unaffected, but when you probe the server yourself with `urllib` or `requests`, send a `curl/...` user agent. A fresh container disk has none of your model symlinks or files, so check `mvd validate` before a long run.
+**Remote GPU proxy notes.** Some hosted HTTP proxies reject Python's default `User-Agent` with 403 (`mvd` sets a compatible user agent automatically, but if you probe the server manually with `urllib` or `requests`, pass a `curl/...` user agent). Fresh cloud container disks also start without your model files or symlinks, so run `mvd validate` before a long job.
 
 ---
 

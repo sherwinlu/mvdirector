@@ -20,13 +20,30 @@ if TYPE_CHECKING:
     from mvdirector.config import VideoConfig
 
 BIBLE_SYSTEM = """You are the director of a music video that balances performer shots with
-cutaways. Write the visual bible that every shot will follow.
+cutaways. First interpret the song's meaning and musical style, then write the visual bible that
+every shot will follow.
 Write every field in English even when the lyrics or style brief are in another language or mix
 languages, because downstream image and video models take English prompts. Every 'id' field MUST
 use ASCII lowercase letters, digits, and underscores only (romanize non-Latin names for ids, such
 as id='sakura' with name='さくら').
 
-- concept: two to four sentences on the idea that ties the video together.
+- interpretation: before designing any visuals, analyze what the song is conveying as a director:
+  - meaning: two to four sentences on what the song is really about beneath the literal words —
+    its core theme, emotional conflict, and subtext.
+  - tone: one sentence on the emotional register and attitude (e.g. 'wistful and restrained,
+    never melodramatic', 'defiant and ironic', 'haunted and intimate').
+  - music_feel: one to two sentences on how the musical style, key/mood, instrumentation, dynamics,
+    and vocal delivery translate into visual rhythm, lighting contrast, and movement.
+  - visual_motifs: 2 to 5 short recurring visual metaphors or symbols grounded in the song's
+    meaning (not merely literal objects named once in a lyric).
+  - section_beats: one entry per song section, in order, using the EXACT section names listed
+    under SONG SECTIONS (do not invent or rename sections), each with:
+    - section: exact section name from SONG SECTIONS.
+    - emotion: the emotional state or shift in this section.
+    - visual_beat: what happens visually or narratively here to express the lyrics and music.
+    - camera_energy: how shot scale, pacing, and performance intensity should feel here.
+- concept: two to four sentences on the visual idea that ties the video together, grounded directly
+  in 'interpretation' (meaning, tone, music_feel, and visual_motifs).
 - characters: every distinct singer, vocalist, or on-camera band/group member indicated by the
   style brief, section headers, or lyrics (one entry for a solo track; two for a duet; one per
   member or named character for a band, group, or theatrical piece). Every singer or recurring
@@ -126,6 +143,10 @@ Rules:
   below, level with, or passing through tables, walls, or solid objects, and never slice or
   occlude a performer's body with foreground furniture edges.
 - Follow the production rules you are given.
+- Serve the SONG INTERPRETATION (meaning, tone, music feel, visual motifs) and the current
+  section's SECTION ARCS beat (emotion, visual beat, camera energy) in every shot. Express the
+  emotional subtext and musical style through performance, staging, light, and recurring motifs
+  rather than literally illustrating isolated lyric words.
 - Use the position in the song and the section to shape energy: build tension toward
   choruses, release in them, hold still where the song is stripped back. Match energy to
   intensity (0 calm to 1 peak).
@@ -197,7 +218,9 @@ concept, optional target duration, and musical/visual vibe, write:
 
 INFER_FROM_LYRICS_SYSTEM = """You are a music video director and producer preparing a project from
 a finished audio track with no existing lyrics file or style brief. Given a timestamped vocal
-transcript and a compact audio summary (duration, BPM, vocal coverage, energy arc), return:
+transcript, a compact audio and musical-character summary (duration, BPM, key/mode, timbral
+brightness, percussiveness, dynamic range, vocal coverage, energy arc), and optionally the audio
+track itself, return:
 
 - lyrics: the transcribed words organized under English [Section] headers ([Intro], [Verse 1],
   [Pre-Chorus], [Chorus], [Verse 2], [Bridge], [Outro]; for duets or alternating vocalists, tag
@@ -209,15 +232,17 @@ transcript and a compact audio summary (duration, BPM, vocal coverage, energy ar
   and contractions as sung, and fix a word only when the transcript is plainly a mishearing).
   Put ONLY sung adlibs in (parentheses); never put unspoken SFX or stage directions in
   parentheses. If the track is instrumental with no transcribed words, return "[Instrumental]".
-- music_style: a concise musical style description in English inferred from the lyrics' tone,
-  language(s), structure, tempo, and energy arc (genre, vocal language and register/delivery,
+- music_style: a concise musical style description in English grounded in the audio/musical
+  character (key/mode, timbre, percussiveness, dynamics, instrumentation if heard) and the lyrics'
+  tone, language(s), structure, and energy arc (genre, vocal language and register/delivery,
   rhythm feel, and production mood).
-- visual_direction: a concrete creative brief in English for mvdirector's visual bible inferred from
-  the lyrics' themes, imagery, persona, and emotional arc. Cover the singer/performer's look and
-  costume arc, 3 to 5 concrete locations/sets grounded in the lyrical imagery, lighting, color
-  palette, and story beats. Explicitly design for on-camera lip-synced singing performance during
-  vocal hooks and key verses (clear, well-lit, unobstructed face and mouth with no masks or
-  foreground obstructions) intercut with atmospheric/narrative cutaways inspired by the lyrics.
+- visual_direction: a concrete creative brief in English for mvdirector's visual bible grounded in
+  the song's deeper meaning, emotional subtext, musical feel, and lyrical imagery. State what the
+  song is conveying emotionally, then cover the singer/performer's look and costume arc, 3 to 5
+  concrete locations/sets, recurring visual motifs, lighting, color palette, and story beats.
+  Explicitly design for on-camera lip-synced singing performance during vocal hooks and key verses
+  (clear, well-lit, unobstructed face and mouth with no masks or foreground obstructions) intercut
+  with atmospheric/narrative cutaways inspired by the song's meaning.
   Write music_style and visual_direction as plain English prose without markdown (no asterisks,
   headings or bullet syntax). Do not quote a BPM figure; describe the tempo feel in words."""
 

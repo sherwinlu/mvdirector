@@ -13,12 +13,13 @@ from __future__ import annotations
 import logging
 import math
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 
 from mvdirector import tuning as tuning_mod
 from mvdirector.audio import lyrics as lyrics_mod
-from mvdirector.models import BOTH_VOICES, Analysis, TimeSpan, VocalTurn
+from mvdirector.models import BOTH_VOICES, Analysis, MusicalFeatures, TimeSpan, VocalTurn
 from mvdirector.project import Project
 
 log = logging.getLogger(__name__)
@@ -28,6 +29,15 @@ HOP_LENGTH = 512
 # Tempos outside this range are folded by whole octaves: beat trackers often lock onto half or
 # double time (a slow blues reads as 185 BPM), and cuts follow the beat grid.
 TEMPO_RANGE_BPM = (70.0, 160.0)
+
+_PITCH_CLASSES = ("C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B")
+_KRUMHANSL_MAJOR = np.array(
+    [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88], dtype=np.float64
+)
+_KRUMHANSL_MINOR = np.array(
+    [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17], dtype=np.float64
+)
+_MIN_KEY_CORRELATION = 0.25
 
 
 def load_mono(path: Path, sr: int = ANALYSIS_SR) -> np.ndarray:
@@ -523,6 +533,179 @@ def bar_intensity(
     return [round(m / peak, 3) if peak > 0 else 0.0 for m in means]
 
 
+def _estimate_key_mode(
+    chroma_mean: np.ndarray,
+) -> tuple[str | None, Literal["major", "minor"] | None]:
+    """Estimate musical key and mode via Krumhansl-Schmuckler profile correlation."""
+    centered = chroma_mean.astype(np.float64) - float(np.mean(chroma_mean))
+    norm = float(np.linalg.norm(centered))
+    if not math.isfinite(norm) or norm <= 1e-9:
+        return None, None
+    vec = centered / norm
+
+    best_corr = -1.0
+    best_key: str | None = None
+    best_mode: Literal["major", "minor"] | None = None
+    mode_profiles: tuple[tuple[Literal["major", "minor"], np.ndarray], ...] = (
+        ("major", _KRUMHANSL_MAJOR),
+        ("minor", _KRUMHANSL_MINOR),
+    )
+    for mode_name, raw_profile in mode_profiles:
+        prof = raw_profile - float(np.mean(raw_profile))
+        prof = prof / float(np.linalg.norm(prof))
+        for tonic, pitch_name in enumerate(_PITCH_CLASSES):
+            corr = float(np.dot(vec, np.roll(prof, tonic)))
+            if corr > best_corr:
+                best_corr = corr
+                best_key = f"{pitch_name} {mode_name}"
+                best_mode = mode_name
+    if best_corr < _MIN_KEY_CORRELATION:
+        return None, None
+    return best_key, best_mode
+
+
+def _brightness_label(centroid_hz: float) -> Literal["dark", "warm", "balanced", "bright"]:
+    if centroid_hz < 1200.0:
+        return "dark"
+    if centroid_hz < 2000.0:
+        return "warm"
+    if centroid_hz < 3200.0:
+        return "balanced"
+    return "bright"
+
+
+def _percussiveness_label(
+    ratio: float,
+) -> Literal["ambient", "melodic", "balanced", "rhythmic", "percussive"]:
+    if ratio < 0.12:
+        return "ambient"
+    if ratio < 0.25:
+        return "melodic"
+    if ratio < 0.45:
+        return "balanced"
+    if ratio < 0.65:
+        return "rhythmic"
+    return "percussive"
+
+
+def _dynamic_range_label(dr_db: float) -> Literal["flat", "moderate", "dynamic", "cinematic"]:
+    if dr_db < 6.0:
+        return "flat"
+    if dr_db < 12.0:
+        return "moderate"
+    if dr_db < 18.0:
+        return "dynamic"
+    return "cinematic"
+
+
+_MAX_FEATURE_SECONDS = 180.0
+
+
+def _bounded_mono(mix: np.ndarray, sr: int) -> np.ndarray:
+    """Return a finite 1D float32 array bounded to at most ``_MAX_FEATURE_SECONDS``."""
+    arr = np.asarray(mix, dtype=np.float32)
+    if arr.ndim > 1:
+        # Downmix (channels, samples) or (samples, channels) to mono.
+        axis = 0 if arr.shape[0] <= arr.shape[-1] else -1
+        arr = np.mean(arr, axis=axis, dtype=np.float32)
+    arr = np.nan_to_num(arr.reshape(-1), nan=0.0, posinf=0.0, neginf=0.0)
+    max_samples = int(_MAX_FEATURE_SECONDS * sr)
+    if arr.size <= max_samples or max_samples < 768:
+        return arr
+    # Sample three equal windows (opening, middle, closing) for O(1) memory on long tracks.
+    seg = max_samples // 3
+    mid = (arr.size - seg) // 2
+    return np.concatenate([arr[:seg], arr[mid : mid + seg], arr[-seg:]])
+
+
+def analyze_musical_features(
+    mix: np.ndarray,
+    sr: int = ANALYSIS_SR,
+    *,
+    tempo_bpm: float | None = None,
+) -> MusicalFeatures:
+    """Measure key/mode, timbral brightness, percussiveness, dynamics, and onset density."""
+    if mix.size == 0 or sr <= 0:
+        return MusicalFeatures()
+    clean = _bounded_mono(mix, sr)
+    if clean.size < 256:
+        return MusicalFeatures()
+    peak = float(np.max(np.abs(clean)))
+    if not math.isfinite(peak) or peak < 1e-6:
+        return MusicalFeatures()
+    clean = clean / np.float32(peak)
+
+    import librosa
+
+    n_fft = min(2048, max(256, 1 << int(math.floor(math.log2(clean.size)))))
+    mag = np.abs(librosa.stft(clean, n_fft=n_fft, hop_length=HOP_LENGTH))
+    if mag.size == 0:
+        return MusicalFeatures()
+
+    frame_rms = librosa.feature.rms(S=mag, frame_length=n_fft)[0]
+    peak_rms = float(np.max(frame_rms)) if frame_rms.size else 0.0
+    if not math.isfinite(peak_rms) or peak_rms <= 1e-9:
+        return MusicalFeatures()
+    active = frame_rms > (peak_rms * 0.01)
+    if not active.any():
+        active = np.ones_like(frame_rms, dtype=bool)
+
+    power = mag**2
+    chroma = librosa.feature.chroma_stft(S=power[:, active], sr=sr, n_fft=n_fft, tuning=0.0)
+    key, mode = _estimate_key_mode(np.mean(chroma, axis=1))
+
+    centroids = librosa.feature.spectral_centroid(S=mag, sr=sr)[0]
+    centroid_hz = float(np.median(centroids[active]))
+    if not math.isfinite(centroid_hz) or centroid_hz < 0.0:
+        centroid_hz = 0.0
+    brightness = _brightness_label(centroid_hz)
+
+    harm, perc = librosa.decompose.hpss(mag)
+    e_harm = float(np.sum(harm.astype(np.float64) ** 2))
+    e_perc = float(np.sum(perc.astype(np.float64) ** 2))
+    e_total = e_harm + e_perc
+    perc_ratio = max(0.0, min(1.0, e_perc / e_total)) if e_total > 1e-12 else 0.0
+    percussiveness = _percussiveness_label(perc_ratio)
+
+    active_rms = np.maximum(frame_rms[active].astype(np.float64), 1e-10)
+    rms_db = 20.0 * np.log10(active_rms / peak_rms)
+    dr_db = max(0.0, float(np.percentile(rms_db, 95) - np.percentile(rms_db, 15)))
+    if not math.isfinite(dr_db):
+        dr_db = 0.0
+    dynamic_range = _dynamic_range_label(dr_db)
+
+    duration = clean.size / float(sr)
+    onset_env = librosa.onset.onset_strength(y=clean, sr=sr, hop_length=HOP_LENGTH)
+    onsets = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr, hop_length=HOP_LENGTH)
+    onset_density = (len(onsets) / duration) if duration > 0 else 0.0
+    if not math.isfinite(onset_density) or onset_density < 0.0:
+        onset_density = 0.0
+
+    parts: list[str] = []
+    if key:
+        parts.append(key)
+    parts.append(f"{brightness} timbre")
+    parts.append(f"{percussiveness} texture")
+    parts.append(f"{dynamic_range} range ({dr_db:.1f} dB)")
+    if onset_density > 0:
+        parts.append(f"{onset_density:.1f} onsets/s")
+    if tempo_bpm is not None and math.isfinite(tempo_bpm) and tempo_bpm > 0:
+        parts.append(f"~{tempo_bpm:.0f} BPM")
+
+    return MusicalFeatures(
+        key=key,
+        mode=mode,
+        brightness=brightness,
+        spectral_centroid_hz=round(centroid_hz, 1),
+        percussiveness=percussiveness,
+        percussive_ratio=round(perc_ratio, 3),
+        dynamic_range=dynamic_range,
+        dynamic_range_db=round(dr_db, 1),
+        onset_density=round(onset_density, 2),
+        summary=", ".join(parts),
+    )
+
+
 def analyze_project(project: Project) -> Analysis:
     """Analyze the project's mix and stems and return the result (does not save it)."""
     inputs, video = project.config.inputs, project.config.video
@@ -582,6 +765,10 @@ def analyze_project(project: Project) -> Analysis:
             len({t.voice for t in vocal_turns}),
         )
 
+    musical_features = analyze_musical_features(mix, ANALYSIS_SR, tempo_bpm=tempo)
+    if musical_features.summary:
+        log.info("Musical character: %s", musical_features.summary)
+
     analysis = Analysis(
         duration=round(duration, 3),
         tempo_bpm=round(tempo, 2),
@@ -591,6 +778,7 @@ def analyze_project(project: Project) -> Analysis:
         vocal_windows=windows,
         vocal_turns=vocal_turns,
         lyric_lines=lines,
+        musical_features=musical_features,
     )
     profile = tuning_mod.profile_track(
         lyrics_text=lyrics_for_tuning,

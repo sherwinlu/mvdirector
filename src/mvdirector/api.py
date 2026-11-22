@@ -472,12 +472,15 @@ def plan(
                 raise ConfigError(
                     "--tracklist requires mix mode (--mode mix or mode: mix in project.yaml)."
                 )
+            mix_candidate = project.path(inputs.mix) if inputs.mix else None
+            mix_path = mix_candidate if (mix_candidate and mix_candidate.is_file()) else None
             manifest = build_manifest(
                 project.config,
                 project.load_analysis(),
                 project.input_path(inputs.lyrics, "lyrics").read_text("utf-8-sig"),
                 project.input_path(inputs.style, "style").read_text("utf-8-sig"),
                 build_llm(project.config.llm),
+                mix_path=mix_path,
             )
         project.save_manifest(manifest)
     return project, manifest

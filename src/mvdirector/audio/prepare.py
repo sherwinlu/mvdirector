@@ -42,8 +42,8 @@ from mvdirector.audio.stems import (
     atomic_copy,
 )
 from mvdirector.errors import ConfigError
-from mvdirector.llm import LLMClient, text_block
-from mvdirector.models import BOTH_VOICES, TimeSpan, VocalTurn
+from mvdirector.llm import LLMClient, complete_json_with_optional_audio
+from mvdirector.models import BOTH_VOICES, MusicalFeatures, TimeSpan, VocalTurn
 from mvdirector.planning import prompts
 from mvdirector.planning.brief import ensure_writable
 from mvdirector.project import Project
@@ -70,6 +70,7 @@ class AudioSummary:
     vocal_fraction: float
     energy_arc: list[str]
     vocal_turns: list[VocalTurn] = field(default_factory=list)
+    musical_features: MusicalFeatures | None = None
 
 
 @dataclass(frozen=True)
@@ -141,6 +142,9 @@ def summarize_audio(
     windows = analysis_mod.detect_vocal_windows(vocal_rms, vocal_times)
     vocal_turns = analysis_mod.detect_vocal_turns(vocals)
     intensities = analysis_mod.bar_intensity(mix_rms, mix_times, bars, duration)
+    musical_features = analysis_mod.analyze_musical_features(
+        mix, analysis_mod.ANALYSIS_SR, tempo_bpm=tempo
+    )
     vocal_seconds = sum(w.duration for w in windows)
     vocal_fraction = min(1.0, vocal_seconds / duration) if duration > 0 else 0.0
     return AudioSummary(
@@ -150,6 +154,7 @@ def summarize_audio(
         vocal_fraction=round(vocal_fraction, 3),
         energy_arc=format_energy_arc(bars, intensities, duration),
         vocal_turns=vocal_turns,
+        musical_features=musical_features,
     )
 
 
@@ -167,9 +172,17 @@ def fallback_style_brief(summary: AudioSummary, *, has_lyrics: bool) -> tuple[st
         if has_lyrics
         else "instrumental track"
     )
+    mf = summary.musical_features
+    musical_bits: list[str] = []
+    if mf is not None:
+        if mf.key:
+            musical_bits.append(f"in {mf.key}")
+        musical_bits.append(f"{mf.brightness} timbre")
+        musical_bits.append(f"{mf.percussiveness} texture")
+    musical_clause = f", {', '.join(musical_bits)}" if musical_bits else ""
     music_style = (
         f"{tempo_desc.capitalize()} contemporary track at ~{summary.tempo_bpm:.0f} BPM "
-        f"({summary.duration:.0f}s), {vocal_desc}."
+        f"({summary.duration:.0f}s){musical_clause}, {vocal_desc}."
     )
     if has_lyrics:
         visual_direction = (
@@ -201,6 +214,8 @@ def _build_inference_prompt(transcript: Transcript, summary: AudioSummary) -> st
         header.append(f"DETECTED LANGUAGE: {transcript.language}")
     if summary.energy_arc:
         header.append("ENERGY ARC: " + ", ".join(summary.energy_arc))
+    if summary.musical_features and summary.musical_features.summary:
+        header.append(f"MUSICAL CHARACTER: {summary.musical_features.summary}")
     voices = {t.voice for t in summary.vocal_turns}
     if len(voices) >= 2 or BOTH_VOICES in voices:
         both_note = (
@@ -248,6 +263,7 @@ def infer_inputs_from_transcript(
     summary: AudioSummary,
     *,
     llm: LLMClient | None,
+    audio_path: Path | None = None,
 ) -> tuple[InferredInputsReply, bool]:
     """Infer structured ``lyrics.txt`` and ``style.md`` from transcribed vocals + audio summary."""
     has_lyrics = any(seg.text.strip() for seg in transcript.segments)
@@ -263,10 +279,12 @@ def infer_inputs_from_transcript(
             False,
         )
 
-    reply = llm.complete_json(
+    reply = complete_json_with_optional_audio(
+        llm,
         system=prompts.INFER_FROM_LYRICS_SYSTEM,
-        content=[text_block(_build_inference_prompt(transcript, summary))],
+        text=_build_inference_prompt(transcript, summary),
         schema=InferredInputsReply,
+        audio_path=audio_path,
     )
     lyrics_text = reply.lyrics.strip()
     if not lyrics_text:
@@ -445,7 +463,9 @@ def prepare_project(
         )
 
     # 4. Infer structured lyrics.txt and lip-sync-ready style.md from the transcript.
-    inferred, used_llm = infer_inputs_from_transcript(transcript, summary, llm=llm)
+    inferred, used_llm = infer_inputs_from_transcript(
+        transcript, summary, llm=llm, audio_path=mix_path
+    )
 
     # 5. Persist generated text inputs atomically under the project lock.
     lyrics_text = inferred.lyrics.strip() + "\n"

@@ -162,6 +162,116 @@
       "title": "LyricLine",
       "type": "object"
     },
+    "MusicalFeatures": {
+      "additionalProperties": false,
+      "description": "Acoustic and musical characteristics measured directly from the audio mix.",
+      "properties": {
+        "key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Estimated musical key and mode (e.g. 'A minor', 'C major'), or null if atonal.",
+          "title": "Key"
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "enum": [
+                "major",
+                "minor"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Estimated harmonic mode ('major' or 'minor'), or null if unclear.",
+          "title": "Mode"
+        },
+        "brightness": {
+          "default": "balanced",
+          "description": "Timbral brightness inferred from median spectral centroid.",
+          "enum": [
+            "dark",
+            "warm",
+            "balanced",
+            "bright"
+          ],
+          "title": "Brightness",
+          "type": "string"
+        },
+        "spectral_centroid_hz": {
+          "default": 0.0,
+          "description": "Median spectral centroid in Hz across active frames.",
+          "minimum": 0.0,
+          "title": "Spectral Centroid Hz",
+          "type": "number"
+        },
+        "percussiveness": {
+          "default": "balanced",
+          "description": "Harmonic-vs-percussive texture balance.",
+          "enum": [
+            "ambient",
+            "melodic",
+            "balanced",
+            "rhythmic",
+            "percussive"
+          ],
+          "title": "Percussiveness",
+          "type": "string"
+        },
+        "percussive_ratio": {
+          "default": 0.0,
+          "description": "Share (0-1) of signal energy in the percussive component.",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Percussive Ratio",
+          "type": "number"
+        },
+        "dynamic_range": {
+          "default": "moderate",
+          "description": "Loudness contrast across the track.",
+          "enum": [
+            "flat",
+            "moderate",
+            "dynamic",
+            "cinematic"
+          ],
+          "title": "Dynamic Range",
+          "type": "string"
+        },
+        "dynamic_range_db": {
+          "default": 0.0,
+          "description": "95th-minus-15th percentile RMS loudness spread in dB across active frames.",
+          "minimum": 0.0,
+          "title": "Dynamic Range Db",
+          "type": "number"
+        },
+        "onset_density": {
+          "default": 0.0,
+          "description": "Average musical onsets per second.",
+          "minimum": 0.0,
+          "title": "Onset Density",
+          "type": "number"
+        },
+        "summary": {
+          "default": "",
+          "description": "Compact human-readable musical character summary for planning prompts.",
+          "title": "Summary",
+          "type": "string"
+        }
+      },
+      "title": "MusicalFeatures",
+      "type": "object"
+    },
     "TimeSpan": {
       "additionalProperties": false,
       "properties": {
@@ -402,6 +512,18 @@
       ],
       "default": null,
       "description": "Detected musical/vocal/language profile used for automatic parameter tuning."
+    },
+    "musical_features": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MusicalFeatures"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Acoustic musical qualities (key, mode, brightness, percussiveness, dynamics)."
     },
     "chapters": {
       "description": "Per-track segments measured in long-form mix mode.",

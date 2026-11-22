@@ -13,8 +13,11 @@ from mvdirector.llm.base import (
     ContentBlock,
     LLMClient,
     Reply,
+    audio_block,
+    complete_json_with_optional_audio,
     extract_json,
     image_block,
+    maybe_audio_block,
     text_block,
 )
 from mvdirector.llm.factory import PROVIDERS, build_llm
@@ -25,8 +28,11 @@ __all__ = [
     "ContentBlock",
     "LLMClient",
     "Reply",
+    "audio_block",
     "build_llm",
+    "complete_json_with_optional_audio",
     "extract_json",
     "image_block",
+    "maybe_audio_block",
     "text_block",
 ]

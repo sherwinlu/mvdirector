@@ -675,6 +675,40 @@
       "title": "ReviewReason",
       "type": "string"
     },
+    "SectionBeat": {
+      "additionalProperties": false,
+      "description": "Emotional and narrative direction for one song section.",
+      "properties": {
+        "section": {
+          "description": "Song section name matching the lyrics tags (e.g. 'Verse 1').",
+          "title": "Section",
+          "type": "string"
+        },
+        "emotion": {
+          "default": "",
+          "description": "Emotional state or tension in this section.",
+          "title": "Emotion",
+          "type": "string"
+        },
+        "visual_beat": {
+          "default": "",
+          "description": "What happens visually or narratively here to express the lyrics and music.",
+          "title": "Visual Beat",
+          "type": "string"
+        },
+        "camera_energy": {
+          "default": "",
+          "description": "How camera language, pacing, and performance energy should feel in this section.",
+          "title": "Camera Energy",
+          "type": "string"
+        }
+      },
+      "required": [
+        "section"
+      ],
+      "title": "SectionBeat",
+      "type": "object"
+    },
     "SetDesign": {
       "additionalProperties": false,
       "properties": {
@@ -946,6 +980,48 @@
       "title": "ShotType",
       "type": "string"
     },
+    "SongInterpretation": {
+      "additionalProperties": false,
+      "description": "Director's reading of the song's meaning, musical style, and emotional arc.",
+      "properties": {
+        "meaning": {
+          "default": "",
+          "description": "What the song is really about: core theme, subtext, and emotional thesis.",
+          "title": "Meaning",
+          "type": "string"
+        },
+        "tone": {
+          "default": "",
+          "description": "Emotional register and perspective (e.g. bittersweet, defiant, haunted).",
+          "title": "Tone",
+          "type": "string"
+        },
+        "music_feel": {
+          "default": "",
+          "description": "How the musical style, rhythm, instrumentation, and vocal delivery shape visuals.",
+          "title": "Music Feel",
+          "type": "string"
+        },
+        "visual_motifs": {
+          "description": "2 to 5 recurring visual metaphors or motifs grounded in the song's meaning.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Visual Motifs",
+          "type": "array"
+        },
+        "section_beats": {
+          "description": "Section-by-section emotional and narrative arc across the song.",
+          "items": {
+            "$ref": "#/$defs/SectionBeat"
+          },
+          "title": "Section Beats",
+          "type": "array"
+        }
+      },
+      "title": "SongInterpretation",
+      "type": "object"
+    },
     "TimeSpan": {
       "additionalProperties": false,
       "properties": {
@@ -968,6 +1044,18 @@
     "VisualBible": {
       "additionalProperties": false,
       "properties": {
+        "interpretation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SongInterpretation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Director's interpretation of the song's meaning, musical feel, and section arc."
+        },
         "concept": {
           "default": "",
           "title": "Concept",

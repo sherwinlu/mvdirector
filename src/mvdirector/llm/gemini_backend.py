@@ -18,6 +18,8 @@ _BLOCKED = {"SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "
 
 
 class GeminiChat(ChatBackend):
+    supports_audio: bool = True
+
     def __init__(
         self,
         *,
@@ -42,7 +44,7 @@ class GeminiChat(ChatBackend):
         for message in messages:
             parts: list[dict[str, Any]] = []
             for block in blocks_of(message["content"]):
-                if block["type"] == "image":
+                if block["type"] in ("image", "audio"):
                     source = block["source"]
                     parts.append(
                         {"inlineData": {"mimeType": source["media_type"], "data": source["data"]}}

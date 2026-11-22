@@ -15,7 +15,9 @@ import base64
 import io
 import json
 import logging
+import math
 import re
+import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,7 +27,8 @@ import numpy as np
 from PIL import Image
 from pydantic import BaseModel, ValidationError
 
-from mvdirector.errors import LLMError
+from mvdirector import media
+from mvdirector.errors import LLMError, LLMUnavailableError, MediaToolError
 
 log = logging.getLogger("mvdirector.llm")
 
@@ -35,6 +38,9 @@ Message = dict[str, Any]  # {"role": "user" | "assistant", "content": str | list
 
 MAX_IMAGE_SIDE = 1024
 IMAGE_TOKEN_ESTIMATE = 1000  # rough cost of one image, for context warnings only
+AUDIO_TOKEN_ESTIMATE = 4000  # rough cost of one attached song clip, for context warnings only
+MAX_AUDIO_SECONDS = 360.0
+MAX_AUDIO_BYTES = 6 * 1024 * 1024
 _MAX_CORRECTION_CHARS = 1500
 
 
@@ -60,6 +66,92 @@ def image_block(image: Path | np.ndarray) -> ContentBlock:
     pil.save(buffer, format="JPEG", quality=85)
     data = base64.standard_b64encode(buffer.getvalue()).decode("ascii")
     return {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": data}}
+
+
+def audio_block(
+    audio: Path,
+    *,
+    max_seconds: float = MAX_AUDIO_SECONDS,
+    max_bytes: int = MAX_AUDIO_BYTES,
+) -> ContentBlock:
+    """Encode an audio file as a compact mono MP3 block for audio-capable multimodal models."""
+    if not audio.is_file():
+        raise LLMError(f"Audio file not found for multimodal attachment: {audio}")
+    if not math.isfinite(max_seconds) or max_seconds <= 0 or max_bytes <= 0:
+        raise LLMError("max_seconds must be a positive finite number and max_bytes must be > 0.")
+    with tempfile.TemporaryDirectory(prefix="mvd-audio-") as tmpdir:
+        out_mp3 = Path(tmpdir) / "clip.mp3"
+        media.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-v",
+                "error",
+                "-i",
+                str(audio.resolve()),
+                "-t",
+                f"{max_seconds:.1f}",
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "24000",
+                "-c:a",
+                "libmp3lame",
+                "-b:a",
+                "48k",
+                str(out_mp3),
+            ],
+            timeout=60.0,
+        )
+        raw = out_mp3.read_bytes()
+    if not raw:
+        raise LLMError(f"Transcoded audio clip was empty for {audio}")
+    if len(raw) > max_bytes:
+        raise LLMError(
+            f"Transcoded audio clip ({len(raw)} bytes) exceeds limit ({max_bytes} bytes)"
+        )
+    data = base64.standard_b64encode(raw).decode("ascii")
+    return {"type": "audio", "source": {"type": "base64", "media_type": "audio/mpeg", "data": data}}
+
+
+def maybe_audio_block(llm: LLMClient, audio_path: Path | None) -> ContentBlock | None:
+    """Return an ``audio_block`` when ``llm`` supports native audio, or None on fallback."""
+    if audio_path is None or not getattr(llm, "supports_audio", False):
+        return None
+    if not audio_path.is_file():
+        return None
+    try:
+        return audio_block(audio_path)
+    except (LLMError, MediaToolError, OSError) as exc:
+        log.warning(
+            "Could not attach audio %s to LLM request (%s); using text cues.", audio_path, exc
+        )
+        return None
+
+
+def complete_json_with_optional_audio(
+    llm: LLMClient,
+    *,
+    system: str,
+    text: str,
+    schema: type[T],
+    audio_path: Path | None = None,
+) -> T:
+    """Send a JSON completion with optional audio, falling back to text on rejection."""
+    text_only = [text_block(text)]
+    attached = maybe_audio_block(llm, audio_path)
+    if attached is None:
+        return llm.complete_json(system=system, content=text_only, schema=schema)
+    try:
+        return llm.complete_json(system=system, content=[*text_only, attached], schema=schema)
+    except LLMUnavailableError:
+        raise
+    except LLMError as exc:
+        log.warning(
+            "Model rejected request with attached audio (%s); retrying with text cues only.", exc
+        )
+        return llm.complete_json(system=system, content=text_only, schema=schema)
 
 
 _THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
@@ -101,15 +193,18 @@ def has_images(messages: list[Message]) -> bool:
 
 
 def estimate_tokens(system: str, messages: list[Message]) -> int:
-    """A rough token count (four characters per token, a fixed cost per image)."""
-    chars, images = len(system), 0
+    """A rough token count (four characters per token, fixed costs for images and audio)."""
+    chars, images, audios = len(system), 0, 0
     for message in messages:
         for block in blocks_of(message["content"]):
-            if block.get("type") == "image":
+            block_type = block.get("type")
+            if block_type == "image":
                 images += 1
+            elif block_type == "audio":
+                audios += 1
             else:
                 chars += len(block.get("text", ""))
-    return chars // 4 + images * IMAGE_TOKEN_ESTIMATE
+    return chars // 4 + images * IMAGE_TOKEN_ESTIMATE + audios * AUDIO_TOKEN_ESTIMATE
 
 
 def schema_prompt(system: str, schema: type[BaseModel]) -> str:
@@ -128,6 +223,8 @@ class Reply:
 
 class ChatBackend(ABC):
     """The request loop common to every provider: ask for JSON, validate, correct once."""
+
+    supports_audio: bool = False
 
     def __init__(self, *, model: str, max_tokens: int, context_tokens: int | None = None) -> None:
         self._model = model

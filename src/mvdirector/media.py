@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -450,54 +451,87 @@ def zoom_crop_image(src: Path, dst: Path, *, zoom_factor: float = 1.4) -> Path:
     return dst
 
 
+def _write_with_silent_audio(video_path: Path, dst: Path) -> None:
+    """Write ``video_path`` plus a silent stereo AAC track to ``dst`` (an MP4) atomically.
+
+    The video stream is copied when MP4 can carry it and re-encoded to H.264 otherwise (for
+    example ProRes ``.mov`` or VP8 ``.webm`` references).
+    """
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".mvd_aud_", suffix=".mp4", dir=dst.parent)
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    copy_video = ["-c:v", "copy"]
+    reencode_video = ["-c:v", "libx264", "-preset", "medium", "-crf", "16", "-pix_fmt", "yuv420p"]
+    try:
+        for video_codec in (copy_video, reencode_video):
+            try:
+                run(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-v",
+                        "error",
+                        "-i",
+                        str(video_path.resolve()),
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        "anullsrc=channel_layout=stereo:sample_rate=44100",
+                        "-map",
+                        "0:v:0",
+                        "-map",
+                        "1:a:0",
+                        *video_codec,
+                        "-c:a",
+                        "aac",
+                        "-b:a",
+                        "128k",
+                        "-shortest",
+                        "-movflags",
+                        "+faststart",
+                        str(tmp_path.resolve()),
+                    ]
+                )
+                break
+            except MediaToolError:
+                if video_codec is reencode_video:
+                    raise
+        os.replace(tmp_path, dst)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def ensure_audio_track(video_path: Path, dst: Path) -> Path:
-    """Return ``video_path`` if it has an audio stream, else write a copy with silent stereo AAC.
+    """Return ``video_path`` if it has an audio stream, else write an MP4 copy with silent audio.
 
     Prevents ComfyUI video-loader nodes (such as ``VHS_LoadVideoPath``) from crashing on silent
-    reference or previz clips.
+    reference or previz clips. ``dst`` may equal ``video_path`` only for an MP4 the pipeline
+    rendered itself; use :func:`with_audio_track` for files a person supplied.
 
     Credits & Attribution:
         Clean-room silent-audio guard inspired by ``heroesjouney/aimoviestudiov2``
         (https://github.com/heroesjouney/aimoviestudiov2 — ``comfy_video.py``).
     """
-    info = probe(video_path)
-    if info.has_audio:
+    if probe(video_path).has_audio:
         return video_path
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=".mvd_aud_", suffix=".mp4", dir=dst.parent)
-    os.close(fd)
-    tmp_path = Path(tmp_name)
-    try:
-        run(
-            [
-                "ffmpeg",
-                "-y",
-                "-v",
-                "error",
-                "-i",
-                str(video_path.resolve()),
-                "-f",
-                "lavfi",
-                "-i",
-                "anullsrc=channel_layout=stereo:sample_rate=44100",
-                "-map",
-                "0:v:0",
-                "-map",
-                "1:a:0",
-                "-c:v",
-                "copy",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "128k",
-                "-shortest",
-                "-movflags",
-                "+faststart",
-                str(tmp_path.resolve()),
-            ]
-        )
-        os.replace(tmp_path, dst)
-    except BaseException:
-        tmp_path.unlink(missing_ok=True)
-        raise
+    _write_with_silent_audio(video_path, dst)
+    return dst
+
+
+def with_audio_track(video_path: Path, cache_dir: Path) -> Path:
+    """``video_path`` if it has audio, else a cached MP4 copy carrying a silent audio track.
+
+    The source is never modified, whatever its container. The copy keeps the source's name (so
+    uploads look the same in ComfyUI) inside a per-source folder of ``cache_dir``, and is rebuilt
+    only when the source is newer than it.
+    """
+    if probe(video_path).has_audio:
+        return video_path
+    key = hashlib.sha256(str(video_path.resolve()).encode("utf-8")).hexdigest()[:12]
+    dst = cache_dir / key / f"{video_path.stem}.mp4"
+    if dst.is_file() and dst.stat().st_mtime_ns >= video_path.stat().st_mtime_ns:
+        return dst
+    _write_with_silent_audio(video_path, dst)
     return dst

@@ -34,7 +34,7 @@ from mvdirector.comfy.workflow import (
     prune_switch_branches,
 )
 from mvdirector.config import ComfyConfig, ProjectConfig, VideoConfig
-from mvdirector.errors import ComfyJobError
+from mvdirector.errors import ComfyJobError, ComfyResourceError
 from mvdirector.generation import previz as previz_gen
 from mvdirector.generation.runner import RunBudget, ShotRunner, load_templates
 from mvdirector.models import (
@@ -169,9 +169,12 @@ def test_whisper_repetition_collapsing_and_stall_watchdog():
     assert collapse_repetitions("yeah yeah") == "yeah yeah"
     assert collapse_repetitions("hold on hold on hold on hold on now") == "hold on hold on now"
 
-    words = [Word(word=w, start=i * 0.2, end=(i + 1) * 0.2) for i, w in enumerate(["la"] * 5)]
-    collapsed = collapse_word_repetitions(words)
-    assert len(collapsed) == 2
+    # Sung repeats with real timings keep every word (and timestamp) for lyric alignment...
+    sung = [Word(word="la", start=i * 0.2, end=(i + 1) * 0.2) for i in range(5)]
+    assert collapse_word_repetitions(sung) == sung
+    # ...while a decoding loop (zero-length, stacked timestamps) collapses to two words.
+    looped = [Word(word="la", start=1.0, end=1.0) for _ in range(5)]
+    assert len(collapse_word_repetitions(looped)) == 2
 
     def _stalled():
         yield "ok"
@@ -179,6 +182,17 @@ def test_whisper_repetition_collapsing_and_stall_watchdog():
 
     with pytest.raises(TimeoutError, match="stalled"):
         _drain_segments_with_timeout(_stalled(), timeout_seconds=0.05)
+
+    def _slow_start():
+        time.sleep(0.2)  # feature extraction and language detection precede the first segment
+        yield "first"
+        yield "second"
+
+    drained = _drain_segments_with_timeout(
+        _slow_start(), timeout_seconds=0.05, first_timeout_seconds=5.0
+    )
+    assert drained == ["first", "second"]
+    assert ProjectConfig().prepare.whisper_stall_timeout_seconds == 600.0
 
 
 def test_broadcast_audio_lufs_true_peak_and_splice_clicks(tmp_path: Path):
@@ -645,8 +659,10 @@ def test_comfy_cache_switch_pruning_ui_converter_and_client_guards(tmp_path: Pat
             }
         )
         assert len(issues) == 2
-        with pytest.raises(ComfyJobError, match="min_free_vram_gb"):
+        # Stops the run rather than counting (and burning) a failed attempt per shot.
+        with pytest.raises(ComfyResourceError, match="min_free_vram_gb"):
             comfy.check_vram_floor()
+        assert not issubclass(ComfyResourceError, ComfyJobError)
         assert free_called
         comfy.queue(
             {"1": {"class_type": "SaveImage", "inputs": {}}}, partial_execution_targets=["1"]
@@ -1392,3 +1408,243 @@ def test_analyze_project_survives_broadcast_qa_failure(
     analysis = analyze_project(project)
     assert analysis.broadcast_qa is None
     assert analysis.beats  # the core analysis still completed
+
+
+# --------------------------------------------------------- Ultrareview regression tests
+
+
+def _clip(path: str = "assets/videos/x.mp4", number: int = 1) -> Attempt:
+    return Attempt(
+        number=number,
+        strategy=RetryStrategy.INITIAL,
+        seed=number,
+        prompt="p",
+        path=path,
+        qc=QCReport(passed=True, score=0.9),
+    )
+
+
+def test_clip_timing_continue_chain_plays_past_the_dropped_seam_frame():
+    fps, clip = 24, _clip()
+    cut = Shot(
+        id="s001",
+        index=0,
+        start=0.0,
+        end=1.0,
+        type=ShotType.BROLL,
+        audio_slice=AudioSlice(path="a.wav", start=-0.25, end=1.25, head_handle=0.25),
+        num_frames=41,
+    )
+    timing = assemble.clip_timing(cut, clip, None, sync_delay_compensation=False)
+    assert (timing.first_played_frame(fps), timing.last_played_frame(24, fps)) == (6, 29)
+
+    chained = Shot(
+        id="s002",
+        index=1,
+        start=1.0,
+        end=2.0,
+        type=ShotType.BROLL,
+        continuity=ContinuityMode.CONTINUE,
+        audio_slice=AudioSlice(path="b.wav", start=1.0, end=2.25, head_handle=0.0),
+        num_frames=33,
+    )
+    handoff = Attempt(
+        number=1,
+        strategy=RetryStrategy.HANDOFF,
+        seed=0,
+        prompt="handoff",
+        path="assets/stills/s002_a01.png",
+        qc=QCReport(passed=True, score=1.0),
+    )
+    timing = assemble.clip_timing(chained, clip, handoff, sync_delay_compensation=False)
+    # Frame 0 repeats the previous clip's last frame and is dropped, so the last played frame
+    # (the next handoff source in a chain) is index 24, not 23.
+    assert timing.drop_first_frame and timing.last_played_frame(24, fps) == 24
+    assert timing.continuity is ContinuityMode.CONTINUE
+    # A 'continue' shot that got a freshly generated still is a plain cut at assembly.
+    fresh = assemble.clip_timing(chained, clip, _clip(), sync_delay_compensation=False)
+    assert fresh.continuity is ContinuityMode.CUT and not fresh.drop_first_frame
+
+
+def test_continue_still_defers_in_stills_run_and_hands_off_with_unique_files(
+    project: Project, analysis: Analysis, tmp_path: Path, sample_png: bytes
+):
+    from mvdirector import api
+    from mvdirector.review import policy as review_policy
+
+    cfg = project.config.model_copy(deep=True)
+    cfg.video.max_clip_seconds = 2.0
+    proj = Project(project.root, cfg)
+    manifest = build_manifest(proj.config, analysis, "lyrics", "style", llm=None)
+    s1, s2 = manifest.shots[:2]
+    for shot in (s1, s2):
+        shot.type = ShotType.BROLL
+    s2.continuity = ContinuityMode.CONTINUE
+    manifest.shots = [s1, s2]
+    proj.save_manifest(manifest)
+
+    clip_src = make_video(tmp_path / "gen.mp4", duration=3.0, color="blue")
+    fake = FakeComfy(png=sample_png, mp4=clip_src.read_bytes())
+
+    class PassGate:
+        def evaluate(self, *args, **kwargs):
+            return QCReport(passed=True, score=0.95)
+
+    def runner() -> ShotRunner:
+        return ShotRunner(
+            proj,
+            manifest,
+            ComfyClient(proj.config.comfy, transport=fake.transport(), sleep=lambda _: None),
+            QualityGates(image=PassGate(), video=PassGate(), face_analyzer=None),  # type: ignore[arg-type]
+            RetryPolicy(proj.config.retry, proj.config.seed, llm=None),
+            load_templates(proj, ["t2i", "i2v"]),
+            RunBudget(20),
+        )
+
+    # `mvd stills`: the continuation still waits for the previous clip instead of becoming an
+    # unrelated still that would turn the join into a cut.
+    runner().run([AssetKind.STILL])
+    assert s1.still.status is AssetStatus.PASSED
+    assert s2.still.status is AssetStatus.PENDING and not s2.still.attempts
+
+    # `mvd videos`: s001's clip renders first, then s002 takes its handoff still on demand.
+    runner().run([AssetKind.VIDEO])
+    first = s2.still.selected
+    assert first is not None and first.strategy is RetryStrategy.HANDOFF
+    assert first.path == "assets/stills/s002_a01.png"
+    assert first.params["handoff_source"] == s1.video.selected.path  # type: ignore[union-attr]
+    assert s2.video.status is AssetStatus.PASSED
+
+    # Sent back with a note, or reset without one: the identical frame is not handed off again.
+    review_policy.reject(manifest, "s002", "too dark", AssetKind.STILL, proj.config)
+    assert runner()._take_handoff_still(s2, s2.still) is False
+    s2.still.reset(2)
+    assert runner()._take_handoff_still(s2, s2.still) is False
+
+    # A re-rendered previous clip yields a new handoff in its own file, so `mvd clean` deletes
+    # only the superseded frame and never the selected one.
+    rerender = proj.root / "assets" / "videos" / "s001_a09.mp4"
+    rerender.write_bytes(clip_src.read_bytes())
+    s1.video.attempts.append(_clip("assets/videos/s001_a09.mp4", number=9))
+    s1.video.selected_attempt = 9
+    assert runner()._take_handoff_still(s2, s2.still) is True
+    second = s2.still.selected
+    assert second is not None and second.path == "assets/stills/s002_a02.png"
+    proj.save_manifest(manifest)
+    plan = api.clean(proj, delete=False)
+    assert proj.path("assets/stills/s002_a01.png") in plan.superseded
+    assert proj.path("assets/stills/s002_a02.png") not in plan.files
+
+
+def test_with_audio_track_never_rewrites_a_locked_mov_reference(tmp_path: Path):
+    src = tmp_path / "turnaround.mov"
+    media.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:s=64x64:r=24:d=1",
+            "-c:v",
+            "prores_ks",
+            str(src),
+        ]
+    )
+    before = src.read_bytes()
+    cache = tmp_path / "cache"
+    out = media.with_audio_track(src, cache)
+    assert out.parent.parent == cache and out.name == "turnaround.mp4"
+    assert src.read_bytes() == before  # the locked asset is untouched
+    assert media.probe(out).has_audio
+    stamp = out.stat().st_mtime_ns
+    assert media.with_audio_track(src, cache) == out and out.stat().st_mtime_ns == stamp
+
+
+def test_lock_previz_drops_a_stale_depth_pass(project: Project, analysis: Analysis, tmp_path: Path):
+    manifest = build_manifest(project.config, analysis, "lyrics", "style", llm=None)
+    shot = manifest.shots[0]
+    shot.previz_depth_video = "assets/previz/old_depth.mp4"
+    external = make_video(tmp_path / "blender.mp4", duration=1.0)
+    previz_gen.lock_previz(project, manifest, external, shot.id)
+    assert shot.previz_video and shot.previz_depth_video is None
+
+
+def test_calibration_keeps_beat_and_telemetry_metrics_out_of_lipsync_threshold():
+    from mvdirector import calibrate
+
+    frames = [np.full((36, 64, 3), 40 * (i % 2), dtype=np.uint8) for i in range(24)]
+    beat = VideoQC._beat_motion_check(frames, 24.0, [0.0, 0.5])
+    assert "correlation" not in beat.metrics and "beat_correlation" in beat.metrics
+    lipsync = CheckResult(
+        name="lipsync",
+        status=CheckStatus.PASSED,
+        metrics={"correlation": 0.7, "lag_seconds": 0.04, "sync_delay_seconds": 0.04},
+    )
+    shot = Shot(
+        id="s001",
+        index=0,
+        start=0.0,
+        end=1.0,
+        type=ShotType.LIPSYNC,
+        audio_slice=AudioSlice(path="a.wav", start=0.0, end=1.0, head_handle=0.0),
+        num_frames=25,
+        video=AssetState(
+            status=AssetStatus.PASSED,
+            selected_attempt=1,
+            attempts=[
+                Attempt(
+                    number=1,
+                    strategy=RetryStrategy.INITIAL,
+                    seed=1,
+                    prompt="p",
+                    path="v.mp4",
+                    qc=QCReport(passed=True, score=0.9, checks=[lipsync, beat]),
+                )
+            ],
+        ),
+    )
+    manifest = Manifest(title="Cal", duration=1.0, fps=24, shots=[shot])
+    samples = calibrate.collect_samples(
+        manifest, [calibrate.Label(shot.id, AssetKind.VIDEO, None, True)]
+    )
+    assert samples == {"correlation": [(0.7, True)]}
+
+
+def test_vram_floor_waits_for_async_free_and_is_checked_once_per_phase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    gib = 1024**3
+    frees: list[int] = []
+    polls_after_free: list[int] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/free":
+            frees.append(1)
+            return httpx.Response(200, json={})
+        if req.url.path == "/system_stats":
+            if frees:
+                polls_after_free.append(1)
+            # /free only flags ComfyUI's worker: VRAM is released a couple of polls later.
+            free = 20 * gib if len(polls_after_free) >= 3 else 6 * gib
+            return httpx.Response(200, json={"devices": [{"vram_free": free}]})
+        return httpx.Response(404)
+
+    cfg = ComfyConfig(base_url="http://comfy.test", min_free_vram_gb=12.0)
+    with ComfyClient(cfg, transport=httpx.MockTransport(handler), sleep=lambda _: None) as comfy:
+        assert comfy.check_vram_floor() == pytest.approx(20.0)
+        assert frees == [1]
+
+        checks: list[int] = []
+        monkeypatch.setattr(comfy, "check_vram_floor", lambda *a, **k: checks.append(1))
+        monkeypatch.setattr(comfy, "queue", lambda *a, **k: "p1")
+        monkeypatch.setattr(comfy, "wait", lambda *a, **k: {})
+        monkeypatch.setattr(comfy, "download_output", lambda entry, output, dst: dst)
+        for name in ("a.png", "b.png"):  # one phase: the loaded model is expected, not a fault
+            comfy.run({}, None, tmp_path / name)  # type: ignore[arg-type]
+        assert checks == [1]
+        comfy.free_memory()  # next phase
+        comfy.run({}, None, tmp_path / "c.png")  # type: ignore[arg-type]
+        assert checks == [1, 1]

@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from mvdirector import media
+from mvdirector import assemble, media
 from mvdirector.comfy.cache import ComfyRenderCache, canonical_graph_key, file_sha256
 from mvdirector.comfy.client import ComfyClient
 from mvdirector.comfy.workflow import OutputSpec, WorkflowTemplate
@@ -153,18 +153,16 @@ class ShotRunner:
         """Process the given asset kinds for the selected shots (all shots by default)."""
         shots = [s for s in self._manifest.shots if shot_ids is None or s.id in shot_ids]
         has_chained = any(s.continuity is not ContinuityMode.CUT for s in shots)
-        waves = (
-            self._chain_waves(shots)
-            if (has_chained and AssetKind.STILL in kinds and AssetKind.VIDEO in kinds)
-            else [shots]
-        )
-        phase_count = 0
+        # Chained shots run after the shot they continue from, whichever kinds this run covers:
+        # a video-only run must render the previous clip before taking a deferred handoff still.
+        waves = self._chain_waves(shots) if has_chained else [shots]
+        previous_kind: AssetKind | None = None
         try:
             for wave_idx, wave_shots in enumerate(waves):
                 for kind in kinds:  # stills first: failures are cheapest there
-                    if phase_count > 0:
-                        self._comfy.free_memory()
-                    phase_count += 1
+                    if previous_kind is not None and kind is not previous_kind:
+                        self._comfy.free_memory()  # unload the previous phase's model
+                    previous_kind = kind
                     self._emit(RunEvent("phase_started", asset=kind.value))
                     ordered = (
                         self._sort_for_cache(wave_shots, kind)
@@ -308,68 +306,132 @@ class ShotRunner:
         path = self._project.path(shot.previz_depth_video)
         return path if path.is_file() else None
 
-    def _previous_handoff_frame(self, shot: Shot) -> Path | None:
-        """Extract the exact post-trim last frame of the shot immediately preceding ``shot``.
+    def _previous_shot(self, shot: Shot) -> Shot | None:
+        shots = self._manifest.shots
+        pos = next((i for i, item in enumerate(shots) if item.id == shot.id), None)
+        return shots[pos - 1] if pos is not None and pos > 0 else None
+
+    def _played_tail(self, prev: Shot) -> tuple[Path, int, Attempt] | None:
+        """``(clip, index of its last frame played at assembly, attempt)`` for ``prev``.
+
+        Uses assembly's own timing (lip-sync delay, a dropped handoff seam frame), so chained
+        shots continue from exactly the frame viewers see last.
 
         Credits & Attribution:
             Trim-aware cross-shot handoff frame chaining inspired by
             ``GeekatplayStudio/ComfyUI-Music-to-Video`` (``nodes.py``) and
             ``afj176/open-cinema-studio`` (``app/studio.py``).
         """
-        shots = self._manifest.shots
-        pos = next((i for i, item in enumerate(shots) if item.id == shot.id), None)
-        if pos is None or pos <= 0:
-            return None
-        prev = shots[pos - 1]
         prev_video = prev.video.selected or prev.video.best_attempt()
         if prev_video is None or not prev_video.path:
             return None
         video_path = self._project.path(prev_video.path)
         if not video_path.is_file():
             return None
-        fps = self._project.config.video.fps
-        sync_shift = (
-            prev_video.sync_delay_seconds
-            if self._project.config.video.sync_delay_compensation
-            else 0.0
+        timing = assemble.clip_timing(
+            prev,
+            prev_video,
+            prev.still.selected or prev.still.best_attempt(),
+            sync_delay_compensation=self._project.config.video.sync_delay_compensation,
         )
-        effective_start = max(0.0, prev.audio_slice.head_handle + sync_shift)
-        handoff_idx = max(0, int(round((effective_start + prev.duration) * fps)) - 1)
+        fps = self._manifest.fps
+        frames = assemble.frame_counts([prev], fps)[0]
+        return video_path, timing.last_played_frame(frames, fps), prev_video
+
+    def _previous_handoff_frame(self, shot: Shot) -> Path | None:
+        """The previous clip's last played frame, used as a ``reframe`` shot's reference."""
+        prev = self._previous_shot(shot)
+        tail = self._played_tail(prev) if prev is not None else None
+        if prev is None or tail is None:
+            return None
+        video_path, frame_index, _ = tail
         safe_prev_id = require_safe_id(prev.id, "shot id")
         handoff_dst = self._project.path(f"assets/stills/{safe_prev_id}_handoff.png")
-        return media.extract_frame_at_index(video_path, handoff_idx, handoff_dst)
+        return media.extract_frame_at_index(video_path, frame_index, handoff_dst)
+
+    def _take_handoff_still(self, shot: Shot, state: AssetState) -> bool:
+        """Make a ``continue`` shot's still the previous clip's last played frame.
+
+        Returns True when the still is settled here: handed off, or deferred until the previous
+        shot has a clip to continue from. Returns False when the still has to be generated
+        normally instead, which makes this join a plain cut.
+        """
+        prev = self._previous_shot(shot)
+        if prev is None:
+            return False
+        if state.director_note:
+            log.warning(
+                "%s: a reviewer asked for changes to this continuation still; it gets a newly "
+                "generated still, so the join with %s renders as a cut.",
+                shot.id,
+                prev.id,
+            )
+            return False
+        tail = self._played_tail(prev)
+        if tail is None:
+            if prev.video.status is AssetStatus.PENDING:
+                log.warning(
+                    "%s: continuity 'continue' waits for %s's clip; this still will be that "
+                    "clip's last frame once the video exists (`mvd videos` or `mvd run`).",
+                    shot.id,
+                    prev.id,
+                )
+                return True
+            log.warning(
+                "%s: %s has no usable clip to continue from; this shot gets a newly generated "
+                "still, so the join renders as a cut.",
+                shot.id,
+                prev.id,
+            )
+            return False
+        video_path, frame_index, prev_video = tail
+        if any(
+            a.strategy is RetryStrategy.HANDOFF
+            and a.params.get("handoff_source") == prev_video.path
+            for a in state.attempts
+        ):
+            # Handing off the same frame again would only repeat the attempt that was sent back.
+            log.warning(
+                "%s: the handoff frame from %s's current clip was already used and sent back; "
+                "this shot gets a newly generated still, so the join renders as a cut. "
+                "Re-render %s's video to continue from a new frame.",
+                shot.id,
+                prev.id,
+                prev.id,
+            )
+            return False
+        number = len(state.attempts) + 1
+        destination = self._project.asset_path(shot, AssetKind.STILL, number)
+        media.extract_frame_at_index(video_path, frame_index, destination)
+        # The clip starts directly from the handoff frame: align the audio slice to shot.start
+        # (zero head handle) so frame 0 is the handoff boundary and stays locked to the audio.
+        shot.audio_slice.start = round(shot.start, 3)
+        shot.audio_slice.head_handle = 0.0
+        attempt = Attempt(
+            number=number,
+            strategy=RetryStrategy.HANDOFF,
+            seed=0,
+            prompt="(continued from previous shot handoff frame)",
+            params={"handoff_source": prev_video.path, "handoff_frame": frame_index},
+            path=self._project.rel(destination),
+            qc=QCReport(passed=True, score=1.0),
+        )
+        state.attempts.append(attempt)
+        state.status = AssetStatus.PASSED
+        state.selected_attempt = number
+        self._project.save_manifest(self._manifest)
+        self._emit(
+            RunEvent("asset_passed", asset=AssetKind.STILL.value, shot_id=shot.id, attempt=number)
+        )
+        return True
 
     def _run_asset(self, shot: Shot, kind: AssetKind) -> None:
         state = shot.asset(kind)
-        if (
-            kind is AssetKind.STILL
-            and shot.continuity is ContinuityMode.CONTINUE
-            and state.status is AssetStatus.PENDING
-        ):
-            handoff = self._previous_handoff_frame(shot)
-            if handoff is not None:
-                # One-take continuation starts directly from the previous clip's handoff frame.
-                # Align the audio slice to shot.start (zero head handle) so the generated clip's
-                # frame 0 matches the handoff boundary and stays locked to audio at assembly.
-                shot.audio_slice.start = round(shot.start, 3)
-                shot.audio_slice.head_handle = 0.0
-                attempt = Attempt(
-                    number=len(state.attempts) + 1,
-                    strategy=RetryStrategy.HANDOFF,
-                    seed=0,
-                    prompt="(continued from previous shot handoff frame)",
-                    path=self._project.rel(handoff),
-                    qc=QCReport(passed=True, score=1.0),
-                )
-                state.attempts.append(attempt)
-                state.status = AssetStatus.PASSED
-                state.selected_attempt = attempt.number
-                self._project.save_manifest(self._manifest)
-                self._emit(
-                    RunEvent(
-                        "asset_passed", asset=kind.value, shot_id=shot.id, attempt=attempt.number
-                    )
-                )
+        if shot.continuity is ContinuityMode.CONTINUE and shot.still.status is AssetStatus.PENDING:
+            # A one-take continuation's still is the previous clip's last played frame. The video
+            # phase takes it as well, for stills an earlier still-only run had to defer.
+            settled = self._take_handoff_still(shot, shot.still)
+            if kind is AssetKind.STILL and settled:
                 return
         if kind is AssetKind.VIDEO and shot.still.status is not AssetStatus.PASSED:
             # Never spend video time on a still that has not passed QC or been accepted.
@@ -723,8 +785,7 @@ class ShotRunner:
             if ref is not None and ref.video:
                 ref_video_path = self._project.path(ref.video)
                 if ref_video_path.is_file():
-                    media.ensure_audio_track(ref_video_path, ref_video_path)
-                    params["reference_video"] = self._upload(ref_video_path)
+                    params["reference_video"] = self._upload(self._with_audio(ref_video_path))
         if template.accepts("end_image"):
             if shot.end_frame_path:
                 end_path = self._project.path(shot.end_frame_path)
@@ -744,13 +805,27 @@ class ShotRunner:
         self._attach_prop_refs(params, template, prop_refs)
         previz = self._previz_for(shot, template)
         if previz is not None:
-            media.ensure_audio_track(previz, previz)
-            params["previz_video"] = self._upload(previz)
+            params["previz_video"] = self._upload(self._with_audio(previz))
         previz_depth = self._previz_depth_for(shot, template)
         if previz_depth is not None:
-            media.ensure_audio_track(previz_depth, previz_depth)
-            params["previz_depth_video"] = self._upload(previz_depth)
+            params["previz_depth_video"] = self._upload(self._with_audio(previz_depth))
         self._run_comfy(template.render(params), template.bindings.output, destination)
+
+    def _with_audio(self, video_path: Path) -> Path:
+        """``video_path``, or a cached copy of it with a silent audio track to upload instead.
+
+        ComfyUI video loaders such as ``VHS_LoadVideoPath`` fail on files without audio. The
+        source is never rewritten: it may be a locked user asset in any container.
+        """
+        try:
+            return media.with_audio_track(video_path, self._project.path("assets/cache/audio"))
+        except MediaToolError as exc:
+            log.warning(
+                "Could not add a silent audio track to %s (%s); uploading it unchanged",
+                video_path.name,
+                exc,
+            )
+            return video_path
 
     def _run_comfy(self, graph: dict[str, Any], output: OutputSpec, destination: Path) -> Path:
         if self._cache is not None:
@@ -818,32 +893,24 @@ class ShotRunner:
 
     def _previous_tail_frames(self, shot: Shot) -> list[Any] | None:
         """Last 4 played frames of the previous shot when auditing a CONTINUE seam."""
-        if shot.continuity is not ContinuityMode.CONTINUE:
+        still = shot.still.selected
+        if (
+            shot.continuity is not ContinuityMode.CONTINUE
+            or still is None
+            or still.strategy is not RetryStrategy.HANDOFF
+        ):
+            return None  # without a handoff still the join is a plain cut, not a seam
+        prev = self._previous_shot(shot)
+        tail = self._played_tail(prev) if prev is not None else None
+        if tail is None:
             return None
-        shots = self._manifest.shots
-        pos = next((i for i, item in enumerate(shots) if item.id == shot.id), None)
-        if pos is None or pos <= 0:
-            return None
-        prev = shots[pos - 1]
-        prev_video = prev.video.selected or prev.video.best_attempt()
-        if prev_video is None or not prev_video.path:
-            return None
-        video_path = self._project.path(prev_video.path)
-        if not video_path.is_file():
-            return None
+        video_path, last_index, _ = tail
         try:
             frames = media.extract_frames(video_path, 128)
         except MediaToolError:
             return None
-        fps = self._project.config.video.fps
-        sync_shift = (
-            prev_video.sync_delay_seconds
-            if self._project.config.video.sync_delay_compensation
-            else 0.0
-        )
-        effective_start = max(0.0, prev.audio_slice.head_handle + sync_shift)
-        end_idx = min(len(frames), max(1, int(round((effective_start + prev.duration) * fps))))
-        return frames[max(0, end_idx - 4) : end_idx]
+        end_idx = min(len(frames), last_index + 1)
+        return frames[max(0, end_idx - 4) : end_idx] or None
 
     def _beats_for_shot(self, shot: Shot) -> list[float] | None:
         """Beat timestamps relative to ``shot.audio_slice.start`` for beat-motion telemetry."""

@@ -31,6 +31,13 @@ class ComfyJobError(ComfyError):
     """ComfyUI accepted the request but the job failed. Counts as a failed attempt."""
 
 
+class ComfyResourceError(ComfyError):
+    """ComfyUI is reachable but lacks the free GPU memory to start work.
+
+    The run should stop: retrying shots would only use up their attempts without rendering.
+    """
+
+
 class WorkflowBindingError(MVDError):
     """A workflow template and its bindings file do not agree."""
 

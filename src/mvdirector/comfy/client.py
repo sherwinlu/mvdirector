@@ -23,13 +23,16 @@ import httpx
 from mvdirector.comfy.cache import file_sha256
 from mvdirector.comfy.workflow import OutputSpec
 from mvdirector.config import ComfyConfig
-from mvdirector.errors import ComfyConnectionError, ComfyJobError
+from mvdirector.errors import ComfyConnectionError, ComfyJobError, ComfyResourceError
 from mvdirector.llm.http import retry_delay
 
 log = logging.getLogger(__name__)
 
 _TRANSIENT_RETRIES = 3
 _MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024  # 512 MiB cap per generated asset
+# /free only flags ComfyUI's worker thread to unload; give it this long to release VRAM.
+_VRAM_SETTLE_POLLS = 30
+_VRAM_POLL_SECONDS = 1.0
 
 
 class ComfyClient:
@@ -44,6 +47,9 @@ class ComfyClient:
         self._sleep = sleep
         self._upload_subfolder = upload_subfolder
         self._client_id = uuid.uuid4().hex
+        # The VRAM floor is checked once per phase (the first job after a /free), not per job:
+        # within a phase ComfyUI keeps the phase's model loaded on purpose.
+        self._vram_floor_checked = False
         self._http = httpx.Client(
             base_url=config.base_url.rstrip("/"),
             headers=config.headers,
@@ -88,10 +94,19 @@ class ComfyClient:
             return None
         return max(free_bytes) / (1024.0**3)
 
-    def check_vram_floor(self, min_free_gb: float | None = None) -> float | None:
-        """Verify free GPU VRAM meets ``min_free_gb`` (calls ``/free`` once before failing).
+    def check_vram_floor(
+        self,
+        min_free_gb: float | None = None,
+        *,
+        settle_polls: int = _VRAM_SETTLE_POLLS,
+        poll_seconds: float = _VRAM_POLL_SECONDS,
+    ) -> float | None:
+        """Verify free GPU VRAM meets ``min_free_gb``, asking ComfyUI to ``/free`` it first.
 
         Prevents silent OS GPU wedges when queueing heavy video models onto contended cards.
+        ``/free`` only flags ComfyUI's worker to unload models, so VRAM is re-probed for up to
+        ``settle_polls`` intervals before giving up with ``ComfyResourceError``, which stops the
+        run instead of counting as a failed attempt.
         """
         floor = self._config.min_free_vram_gb if min_free_gb is None else min_free_gb
         if floor is None:
@@ -105,13 +120,17 @@ class ComfyClient:
             floor,
         )
         self.free_memory()
-        avail = self.free_vram_gb()
-        if avail is not None and avail < floor:
-            raise ComfyJobError(
-                f"Free GPU VRAM ({avail:.2f} GiB) is below "
-                f"comfy.min_free_vram_gb ({floor:.2f} GiB)."
-            )
-        return avail
+        for _ in range(max(1, settle_polls)):
+            self._sleep(poll_seconds)
+            avail = self.free_vram_gb()
+            if avail is None or avail >= floor:
+                return avail
+        assert avail is not None
+        raise ComfyResourceError(
+            f"Free GPU VRAM ({avail:.2f} GiB) stayed below comfy.min_free_vram_gb "
+            f"({floor:.2f} GiB) after asking ComfyUI to free memory. Another process may be "
+            "using the GPU; free it or lower comfy.min_free_vram_gb, then run again."
+        )
 
     def object_info(self, class_type: str | None = None) -> dict[str, Any]:
         """Fetch ComfyUI ``/object_info`` metadata (all nodes or a single ``class_type``)."""
@@ -191,6 +210,7 @@ class ComfyClient:
 
     def free_memory(self, *, unload_models: bool = True, free_memory: bool = True) -> None:
         """Ask ComfyUI to unload models and free VRAM between workflow phases."""
+        self._vram_floor_checked = False
         try:
             response = self._http.post(
                 "/free",
@@ -255,7 +275,9 @@ class ComfyClient:
         partial_execution_targets: list[str] | None = None,
     ) -> Path:
         """Queue ``graph``, wait for it and download its output to ``destination``."""
-        self.check_vram_floor()
+        if not self._vram_floor_checked:
+            self.check_vram_floor()
+            self._vram_floor_checked = True
         prompt_id = self.queue(graph, partial_execution_targets=partial_execution_targets)
         entry = self.wait(prompt_id)
         return self.download_output(entry, output, destination)

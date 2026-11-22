@@ -150,6 +150,15 @@ class PrepareConfig(_Section):
             "multi-language songs)."
         ),
     )
+    whisper_stall_timeout_seconds: float = Field(
+        default=600.0,
+        ge=0.0,
+        allow_inf_nan=False,
+        description=(
+            "Abort transcription when faster-whisper produces no segment for this many seconds "
+            "(three times as long for the first segment); 0 disables the watchdog."
+        ),
+    )
 
     @field_validator("stem_model", "whisper_model")
     @classmethod

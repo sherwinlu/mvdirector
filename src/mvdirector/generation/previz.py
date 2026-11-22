@@ -448,6 +448,9 @@ def lock_previz(
     if video_path.resolve() != dst.resolve():
         shutil.copyfile(video_path, dst)
     shot.previz_video = project.rel(dst)
+    # A depth pass rendered for earlier auto-previz shows a different camera move; sending both
+    # would give the video model two conflicting guides.
+    shot.previz_depth_video = None
     if mapping is not None:
         shot.previz_mapping = mapping
     return dst

@@ -150,7 +150,7 @@ class VideoQC:
             weight=0.0,
             hard=False,
             metrics={
-                "correlation": report.correlation,
+                "beat_correlation": report.correlation,
                 "best_lag_seconds": report.best_lag_seconds,
                 "chance_baseline": report.chance_baseline,
                 "z_score": report.z_score,

@@ -27,7 +27,7 @@ from typing import Any, Protocol
 import librosa
 from pydantic import BaseModel
 
-from mvdirector.errors import ConfigError
+from mvdirector.errors import ConfigError, MediaToolError
 from mvdirector.models import BOTH_VOICES, LyricLine, TimeSpan, VocalTurn
 from mvdirector.project import Project
 
@@ -77,10 +77,11 @@ class Transcriber(Protocol):
 
 
 def collapse_repetitions(text: str, *, max_ngram: int = 8, min_repeats: int = 4) -> str:
-    """Collapse runaway consecutive n-gram repetitions produced by Whisper decoding loops.
+    """Collapse 4+ consecutive verbatim n-gram repeats in ``text`` back down to two.
 
-    Preserves legitimate chorus hooks (up to 3 repeats by default) while truncating pathological
-    4+ consecutive verbatim loops back down to two occurrences.
+    Text alone cannot tell a Whisper decoding loop from a sung hook ('na na na na'), so the
+    transcriber applies this only to segments whose word timings show a loop (see
+    :func:`collapse_word_repetitions`).
 
     Credits & Attribution:
         Inspired by ``GeekatplayStudio/ComfyUI-Music-to-Video``
@@ -116,10 +117,30 @@ def collapse_repetitions(text: str, *, max_ngram: int = 8, min_repeats: int = 4)
     return " ".join(out)
 
 
+# A Whisper decoding loop repeats text with zero-length, overlapping or crammed word timings;
+# sung repeats ('na na na na') get distinct, increasing timings of normal length.
+_LOOP_MIN_WORD_SECONDS = 0.04
+_LOOP_MIN_SECONDS_PER_WORD = 0.08
+_LOOP_OVERLAP_TOLERANCE = 0.02
+
+
+def _is_decoding_loop(run: list[Word]) -> bool:
+    """True when a run of repeated words has the degenerate timing of a decoding loop."""
+    if any(w.end - w.start < _LOOP_MIN_WORD_SECONDS for w in run):
+        return True
+    if any(b.start < a.end - _LOOP_OVERLAP_TOLERANCE for a, b in zip(run, run[1:])):
+        return True
+    return run[-1].end - run[0].start < _LOOP_MIN_SECONDS_PER_WORD * len(run)
+
+
 def collapse_word_repetitions(
     words: list[Word], *, max_ngram: int = 6, min_repeats: int = 4
 ) -> list[Word]:
-    """Collapse pathological consecutive verbatim word-sequence loops in Whisper timestamps."""
+    """Collapse Whisper decoding loops (4+ verbatim repeats with degenerate timing) to two.
+
+    Repeats with real, spread-out timings are sung words and keep every timestamp, so lyric
+    alignment still sees all of them.
+    """
     min_repeats = max(2, min_repeats)
     if len(words) < min_repeats:
         return list(words)
@@ -138,7 +159,8 @@ def collapse_word_repetitions(
             while i + (reps + 1) * k <= n and norm[i + reps * k : i + (reps + 1) * k] == phrase:
                 reps += 1
             if reps >= min_repeats:
-                out.extend(words[i : i + 2 * k])
+                run = words[i : i + reps * k]
+                out.extend(run[: 2 * k] if _is_decoding_loop(run) else run)
                 i += reps * k
                 collapsed = True
                 break
@@ -148,8 +170,16 @@ def collapse_word_repetitions(
     return out
 
 
-def _drain_segments_with_timeout(raw_segments: Iterable[Any], timeout_seconds: float) -> list[Any]:
+def _drain_segments_with_timeout(
+    raw_segments: Iterable[Any],
+    timeout_seconds: float,
+    *,
+    first_timeout_seconds: float | None = None,
+) -> list[Any]:
     """Drain a faster-whisper segment generator with a per-segment stall timeout watchdog.
+
+    ``first_timeout_seconds`` (default ``timeout_seconds``) bounds the wait for the first
+    segment, which also covers feature extraction and language detection.
 
     Credits & Attribution:
         Stall-timeout watchdog inspired by ``GeekatplayStudio/ComfyUI-Music-to-Video``
@@ -183,15 +213,16 @@ def _drain_segments_with_timeout(raw_segments: Iterable[Any], timeout_seconds: f
     thread = threading.Thread(target=_worker, daemon=True)
     thread.start()
     collected: list[Any] = []
+    first_wait = timeout_seconds if first_timeout_seconds is None else first_timeout_seconds
     try:
         while True:
+            wait = first_wait if not collected else timeout_seconds
             try:
-                kind, payload = q.get(timeout=timeout_seconds)
+                kind, payload = q.get(timeout=wait)
             except queue.Empty as exc:
                 cancelled.set()
                 raise TimeoutError(
-                    f"Whisper decoder stalled for >{timeout_seconds:.0f}s "
-                    "without producing a segment."
+                    f"Whisper decoder stalled for >{wait:.0f}s without producing a segment."
                 ) from exc
             if kind == "done":
                 return collected
@@ -217,7 +248,7 @@ class WhisperTranscriber:
         *,
         multilingual: bool = False,
         initial_prompt: str | None = None,
-        stall_timeout_seconds: float = 180.0,
+        stall_timeout_seconds: float = 600.0,
     ) -> None:
         self.model_size = model_size
         self.language = language.strip().lower() if language else None
@@ -259,27 +290,36 @@ class WhisperTranscriber:
         if self.initial_prompt and self.initial_prompt.strip():
             transcribe_kwargs["initial_prompt"] = self.initial_prompt.strip()[:800]
         raw_segments, info = model.transcribe(samples, **transcribe_kwargs)  # type: ignore[arg-type]
-        drained = _drain_segments_with_timeout(raw_segments, self.stall_timeout_seconds)
+        try:
+            drained = _drain_segments_with_timeout(
+                raw_segments,
+                self.stall_timeout_seconds,
+                # The first segment also waits for feature extraction and language detection.
+                first_timeout_seconds=self.stall_timeout_seconds * 3,
+            )
+        except TimeoutError as exc:
+            raise MediaToolError(
+                f"{exc} Raise prepare.whisper_stall_timeout_seconds for slow hardware or large "
+                "models (0 disables the watchdog)."
+            ) from exc
         segments: list[TranscriptSegment] = []
         words: list[Word] = []
         for seg in drained:
-            text = collapse_repetitions((getattr(seg, "text", None) or "").strip())
+            seg_words = [
+                Word(word=w.word, start=round(float(w.start), 3), end=round(float(w.end), 3))
+                for w in seg.words or []
+                if (getattr(w, "word", None) or "").strip()
+            ]
+            text = (getattr(seg, "text", None) or "").strip()
+            if len(collapse_word_repetitions(seg_words)) < len(seg_words):
+                text = collapse_repetitions(text)  # this segment's timing shows a decoding loop
             if text:
                 segments.append(
                     TranscriptSegment(
                         text=text, start=round(float(seg.start), 3), end=round(float(seg.end), 3)
                     )
                 )
-            for w in seg.words or []:
-                if not (getattr(w, "word", None) or "").strip():
-                    continue
-                words.append(
-                    Word(
-                        word=w.word,
-                        start=round(float(w.start), 3),
-                        end=round(float(w.end), 3),
-                    )
-                )
+            words.extend(seg_words)
         words = collapse_word_repetitions(words)
         detected_lang = getattr(info, "language", None) or self.language
         return Transcript(
@@ -1100,6 +1140,7 @@ def load_or_transcribe_words(project: Project) -> list[Word]:
         language=prepare_cfg.whisper_language,
         multilingual=prepare_cfg.whisper_multilingual,
         initial_prompt=vocab_hint,
+        stall_timeout_seconds=prepare_cfg.whisper_stall_timeout_seconds,
     )
     try:
         return transcriber.transcribe(vocals_path).words

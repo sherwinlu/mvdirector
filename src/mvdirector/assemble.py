@@ -22,7 +22,7 @@ from mvdirector import media
 from mvdirector.audio import broadcast_qa as broadcast_qa_mod
 from mvdirector.audio import foley as foley_mod
 from mvdirector.errors import ConfigError, MVDError
-from mvdirector.models import ContinuityMode, Manifest, RetryStrategy, Shot
+from mvdirector.models import Attempt, ContinuityMode, Manifest, RetryStrategy, Shot
 from mvdirector.project import Project, require_safe_id
 from mvdirector.qc.color_drift import fit_color_drift_affine
 from mvdirector.review.policy import is_ready, refresh_reviews
@@ -101,6 +101,52 @@ def frame_counts(shots: list[Shot], fps: int) -> list[int]:
     return [round(shot.end * fps) - round(shot.start * fps) for shot in shots]
 
 
+@dataclass(frozen=True)
+class ClipTiming:
+    """Which frames of a shot's generated clip are played at assembly.
+
+    The single source of truth shared with the runner, so continuity handoff frames and seam QC
+    look at exactly the frames that end up on screen.
+    """
+
+    in_point: float  # seconds into the source clip (ffmpeg -ss), lip-sync delay included
+    sync_delay: float  # lip-sync offset applied, clamped to the shot's audio handles
+    drop_first_frame: bool  # a CONTINUE clip's frame 0 repeats the previous clip's last frame
+    continuity: ContinuityMode  # CONTINUE only when the still really was a handoff frame
+
+    def first_played_frame(self, fps: int) -> int:
+        return round(self.in_point * fps) + (1 if self.drop_first_frame else 0)
+
+    def last_played_frame(self, frames: int, fps: int) -> int:
+        return self.first_played_frame(fps) + max(1, frames) - 1
+
+
+def clip_timing(
+    shot: Shot, video: Attempt, still: Attempt | None, *, sync_delay_compensation: bool
+) -> ClipTiming:
+    """Timing of ``shot``'s clip ``video`` as assembly will play it."""
+    head = shot.audio_slice.head_handle
+    tail = max(0.0, shot.audio_slice.end - shot.end)
+    raw_delay = video.sync_delay_seconds if sync_delay_compensation else 0.0
+    delay = round(max(-head, min(tail, raw_delay)), 4)
+    used_handoff = (
+        shot.index > 0
+        and shot.continuity is ContinuityMode.CONTINUE
+        and still is not None
+        and still.strategy is RetryStrategy.HANDOFF
+    )
+    continuity = shot.continuity
+    if continuity is ContinuityMode.CONTINUE and not used_handoff:
+        # A fresh (non-handoff) still makes the join a plain cut: no seam treatment applies.
+        continuity = ContinuityMode.CUT
+    return ClipTiming(
+        in_point=max(0.0, head + delay),
+        sync_delay=delay,
+        drop_first_frame=used_handoff and head == 0.0,
+        continuity=continuity,
+    )
+
+
 def plan_clips(
     project: Project, manifest: Manifest, force: bool, *, draft: bool = False
 ) -> list[ClipPlan]:
@@ -126,14 +172,7 @@ def plan_clips(
                 and project.path(shot.video.upscaled_path).is_file()
             ):
                 source_rel = shot.video.upscaled_path
-            raw_delay = video.sync_delay_seconds if use_sync_delay else 0.0
-            clamped_delay = max(-shot.audio_slice.head_handle, min(tail_handle, raw_delay))
-            used_handoff = (
-                shot.index > 0
-                and shot.continuity is ContinuityMode.CONTINUE
-                and still is not None
-                and still.strategy is RetryStrategy.HANDOFF
-            )
+            timing = clip_timing(shot, video, still, sync_delay_compensation=use_sync_delay)
             plans.append(
                 ClipPlan(
                     shot_id,
@@ -141,9 +180,9 @@ def plan_clips(
                     project.path(source_rel),
                     True,
                     shot.audio_slice.head_handle,
-                    sync_delay=round(clamped_delay, 4),
-                    drop_first_frame=used_handoff and shot.audio_slice.head_handle == 0.0,
-                    continuity=shot.continuity,
+                    sync_delay=timing.sync_delay,
+                    drop_first_frame=timing.drop_first_frame,
+                    continuity=timing.continuity,
                     tail_handle=tail_handle,
                 )
             )
@@ -313,7 +352,9 @@ def assemble(
                 prev_path, prev_last_idx = prev_clip_info
                 prev_png = work / f"{safe_id}_prev_ref.png"
                 curr_png = work / f"{safe_id}_curr_ref.png"
-                start_idx = max(0, int(round((plan.head_handle + plan.sync_delay) * manifest.fps)))
+                # First frame this clip actually plays (after any dropped handoff seam frame).
+                in_frame = round(max(0.0, plan.head_handle + plan.sync_delay) * manifest.fps)
+                start_idx = in_frame + (1 if plan.drop_first_frame else 0)
                 media.extract_frame_at_index(prev_path, max(0, prev_last_idx), prev_png)
                 media.extract_frame_at_index(plan.source, start_idx, curr_png)
                 with Image.open(prev_png) as p_img, Image.open(curr_png) as c_img:

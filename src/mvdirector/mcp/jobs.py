@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 
 _MAX_EVENTS_PER_JOB = 200
 _MAX_RETAINED_JOBS = 100
+_MAX_CONCURRENT_JOBS = 8
 _TERMINAL_STATES = frozenset({"succeeded", "failed", "cancelled"})
 
 
@@ -142,12 +143,18 @@ class JobContext:
 class JobManager:
     """Runs long pipeline stages on daemon worker threads with progress & cooperative cancel."""
 
-    def __init__(self, *, max_retained: int = _MAX_RETAINED_JOBS) -> None:
+    def __init__(
+        self,
+        *,
+        max_retained: int = _MAX_RETAINED_JOBS,
+        max_concurrent: int = _MAX_CONCURRENT_JOBS,
+    ) -> None:
         self._lock = threading.Lock()
         self._jobs: dict[str, JobRecord] = {}
         self._order: deque[str] = deque()
         self._threads: dict[str, threading.Thread] = {}
         self._max_retained = max(1, max_retained)
+        self._max_concurrent = max(1, max_concurrent)
 
     def submit(
         self,
@@ -175,11 +182,17 @@ class JobManager:
                     record.status = "cancelled"
                     record.error = str(exc)
                     record.finished_at = _utc_now_iso()
-            except Exception as exc:
-                log.exception("Background MCP job %s (%s) failed", job_id, stage)
+            except MVDError as exc:
+                log.warning("Background MCP job %s (%s) failed: %s", job_id, stage, exc)
                 with self._lock:
                     record.status = "failed"
                     record.error = str(exc)
+                    record.finished_at = _utc_now_iso()
+            except Exception:
+                log.exception("Background MCP job %s (%s) failed", job_id, stage)
+                with self._lock:
+                    record.status = "failed"
+                    record.error = "Internal server error."
                     record.finished_at = _utc_now_iso()
             else:
                 with self._lock:
@@ -189,6 +202,12 @@ class JobManager:
 
         thread = threading.Thread(target=_runner, name=f"mvd-mcp-{job_id}", daemon=True)
         with self._lock:
+            active = sum(1 for rec in self._jobs.values() if rec.status not in _TERMINAL_STATES)
+            if active >= self._max_concurrent:
+                raise MVDError(
+                    f"Too many active background jobs ({active}/{self._max_concurrent}). "
+                    "Wait for running jobs to finish or stop one with mvd_task_stop."
+                )
             self._jobs[job_id] = record
             self._order.append(job_id)
             self._threads[job_id] = thread
@@ -251,11 +270,16 @@ class JobManager:
             record.progress.update(fields)
 
     def _prune_locked(self) -> None:
-        while len(self._order) > self._max_retained:
-            oldest = self._order[0]
-            record = self._jobs.get(oldest)
-            if record is not None and record.status not in _TERMINAL_STATES:
-                break
-            self._order.popleft()
-            self._jobs.pop(oldest, None)
-            self._threads.pop(oldest, None)
+        if len(self._order) <= self._max_retained:
+            return
+        excess = len(self._order) - self._max_retained
+        kept: deque[str] = deque()
+        for jid in self._order:
+            record = self._jobs.get(jid)
+            if excess > 0 and (record is None or record.status in _TERMINAL_STATES):
+                self._jobs.pop(jid, None)
+                self._threads.pop(jid, None)
+                excess -= 1
+            else:
+                kept.append(jid)
+        self._order = kept

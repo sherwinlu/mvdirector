@@ -58,29 +58,36 @@ class WorkspaceGuard:
             raise ConfigError(f"{label} must not contain NUL bytes.")
         return raw
 
+    def _resolve_user_path(self, candidate: Path, label: str) -> Path:
+        try:
+            return candidate.expanduser().resolve()
+        except (RuntimeError, OSError) as exc:
+            raise ConfigError(f"Invalid {label} path: {exc}") from exc
+
     def resolve_project(self, raw: Any) -> Path:
         if raw is None or (isinstance(raw, str) and not raw.strip()):
             if self.default_project is not None:
                 return self._check_contained(self.default_project, "project_dir")
-            raise ConfigError(
-                "project_dir is required (or start `mvd mcp` with --project <dir>)."
-            )
+            raise ConfigError("project_dir is required (or start `mvd mcp` with --project <dir>).")
         if not isinstance(raw, str):
             raise ConfigError("project_dir must be a string path.")
         cleaned = self._reject_nul(raw.strip(), "project_dir")
-        resolved = Path(cleaned).expanduser().resolve()
+        resolved = self._resolve_user_path(Path(cleaned), "project_dir")
         return self._check_contained(resolved, "project_dir")
 
     def resolve_path(self, project_dir: Path, raw: Any, *, label: str) -> Path:
         if not isinstance(raw, str) or not raw.strip():
             raise ConfigError(f"{label} must be a non-empty string path.")
         cleaned = self._reject_nul(raw.strip(), label)
-        candidate = Path(cleaned).expanduser()
-        resolved = (
-            candidate.resolve()
-            if candidate.is_absolute()
-            else (project_dir / candidate).resolve()
-        )
+        try:
+            candidate = Path(cleaned).expanduser()
+            resolved = (
+                candidate.resolve()
+                if candidate.is_absolute()
+                else (project_dir / candidate).resolve()
+            )
+        except (RuntimeError, OSError) as exc:
+            raise ConfigError(f"Invalid {label} path: {exc}") from exc
         return self._check_contained(resolved, label)
 
     def resolve_optional_path(self, project_dir: Path, raw: Any, *, label: str) -> Path | None:
@@ -244,8 +251,10 @@ def _shot_detail(shot: Shot) -> dict[str, Any]:
                         {
                             "name": c.name,
                             "status": c.status.value,
+                            "hard": c.hard,
                             "score": round(c.score, 4) if c.score is not None else None,
-                            "message": c.message,
+                            "detail": c.detail,
+                            "fix_hint": c.fix_hint,
                         }
                         for c in att.qc.checks
                     ],

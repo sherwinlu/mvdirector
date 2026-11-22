@@ -54,12 +54,39 @@ def is_loopback_host(host: str) -> bool:
         return False
 
 
+def _reject_json_constant(token: str) -> Any:
+    raise ValueError(f"Non-standard JSON constant not allowed: {token!r}")
+
+
+def _loads_strict_json(raw: str) -> Any:
+    return json.loads(raw, parse_constant=_reject_json_constant)
+
+
 def _host_without_port(host_header: str) -> str:
+    """Extract the host part from an HTTP Host header, returning ``''`` if malformed."""
     value = host_header.strip()
+    if not value or any(ch.isspace() or ch in ",/@" for ch in value):
+        return ""
     if value.startswith("["):
         end = value.find("]")
-        return value[1:end] if end != -1 else value
-    return value.split(":", 1)[0]
+        if end == -1:
+            return ""
+        host = value[1:end]
+        rest = value[end + 1 :]
+        if not rest:
+            return host
+        if not rest.startswith(":"):
+            return ""
+        port_str = rest[1:]
+        if not port_str.isdigit() or not (1 <= int(port_str) <= 65535):
+            return ""
+        return host
+    if ":" in value:
+        host, port_str = value.rsplit(":", 1)
+        if ":" in host or not port_str.isdigit() or not (1 <= int(port_str) <= 65535):
+            return ""
+        return host
+    return value
 
 
 def _is_loopback_origin(origin: str) -> bool:
@@ -117,6 +144,8 @@ class MCPServer:
         method = message.get("method")
         has_id = "id" in message
         req_id = message.get("id")
+        if has_id and (isinstance(req_id, bool) or not isinstance(req_id, (str, int, type(None)))):
+            return _rpc_error(None, -32600, "Invalid 'id': must be a string, integer, or null.")
         if not isinstance(method, str) or not method:
             return _rpc_error(req_id if has_id else None, -32600, "Missing or invalid 'method'.")
 
@@ -211,6 +240,12 @@ class MCPServer:
             return _rpc_error(req_id, -32602, "'arguments' must be a JSON object.")
 
         spec = self._tools[name]
+        allowed_keys = set(spec.input_schema.get("properties", {}))
+        unknown = sorted(set(arguments) - allowed_keys)
+        if unknown:
+            return _rpc_error(
+                req_id, -32602, f"Unknown argument(s) for '{name}': {', '.join(unknown)}."
+            )
         try:
             payload = spec.handler(arguments)
         except MVDError as exc:
@@ -218,17 +253,21 @@ class MCPServer:
             return _rpc_result(
                 req_id,
                 {
-                    "content": [{"type": "text", "text": json.dumps(error_body, indent=2)}],
+                    "content": [
+                        {"type": "text", "text": json.dumps(error_body, indent=2, allow_nan=False)}
+                    ],
                     "isError": True,
                 },
             )
-        except Exception as exc:
+        except Exception:
             log.exception("Unhandled exception in MCP tool %s", name)
-            error_body = {"error": str(exc), "error_type": type(exc).__name__}
+            error_body = {"error": "Internal server error.", "error_type": "InternalError"}
             return _rpc_result(
                 req_id,
                 {
-                    "content": [{"type": "text", "text": json.dumps(error_body, indent=2)}],
+                    "content": [
+                        {"type": "text", "text": json.dumps(error_body, indent=2, allow_nan=False)}
+                    ],
                     "isError": True,
                 },
             )
@@ -236,7 +275,9 @@ class MCPServer:
         return _rpc_result(
             req_id,
             {
-                "content": [{"type": "text", "text": json.dumps(payload, indent=2)}],
+                "content": [
+                    {"type": "text", "text": json.dumps(payload, indent=2, allow_nan=False)}
+                ],
                 "isError": False,
             },
         )
@@ -256,13 +297,13 @@ def serve_stdio(
         if not line:
             continue
         try:
-            message = json.loads(line)
+            message = _loads_strict_json(line)
         except ValueError as exc:
             response: dict[str, Any] | None = _rpc_error(None, -32700, f"Parse error: {exc}")
         else:
             response = server.handle_message(message)
         if response is not None:
-            out_stream.write(json.dumps(response, separators=(",", ":")) + "\n")
+            out_stream.write(json.dumps(response, separators=(",", ":"), allow_nan=False) + "\n")
             out_stream.flush()
 
 
@@ -273,7 +314,9 @@ def _json_response(
     headers: dict[str, str] | None = None,
 ) -> tuple[int, dict[str, str], bytes]:
     body = (
-        json.dumps(payload, separators=(",", ":")).encode("utf-8") if payload is not None else b""
+        json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        if payload is not None
+        else b""
     )
     out_headers: dict[str, str] = {"Cache-Control": "no-store"}
     if payload is not None:
@@ -356,7 +399,7 @@ def handle_http_request(
         )
 
     try:
-        message = json.loads(body.decode("utf-8"))
+        message = _loads_strict_json(body.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
         return _json_response(HTTPStatus.OK, _rpc_error(None, -32700, f"Parse error: {exc}"))
 
@@ -366,7 +409,8 @@ def handle_http_request(
 
     extra_headers: dict[str, str] = {}
     if isinstance(message, dict) and message.get("method") == "initialize":
-        extra_headers["Mcp-Session-Id"] = norm_headers.get("mcp-session-id") or uuid.uuid4().hex
+        # Always mint a server-generated session id (never reflect untrusted client headers).
+        extra_headers["Mcp-Session-Id"] = uuid.uuid4().hex
     return _json_response(HTTPStatus.OK, response, headers=extra_headers)
 
 
@@ -390,6 +434,7 @@ class _MCPHTTPServer(ThreadingHTTPServer):
 
 class _MCPHTTPRequestHandler(BaseHTTPRequestHandler):
     server: _MCPHTTPServer
+    timeout = 30
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         log.info("mcp-http %s - %s", self.address_string(), format % args)
@@ -418,6 +463,18 @@ class _MCPHTTPRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         self._dispatch("GET")
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        self._dispatch("HEAD")
+
+    def do_PUT(self) -> None:  # noqa: N802
+        self._dispatch("PUT")
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        self._dispatch("PATCH")
+
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        self._dispatch("OPTIONS")
 
     def do_DELETE(self) -> None:  # noqa: N802
         self._dispatch("DELETE")
@@ -457,8 +514,15 @@ def build_http_server(
     allow_unauthenticated: bool = False,
 ) -> ThreadingHTTPServer:
     """Build a Streamable HTTP MCP server with loopback/token/Origin/Host security guards."""
+    clean_token: str | None = None
+    if token is not None:
+        clean_token = token.strip()
+        if not clean_token:
+            raise ConfigError("Bearer token must not be empty or whitespace.")
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in clean_token):
+            raise ConfigError("Bearer token must not contain control characters.")
     loopback = is_loopback_host(host)
-    if not loopback and not token and not allow_unauthenticated:
+    if not loopback and not clean_token and not allow_unauthenticated:
         raise ConfigError(
             f"Refusing to bind MCP HTTP server to non-loopback host '{host}' without a bearer "
             "token. Set --token / MVD_MCP_TOKEN, or pass --allow-unauthenticated on a trusted "
@@ -467,7 +531,7 @@ def build_http_server(
     return _MCPHTTPServer(
         (host, port),
         server,
-        token=token or None,
+        token=clean_token,
         loopback_only=loopback,
     )
 

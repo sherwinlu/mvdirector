@@ -45,7 +45,7 @@ video:
   lipsync_min_vocal_fraction: 0.25
   lipsync_audio_source: vocals   # vocals | mix
   motion_single_take: true       # enforce single-take and framing continuity in motion prompts
-  motion_no_subtitles: true      # prevent video models from rendering karaoke subtitles
+  motion_no_subtitles: true      # prevent video models from rendering karaoke subtitles (not used in mix mode)
   motion_no_music: true          # tell audio-video models not to hallucinate background music
   motion_include_lyrics: false   # set true for prompt-driven lip-sync models (e.g. Seedance)
 

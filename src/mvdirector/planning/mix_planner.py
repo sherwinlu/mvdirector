@@ -43,6 +43,10 @@ _DEFAULT_NEGATIVE = (
     "blurry, deformed geometry, strobe flicker, abrupt cut"
 )
 
+# Deliberately not "cinematic": movie-trailer phrasing primes distilled (cfg 1) video models to
+# fade in hallucinated opening credits and title cards.
+_DEFAULT_STYLE = "Atmospheric ambient visual environments"
+
 _VARIANT_FRAMINGS: tuple[Framing, ...] = (
     Framing.WIDE,
     Framing.MEDIUM,
@@ -74,8 +78,8 @@ _THEME_ARCHETYPES: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "Rain-slicked neon atrium of glass walkways and suspended botanical terrariums at night",
-        "magenta, electricviolet, emerald foliage, and wet obsidian reflections",
-        "soft diffused neon signage reflections across wet glass and mist",
+        "magenta, electric violet, emerald foliage, and wet obsidian reflections",
+        "soft diffused neon glow reflecting across wet glass and mist",
     ),
     (
         "High-altitude alpine observatory deck above a sea of moonlit clouds and aurora ribbons",
@@ -109,7 +113,7 @@ _THEME_ARCHETYPES: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "Minimalist concrete desert pavilion overlooking rolling silver sand dunes under starlight",
-        "warm sand, pewter silver, travertine cream, and deepviolet night sky",
+        "warm sand, pewter silver, travertine cream, and deep violet night sky",
         "recessed architectural warm strip lighting meeting cool starlight",
     ),
     (
@@ -283,6 +287,7 @@ def _request_llm_themes(
     by_id: dict[str, _ChapterThemeReply] = {}
     chosen_style = ""
     chosen_neg = ""
+    brief = style_text.strip() or _DEFAULT_STYLE
 
     for offset in range(0, len(chapters), batch_size):
         batch = chapters[offset : offset + batch_size]
@@ -301,7 +306,7 @@ def _request_llm_themes(
                 f"bpm={ch.bpm:.0f} | energy={ch.energy:.2f} | tags={tags}{hint}{lyric_note}"
             )
         prompt_parts = [
-            f"GLOBAL STYLE BRIEF:\n{style_text.strip() or 'Cinematic atmospheric electronic mix.'}",
+            f"GLOBAL STYLE BRIEF:\n{brief}",
             f"CLIPS PER CHAPTER: {clips_per_segment}",
         ]
         if prev_notes:
@@ -345,7 +350,7 @@ def build_mix_manifest(
     """Create a ``ProjectMode.MIX`` manifest with 1 theme + ``clips_per_segment`` shots/chapter."""
     chapters_in = _ensure_analyzed_chapters(config, analysis)
     clips_per_seg = config.mix.clips_per_segment
-    clean_style = " ".join(style_text.split()) or "Cinematic atmospheric visual environments"
+    clean_style = " ".join(style_text.split()) or _DEFAULT_STYLE
 
     llm_style = ""
     llm_neg = ""

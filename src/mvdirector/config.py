@@ -273,7 +273,11 @@ class VideoConfig(_Section):
     )
     motion_no_subtitles: bool = Field(
         default=True,
-        description="Append a 'No subtitles, no text.' guard to composed motion prompts.",
+        description=(
+            "Append a 'No subtitles, no text.' guard to composed motion prompts "
+            "(omitted in mode='mix', where negative text phrasing can prime distilled video "
+            "models to render title cards)."
+        ),
     )
     motion_no_music: bool = Field(
         default=True,

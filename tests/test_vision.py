@@ -263,3 +263,22 @@ def test_vision_specification_distinguishes_solo_listener_and_together_duet():
     together_shot.singers = ["elias", "odalie"]
     together_spec = VisionJudge.specification(together_shot, duet_manifest)
     assert "Simultaneous duet — BOTH Elias and Odalie are singing TOGETHER" in together_spec
+
+
+def test_vision_system_prompt_flags_overlaid_title_cards_and_credits(manifest, png):
+    config = ProjectConfig()
+    broll = _shot(ShotType.BROLL, None)
+    verdict = VisionVerdict(
+        spec_match=0.9,
+        artifact_free=0.1,
+        character_match=None,
+        issues=["centered serif opening credit 'THE WALDREST' overlaid on scene"],
+        fix="Keep the frame completely free of overlaid typography or title cards.",
+    )
+    llm = FakeLLM(verdict)
+    gate = ImageQC(config.qc, config.video, FakeFaces([]), VisionJudge(llm))
+    report = gate.evaluate(png, broll, manifest, reference=None)
+    assert "opening credits" in llm.system and "title cards" in llm.system
+    artifacts = next(c for c in report.checks if c.name == "vision_artifacts")
+    assert artifacts.status is CheckStatus.FAILED and artifacts.hard
+    assert not report.passed

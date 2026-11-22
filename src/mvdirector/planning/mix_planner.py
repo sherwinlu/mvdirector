@@ -14,6 +14,7 @@ import logging
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from mvdirector.audio.cues import format_cues_summary
 from mvdirector.audio.tracklist import resolve_chapters
 from mvdirector.config import ProjectConfig
 from mvdirector.errors import LLMError
@@ -298,12 +299,16 @@ def _request_llm_themes(
         chapter_lines: list[str] = []
         for ch in batch:
             tags = ", ".join([*ch.genre_tags, *ch.mood_tags]) or "electronic / ambient"
+            key_note = f" | key={ch.key}" if ch.key else ""
+            cue_summary = format_cues_summary(ch.cues)
+            cue_note = f" | cues={cue_summary}" if cue_summary else ""
             hint = f" | user_theme_hint={ch.theme_prompt!r}" if ch.theme_prompt else ""
             excerpt = _format_lyric_excerpt(ch.lyrics)
             lyric_note = f" | lyrics_excerpt={excerpt!r}" if excerpt else ""
             chapter_lines.append(
                 f"- id={ch.id} | time={ch.start:.0f}-{ch.end:.0f}s | title={ch.title!r} | "
-                f"bpm={ch.bpm:.0f} | energy={ch.energy:.2f} | tags={tags}{hint}{lyric_note}"
+                f"bpm={ch.bpm:.0f}{key_note} | energy={ch.energy:.2f} | tags={tags}"
+                f"{cue_note}{hint}{lyric_note}"
             )
         prompt_parts = [
             f"GLOBAL STYLE BRIEF:\n{brief}",
@@ -339,6 +344,58 @@ def _request_llm_themes(
             by_id[item.id] = item
 
     return chosen_style, chosen_neg, by_id
+
+
+def _chapter_sample_starts(
+    ch_in: AnalyzedChapter,
+    clip_dur: float,
+    clips_per_seg: int,
+    total_duration: float,
+) -> list[float]:
+    """Pick ``clips_per_seg`` audio sample starts, anchoring to structural cues when available."""
+    avail_span = max(0.0, ch_in.duration - clip_dur)
+    lo = max(0.0, min(ch_in.start, max(0.0, total_duration - clip_dur)))
+    hi = max(lo, min(max(0.0, total_duration - clip_dur), ch_in.start + avail_span))
+    min_sep = max(1.0, clip_dur * 0.5)
+
+    chosen: list[float] = []
+    if ch_in.cues is not None:
+        raw_landmarks = (
+            ch_in.cues.main_peak,
+            ch_in.cues.first_lift,
+            ch_in.cues.second_peak,
+            ch_in.cues.breakdown,
+        )
+        for mark in raw_landmarks:
+            if len(chosen) >= clips_per_seg:
+                break
+            if mark is None or not (ch_in.start <= mark <= ch_in.end):
+                continue
+            cand = round(min(hi, max(lo, mark - clip_dur * 0.5)), 3)
+            if all(abs(cand - prev) >= min_sep for prev in chosen):
+                chosen.append(cand)
+
+    uniform = [
+        round(
+            min(
+                max(0.0, total_duration - clip_dur),
+                ch_in.start
+                + avail_span * ((i + 0.5) / clips_per_seg if clips_per_seg > 1 else 0.0),
+            ),
+            3,
+        )
+        for i in range(clips_per_seg)
+    ]
+    for cand in uniform:
+        if len(chosen) >= clips_per_seg:
+            break
+        if all(abs(cand - prev) >= min_sep for prev in chosen):
+            chosen.append(cand)
+    for cand in uniform:
+        if len(chosen) >= clips_per_seg:
+            break
+        chosen.append(cand)
+    return sorted(chosen[:clips_per_seg])
 
 
 def build_mix_manifest(
@@ -414,14 +471,10 @@ def build_mix_manifest(
         )
 
         chapter_shot_ids: list[str] = []
-        avail_span = max(0.0, ch_in.duration - clip_dur)
-        for v_idx in range(clips_per_seg):
+        sample_starts = _chapter_sample_starts(ch_in, clip_dur, clips_per_seg, analysis.duration)
+        for v_idx, sample_start in enumerate(sample_starts):
             shot_id = f"{ch_in.id}_c{v_idx + 1:02d}"
             chapter_shot_ids.append(shot_id)
-            frac = (v_idx + 0.5) / clips_per_seg if clips_per_seg > 1 else 0.0
-            sample_start = round(
-                min(max(0.0, analysis.duration - clip_dur), ch_in.start + avail_span * frac), 3
-            )
             sample_end = round(min(analysis.duration, sample_start + clip_dur), 3)
             framing = _VARIANT_FRAMINGS[v_idx % len(_VARIANT_FRAMINGS)]
 

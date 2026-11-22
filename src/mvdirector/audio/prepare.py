@@ -30,6 +30,7 @@ from pydantic import BaseModel, ConfigDict
 from mvdirector import media
 from mvdirector import tuning as tuning_mod
 from mvdirector.audio import analysis as analysis_mod
+from mvdirector.audio import cues as cues_mod
 from mvdirector.audio import stem_pack as stem_pack_mod
 from mvdirector.audio.lyrics import (
     Transcriber,
@@ -48,7 +49,7 @@ from mvdirector.audio.stems import (
 )
 from mvdirector.errors import ConfigError
 from mvdirector.llm import LLMClient, complete_json_with_optional_audio
-from mvdirector.models import BOTH_VOICES, MusicalFeatures, TimeSpan, VocalTurn
+from mvdirector.models import BOTH_VOICES, AudioCues, MusicalFeatures, TimeSpan, VocalTurn
 from mvdirector.planning import prompts
 from mvdirector.planning.brief import ensure_writable
 from mvdirector.project import Project
@@ -76,6 +77,7 @@ class AudioSummary:
     energy_arc: list[str]
     vocal_turns: list[VocalTurn] = field(default_factory=list)
     musical_features: MusicalFeatures | None = None
+    cues: AudioCues | None = None
     stem_summary: str = ""
 
 
@@ -156,6 +158,7 @@ def summarize_audio(
     musical_features = analysis_mod.analyze_musical_features(
         mix, analysis_mod.ANALYSIS_SR, tempo_bpm=tempo, harmonic_mix=harmonic_mix
     )
+    audio_cues = cues_mod.detect_audio_cues(mix, analysis_mod.ANALYSIS_SR)
     stem_summary = ""
     if stems and project_root is not None:
         arrangement = stem_pack_mod.analyze_stems(
@@ -177,6 +180,7 @@ def summarize_audio(
         energy_arc=format_energy_arc(bars, intensities, duration),
         vocal_turns=vocal_turns,
         musical_features=musical_features,
+        cues=audio_cues,
         stem_summary=stem_summary,
     )
 
@@ -239,6 +243,9 @@ def _build_inference_prompt(transcript: Transcript, summary: AudioSummary) -> st
         header.append("ENERGY ARC: " + ", ".join(summary.energy_arc))
     if summary.musical_features and summary.musical_features.summary:
         header.append(f"MUSICAL CHARACTER: {summary.musical_features.summary}")
+    cue_summary = cues_mod.format_cues_summary(summary.cues)
+    if cue_summary:
+        header.append(f"STRUCTURAL CUES: {cue_summary}")
     if summary.stem_summary:
         header.append(f"INSTRUMENTATION & STEMS: {summary.stem_summary}")
     voices = {t.voice for t in summary.vocal_turns}

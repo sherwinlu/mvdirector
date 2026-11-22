@@ -122,6 +122,44 @@ class LyricLine(StrictModel):
     timing_source: Literal["aligned", "estimated", "none"] = "none"
 
 
+class AudioCues(StrictModel):
+    """Structural energy landmarks detected from audio (no lyrics required).
+
+    Credits & Attribution:
+        Composite energy/onset/brightness landmark detection ported from
+        ``sherwinlu/weaveshift`` (``weaveshift/cues.py``).
+    """
+
+    first_lift: float | None = Field(
+        default=None,
+        ge=0.0,
+        allow_inf_nan=False,
+        description="First sustained energy lift above intro baseline, in seconds.",
+    )
+    main_peak: float | None = Field(
+        default=None,
+        ge=0.0,
+        allow_inf_nan=False,
+        description="Primary energy/onset/brightness peak (drop or main chorus), in seconds.",
+    )
+    second_peak: float | None = Field(
+        default=None,
+        ge=0.0,
+        allow_inf_nan=False,
+        description="Secondary structural peak separated from main_peak, in seconds.",
+    )
+    breakdown: float | None = Field(
+        default=None,
+        ge=0.0,
+        allow_inf_nan=False,
+        description="Lowest-energy mid-track valley/breakdown candidate, in seconds.",
+    )
+    confidence: Literal["low", "medium", "high"] = Field(
+        default="low",
+        description="Peak prominence confidence ('low', 'medium', or 'high').",
+    )
+
+
 class AnalyzedChapter(StrictModel):
     """Per-track or fixed-interval segment measured during long-form mix audio analysis."""
 
@@ -132,6 +170,7 @@ class AnalyzedChapter(StrictModel):
     title: str
     artist: str | None = None
     bpm: float = Field(gt=0.0, allow_inf_nan=False)
+    key: str | None = None
     downbeat_offset: float = Field(default=0.0, ge=0.0, allow_inf_nan=False)
     energy: float = Field(default=0.5, ge=0.0, le=1.0, allow_inf_nan=False)
     mood_tags: list[str] = Field(default_factory=list)
@@ -139,6 +178,10 @@ class AnalyzedChapter(StrictModel):
     theme_prompt: str | None = None
     clip_prompts: list[str] = Field(default_factory=list)
     lyrics: str | None = None
+    cues: AudioCues | None = Field(
+        default=None,
+        description="Structural energy landmarks (lift, peaks, breakdown) within this chapter.",
+    )
 
     @field_validator("id")
     @classmethod
@@ -246,6 +289,10 @@ class MusicalFeatures(StrictModel):
     mode: Literal["major", "minor"] | None = Field(
         default=None,
         description="Estimated harmonic mode ('major' or 'minor'), or null if unclear.",
+    )
+    camelot: str | None = Field(
+        default=None,
+        description="Camelot wheel key notation (e.g. '8A', '8B'), or null if unclear.",
     )
     brightness: Literal["dark", "warm", "balanced", "bright"] = Field(
         default="balanced",
@@ -415,6 +462,10 @@ class Analysis(StrictModel):
     musical_features: MusicalFeatures | None = Field(
         default=None,
         description="Acoustic musical qualities (key, mode, brightness, percussiveness, dynamics).",
+    )
+    cues: AudioCues | None = Field(
+        default=None,
+        description="Structural energy landmarks (first lift, peaks, breakdown) in seconds.",
     )
     stems: StemArrangement | None = Field(
         default=None,

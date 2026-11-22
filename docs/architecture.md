@@ -15,9 +15,10 @@ src/mvdirector/
   media.py            ffmpeg / ffprobe wrappers (including black-screen audio_video packaging)
   llm/                LLMClient protocol, request loop (base.py), shared HTTP/retry (http.py),
                       one backend per provider, factory.py (build_llm), check.py (mvd llm-check)
-  audio/              analysis.py (beats, vocals), lyrics.py (parsing, transcription, alignment),
-                      stems.py (Demucs stem separation), prepare.py (`mvd prepare` audio-only ingest),
-                      tracklist.py (cue sheet / tracklist ingestion & YouTube/FFmpeg chapters),
+  audio/              analysis.py (beats, vocals, key/Camelot), cues.py (structural energy landmarks),
+                      lyrics.py (parsing, transcription, alignment), stems.py (Demucs stem separation),
+                      prepare.py (`mvd prepare` audio-only ingest),
+                      tracklist.py (cue sheet / WeaveShift report & CSV ingestion & YouTube/FFmpeg chapters),
                       mix_analysis.py (windowed per-chapter audio analysis for long-form mixes)
   planning/           segmenter.py (timing, dynamic pacing, sections), planner.py (direction),
                       mix_planner.py (mix-mode chapter themes & loop units), prompts.py (prompt text),

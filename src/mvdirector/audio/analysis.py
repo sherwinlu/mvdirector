@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import logging
 import math
+import re
+import warnings
 from pathlib import Path
 from typing import Literal
 
@@ -20,6 +22,7 @@ import numpy as np
 from mvdirector import tuning as tuning_mod
 from mvdirector.audio import alignment_qa as alignment_qa_mod
 from mvdirector.audio import broadcast_qa as broadcast_qa_mod
+from mvdirector.audio import cues as cues_mod
 from mvdirector.audio import lyrics as lyrics_mod
 from mvdirector.audio import stem_pack as stem_pack_mod
 from mvdirector.errors import MediaToolError
@@ -50,6 +53,84 @@ _KRUMHANSL_MINOR = np.array(
     [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17], dtype=np.float64
 )
 _MIN_KEY_CORRELATION = 0.25
+# Reject flat/atonal spectra whose mean-centered residuals spuriously correlate with a key profile
+# (ported from sherwinlu/weaveshift: weaveshift/audio.py).
+_MIN_CHROMA_CONTRAST = 0.12
+_CAMELOT_MAJOR: dict[str, str] = {
+    "B": "1B",
+    "F#": "2B",
+    "C#": "3B",
+    "Ab": "4B",
+    "Eb": "5B",
+    "Bb": "6B",
+    "F": "7B",
+    "C": "8B",
+    "G": "9B",
+    "D": "10B",
+    "A": "11B",
+    "E": "12B",
+}
+_CAMELOT_MINOR: dict[str, str] = {
+    "Ab": "1A",
+    "Eb": "2A",
+    "Bb": "3A",
+    "F": "4A",
+    "C": "5A",
+    "G": "6A",
+    "D": "7A",
+    "A": "8A",
+    "E": "9A",
+    "B": "10A",
+    "F#": "11A",
+    "C#": "12A",
+}
+_CANONICAL_PITCH: dict[str, str] = {
+    "c": "C",
+    "c#": "C#",
+    "c-sharp": "C#",
+    "db": "C#",
+    "d-flat": "C#",
+    "d": "D",
+    "d#": "Eb",
+    "d-sharp": "Eb",
+    "eb": "Eb",
+    "e-flat": "Eb",
+    "e": "E",
+    "f": "F",
+    "f#": "F#",
+    "f-sharp": "F#",
+    "gb": "F#",
+    "g-flat": "F#",
+    "g": "G",
+    "g#": "Ab",
+    "g-sharp": "Ab",
+    "ab": "Ab",
+    "a-flat": "Ab",
+    "a": "A",
+    "a#": "Bb",
+    "a-sharp": "Bb",
+    "bb": "Bb",
+    "b-flat": "Bb",
+    "b": "B",
+}
+
+
+_KEY_RE = re.compile(r"^([a-g](?:#|b|-sharp|-flat)?)\s+(major|minor|maj|min)$")
+
+
+def camelot_key(key: str | None) -> str | None:
+    """Convert a musical key string (e.g. ``'A minor'``, ``'C# major'``) to Camelot notation."""
+    if not key:
+        return None
+    norm = key.strip().lower().replace("♭", "-flat").replace("♯", "#")
+    match = _KEY_RE.match(norm)
+    if match is None:
+        return None
+    canonical = _CANONICAL_PITCH.get(match.group(1))
+    if canonical is None:
+        return None
+    mode = "minor" if match.group(2).startswith("min") else "major"
+    return (_CAMELOT_MAJOR if mode == "major" else _CAMELOT_MINOR).get(canonical)
 
 
 def load_mono(path: Path, sr: int = ANALYSIS_SR) -> np.ndarray:
@@ -77,11 +158,20 @@ def fold_tempo(
     """Halve or double ``tempo`` until it is within [low, high], adjusting ``beats`` to match.
 
     Halving keeps every other beat (starting with the first); doubling adds a beat midway
-    between each pair.
+    between each pair. Both directions are capped at 4 octaves to bound work on degenerate inputs.
     """
-    if not math.isfinite(tempo) or tempo <= 0 or low <= 0 or high < low:
+    if (
+        not math.isfinite(tempo)
+        or tempo <= 0
+        or not math.isfinite(low)
+        or not math.isfinite(high)
+        or low <= 0
+        or high < low
+    ):
         return tempo, beats
-    while tempo > high and len(beats) > 1:
+    for _ in range(4):
+        if tempo <= high or len(beats) <= 1:
+            break
         tempo, beats = tempo / 2, beats[::2]
     # Cap octave doublings so a near-zero degenerate tempo cannot blow up memory.
     for _ in range(4):
@@ -92,13 +182,38 @@ def fold_tempo(
     return tempo, beats
 
 
-def detect_beats(samples: np.ndarray, sr: int = ANALYSIS_SR) -> tuple[float, list[float]]:
-    """Return (tempo in BPM, beat times in seconds), folded into ``TEMPO_RANGE_BPM``."""
+def fold_tempo_to_hint(
+    tempo: float,
+    hint_bpm: float,
+    beats: list[float],
+) -> tuple[float, list[float]]:
+    """Fold ``tempo`` (and ``beats``) to the power-of-two octave nearest ``hint_bpm``.
+
+    Credits & Attribution:
+        Exact ``[2/3 * hint, 4/3 * hint]`` octave folding ported from
+        ``sherwinlu/weaveshift`` (``weaveshift/audio.py:fold_tempo_to_hint``).
+    """
+    if not math.isfinite(hint_bpm) or hint_bpm <= 0.0:
+        return fold_tempo(tempo, beats)
+    return fold_tempo(tempo, beats, low=hint_bpm * (2.0 / 3.0), high=hint_bpm * (4.0 / 3.0))
+
+
+def detect_beats(
+    samples: np.ndarray,
+    sr: int = ANALYSIS_SR,
+    *,
+    hint_bpm: float | None = None,
+) -> tuple[float, list[float]]:
+    """Return (tempo in BPM, beat times in seconds), folded to ``hint_bpm`` or default range."""
     import librosa
 
     tempo, frames = librosa.beat.beat_track(y=samples, sr=sr, hop_length=HOP_LENGTH)
     times = librosa.frames_to_time(frames, sr=sr, hop_length=HOP_LENGTH)
-    return fold_tempo(float(np.atleast_1d(tempo)[0]), [float(t) for t in times])
+    raw_tempo = float(np.atleast_1d(tempo)[0])
+    beat_list = [float(t) for t in times]
+    if hint_bpm is not None and math.isfinite(hint_bpm) and hint_bpm > 0.0:
+        return fold_tempo_to_hint(raw_tempo, hint_bpm, beat_list)
+    return fold_tempo(raw_tempo, beat_list)
 
 
 def bars_from_beats(beats: list[float], beats_per_bar: int) -> list[float]:
@@ -165,6 +280,90 @@ def detect_vocal_windows(
         for s, e in merged
         if e - s >= min_duration
     ]
+
+
+def detect_vocal_windows_heuristic(
+    samples: np.ndarray,
+    sr: int = ANALYSIS_SR,
+    *,
+    offset: float = 0.0,
+    threshold_db: float = -36.0,
+    merge_gap: float = 1.2,
+    min_duration: float = 0.4,
+) -> list[TimeSpan]:
+    """Fast librosa-only fallback estimating vocal-like harmonic midrange activity from a full mix.
+
+    Not a substitute for neural stem separation in lip-sync mode, but useful for pacing and
+    lyric timing estimation when no isolated vocal stem is available.
+
+    Credits & Attribution:
+        HPSS + 250-3500 Hz midrange ratio heuristic ported from
+        ``sherwinlu/weaveshift`` (``weaveshift/audio.py:vocal_segments_heuristic``).
+    """
+    if sr <= 0:
+        return []
+    arr = np.asarray(samples, dtype=np.float32)
+    if arr.ndim > 2:
+        return []
+    if arr.ndim == 2:
+        axis = 0 if arr.shape[0] <= arr.shape[-1] else -1
+        arr = np.mean(arr, axis=axis, dtype=np.float32)
+    clean = np.nan_to_num(arr.reshape(-1), nan=0.0, posinf=0.0, neginf=0.0)
+    if clean.size < sr // 2:
+        return []
+    peak = float(np.max(np.abs(clean)))
+    if not math.isfinite(peak) or peak < 1e-6:
+        return []
+
+    import librosa
+    from scipy.ndimage import maximum_filter1d
+
+    base_offset = max(0.0, float(offset)) if math.isfinite(offset) else 0.0
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=UserWarning)
+        harmonic, _percussive = librosa.effects.hpss(clean)
+        mag = np.abs(librosa.stft(harmonic, n_fft=2048, hop_length=HOP_LENGTH))
+        freqs = librosa.fft_frequencies(sr=sr, n_fft=2048)
+        mid = (freqs >= 250.0) & (freqs <= 3500.0)
+        full = (freqs >= 80.0) & (freqs <= 8000.0)
+        mid_energy = np.mean(mag[mid, :], axis=0) if np.any(mid) else np.mean(mag, axis=0)
+        full_energy = np.mean(mag[full, :], axis=0) if np.any(full) else np.mean(mag, axis=0)
+        ratio = mid_energy / (full_energy + 1e-9)
+        rms = librosa.feature.rms(y=harmonic, hop_length=HOP_LENGTH)[0]
+
+    if rms.size == 0 or float(np.max(rms)) < 1e-3:
+        return []
+    db = 20.0 * np.log10(rms + 1e-9)
+    thr = max(threshold_db, float(np.percentile(db, 70) - 8.0))
+    active = (db > thr) & (ratio > float(np.percentile(ratio, 45)))
+    active = maximum_filter1d(active.astype(np.float64), size=5) > 0.0
+    times = librosa.frames_to_time(np.arange(len(active)), sr=sr, hop_length=HOP_LENGTH)
+    if times.size == 0:
+        return []
+    hop = float(np.median(np.diff(times))) if len(times) > 1 else HOP_LENGTH / float(sr)
+
+    raw_spans: list[list[float]] = []
+    start_t: float | None = None
+    for is_active, t_val in zip(active, times):
+        if is_active and start_t is None:
+            start_t = float(t_val)
+        elif not is_active and start_t is not None:
+            end_t = float(t_val)
+            if end_t - start_t >= min_duration:
+                raw_spans.append([base_offset + start_t, base_offset + end_t])
+            start_t = None
+    if start_t is not None:
+        end_t = float(times[-1]) + hop
+        if end_t - start_t >= min_duration:
+            raw_spans.append([base_offset + start_t, base_offset + end_t])
+
+    merged: list[list[float]] = []
+    for span in raw_spans:
+        if merged and span[0] - merged[-1][1] <= merge_gap:
+            merged[-1][1] = max(merged[-1][1], span[1])
+        else:
+            merged.append(span)
+    return [TimeSpan(start=round(max(0.0, s), 3), end=round(e, 3)) for s, e in merged]
 
 
 def _interp_matrix(target_freqs: np.ndarray, bin_freqs: np.ndarray) -> np.ndarray:
@@ -561,7 +760,13 @@ def _estimate_key_mode(
     chroma_mean: np.ndarray,
 ) -> tuple[str | None, Literal["major", "minor"] | None]:
     """Estimate musical key and mode via Krumhansl-Schmuckler profile correlation."""
-    centered = chroma_mean.astype(np.float64) - float(np.mean(chroma_mean))
+    chroma_avg = float(np.mean(chroma_mean))
+    if not math.isfinite(chroma_avg) or chroma_avg <= 1e-12:
+        return None, None
+    chroma_contrast = float(np.std(chroma_mean)) / chroma_avg
+    if not math.isfinite(chroma_contrast) or chroma_contrast < _MIN_CHROMA_CONTRAST:
+        return None, None
+    centered = chroma_mean.astype(np.float64) - chroma_avg
     norm = float(np.linalg.norm(centered))
     if not math.isfinite(norm) or norm <= 1e-9:
         return None, None
@@ -737,6 +942,7 @@ def analyze_musical_features(
     return MusicalFeatures(
         key=key,
         mode=mode,
+        camelot=camelot_key(key),
         brightness=brightness,
         spectral_centroid_hz=round(centroid_hz, 1),
         percussiveness=percussiveness,
@@ -828,16 +1034,22 @@ def analyze_project(project: Project) -> Analysis:
         log.warning("No usable beat grid was found; shots will be cut at equal intervals.")
 
     mix_rms, mix_times = rms_envelope(mix)
+    lines = lyrics_mod.parse_lyrics(lyrics_raw)
     if vocals is not None:
         vocal_rms, vocal_times = rms_envelope(vocals)
         windows = detect_vocal_windows(vocal_rms, vocal_times)
+    elif lines:
+        windows = detect_vocal_windows_heuristic(mix, ANALYSIS_SR)
+        log.info(
+            "No vocal stem provided; estimated %d heuristic vocal window(s) from mix.",
+            len(windows),
+        )
     else:
         windows = []
     log.info(
         "Found %d vocal windows covering %.1fs", len(windows), sum(w.duration for w in windows)
     )
 
-    lines = lyrics_mod.parse_lyrics(lyrics_raw)
     words = (
         lyrics_mod.load_or_transcribe_words(project)
         if lines and (vocals is not None or inputs.word_timestamps)
@@ -886,6 +1098,11 @@ def analyze_project(project: Project) -> Analysis:
     if musical_features.summary:
         log.info("Musical character: %s", musical_features.summary)
 
+    audio_cues = cues_mod.detect_audio_cues(mix, ANALYSIS_SR)
+    cue_summary = cues_mod.format_cues_summary(audio_cues)
+    if cue_summary:
+        log.info("Structural audio cues: %s", cue_summary)
+
     stem_arrangement = (
         stem_pack_mod.analyze_stems(
             discovered_stems,
@@ -928,6 +1145,7 @@ def analyze_project(project: Project) -> Analysis:
         alignment_warnings=alignment_warnings,
         broadcast_qa=broadcast_qa_model,
         musical_features=musical_features,
+        cues=audio_cues,
         stems=stem_arrangement,
     )
     profile = tuning_mod.profile_track(

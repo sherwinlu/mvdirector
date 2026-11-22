@@ -27,6 +27,7 @@ from mvdirector.audio.analysis import (
     detect_beats,
     rms_envelope,
 )
+from mvdirector.audio.cues import detect_audio_cues
 from mvdirector.audio.tracklist import (
     ResolvedTrack,
     TracklistSpec,
@@ -34,13 +35,14 @@ from mvdirector.audio.tracklist import (
     resolve_chapters,
 )
 from mvdirector.errors import ConfigError, MediaToolError
-from mvdirector.models import Analysis, AnalyzedChapter
+from mvdirector.models import Analysis, AnalyzedChapter, AudioCues
 from mvdirector.project import Project
 
 log = logging.getLogger(__name__)
 
 _RMS_CHUNK_SECONDS = 180.0
 _BEAT_WINDOW_SECONDS = 120.0
+_CUE_WINDOW_SECONDS = 300.0
 _DEFAULT_BPM = 120.0
 
 
@@ -72,6 +74,8 @@ def load_mono_window(
             "ffmpeg",
             "-v",
             "error",
+            "-protocol_whitelist",
+            "file",
             "-ss",
             f"{safe_start:.4f}",
             "-t",
@@ -153,18 +157,20 @@ def _align_beat_phase(rel_beats: list[float], beat_sec: float) -> float:
     return (mean_angle / (2.0 * math.pi)) * beat_sec
 
 
-def _chapter_beats_and_bpm(
+def _chapter_beats_and_cues(
     mix_path: Path,
     track: ResolvedTrack,
     beats_per_bar: int,
-) -> tuple[float, float, list[float], list[float]]:
-    """Measure or phase-lock ``(bpm, downbeat_offset, beats, bars)`` for one chapter."""
-    win_dur = min(track.end - track.start, _BEAT_WINDOW_SECONDS)
+) -> tuple[float, float, list[float], list[float], AudioCues]:
+    """Measure or phase-lock ``(bpm, downbeat_offset, beats, bars, cues)`` for one chapter."""
+    win_cap = _BEAT_WINDOW_SECONDS if track.cues is not None else _CUE_WINDOW_SECONDS
+    win_dur = min(track.end - track.start, win_cap)
     samples = load_mono_window(mix_path, track.start, win_dur, sr=ANALYSIS_SR)
+    beat_samples = samples[: int(_BEAT_WINDOW_SECONDS * ANALYSIS_SR)]
     detected_bpm = _DEFAULT_BPM
     rel_beats: list[float] = []
-    if samples.size >= ANALYSIS_SR:
-        raw_bpm, rel_beats = detect_beats(samples, sr=ANALYSIS_SR)
+    if beat_samples.size >= ANALYSIS_SR:
+        raw_bpm, rel_beats = detect_beats(beat_samples, sr=ANALYSIS_SR, hint_bpm=track.bpm)
         if math.isfinite(raw_bpm) and raw_bpm > 0.0:
             detected_bpm = raw_bpm
 
@@ -187,7 +193,12 @@ def _chapter_beats_and_bpm(
         if track.start <= t < track.end:
             beats.append(t)
     bars = beats[:: max(1, beats_per_bar)]
-    return bpm, downbeat, beats, bars
+    chapter_cues = (
+        track.cues
+        if track.cues is not None
+        else detect_audio_cues(samples, sr=ANALYSIS_SR, offset=track.start)
+    )
+    return bpm, downbeat, beats, bars, chapter_cues
 
 
 def analyze_mix_project(
@@ -227,7 +238,7 @@ def analyze_mix_project(
     weighted_bpm = 0.0
 
     for item, mean_rms in zip(resolved, raw_means):
-        bpm, downbeat, ch_beats, ch_bars = _chapter_beats_and_bpm(
+        bpm, downbeat, ch_beats, ch_bars, ch_cues = _chapter_beats_and_cues(
             mix_path, item, video.beats_per_bar
         )
         if item.energy is not None:
@@ -248,6 +259,7 @@ def analyze_mix_project(
                 title=item.title,
                 artist=item.artist,
                 bpm=bpm,
+                key=item.key,
                 downbeat_offset=downbeat,
                 energy=energy,
                 mood_tags=item.mood_tags,
@@ -255,6 +267,7 @@ def analyze_mix_project(
                 theme_prompt=item.theme_prompt,
                 clip_prompts=item.clip_prompts,
                 lyrics=item.lyrics,
+                cues=ch_cues,
             )
         )
         all_beats.extend(ch_beats)

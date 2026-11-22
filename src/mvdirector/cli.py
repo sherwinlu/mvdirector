@@ -952,5 +952,72 @@ def schema(
         typer.echo(f"Wrote {path}")
 
 
+@app.command()
+def mcp(
+    http: bool = typer.Option(
+        False,
+        "--http",
+        help="Serve Streamable HTTP (/mcp) instead of stdio.",
+    ),
+    host: str = typer.Option(
+        "127.0.0.1",
+        "--host",
+        help="Bind host for --http mode (defaults to loopback 127.0.0.1).",
+    ),
+    port: int = typer.Option(
+        8765,
+        "--port",
+        min=1,
+        max=65535,
+        help="Bind port for --http mode.",
+    ),
+    token: str | None = typer.Option(
+        None,
+        "--token",
+        envvar="MVD_MCP_TOKEN",
+        help="Bearer token required for --http requests (required for non-loopback binds).",
+    ),
+    allow_unauthenticated: bool = typer.Option(
+        False,
+        "--allow-unauthenticated",
+        help="Allow binding --http on a non-loopback address without a bearer token.",
+    ),
+    project: Path | None = typer.Option(
+        None,
+        "--project",
+        "-p",
+        help="Default project folder used when tool calls omit project_dir.",
+    ),
+    workspace: list[Path] | None = typer.Option(
+        None,
+        "--workspace",
+        "-w",
+        help="Restrict all project and file paths to these root folders (repeatable).",
+    ),
+) -> None:
+    """Run the mvdirector MCP server over stdio (default) or Streamable HTTP (--http)."""
+    from mvdirector.mcp import MCPServer, serve_http, serve_stdio
+
+    allowed_roots: list[Path] | None = list(workspace) if workspace else None
+    if http and allowed_roots is None:
+        # Always contain HTTP callers to the configured project or current working directory.
+        allowed_roots = [project.resolve() if project is not None else Path.cwd().resolve()]
+
+    try:
+        server = MCPServer(default_project=project, allowed_roots=allowed_roots)
+        if http:
+            serve_http(
+                server,
+                host=host,
+                port=port,
+                token=token,
+                allow_unauthenticated=allow_unauthenticated,
+            )
+        else:
+            serve_stdio(server)
+    except MVDError as exc:
+        raise _fail(exc) from exc
+
+
 if __name__ == "__main__":
     app()

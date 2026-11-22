@@ -93,6 +93,7 @@ mvd assemble                                              # output/<title>.mp4
 - [ComfyUI Workflows & Model Bindings](docs/workflows.md) — Mapping `.api.json` + `.bindings.json`, `reference_notation` (`prose` vs `tags`), `audio_video` black-screen wrapper, model-family `video:` settings table, paid cloud API nodes, and `${ENV}` allowlist.
 - [Pipeline, Assets, Quality Checks & Review](docs/pipeline-and-qc.md) — Project layout, `mvd prepare`, `mvd brief`, track auto-tuning (`mvd tune`), visual bible & deterministic rules, reference sheets & turnaround videos, derived/embedded set plates & hero props, 3D blocking previz, `--draft` & `mvd upscale`, `allow_cuts` montage, QC gates, retry ladder, calibration, `light`/`strict` review, and Long-Form Mix Mode (`mode: mix`).
 - [Using mvdirector as a library](docs/library.md) — `mvdirector.api`, the public surface, and the `StateStore`, `AssetStorage` and `ComfyEndpointProvider` extension points.
+- [MCP Server & Agent Integration](docs/mcp.md) — Driving `mvdirector` from Claude Code, Cursor, Antigravity, or a remote GPU workstation via `mvd mcp` (`stdio` + Streamable HTTP, async jobs, and the bundled `mvdirector://skill` guide).
 - [Architecture, Development & Limitations](docs/architecture.md) — Source code map, manifest & event-stream conventions, dev commands (`pytest`, `ruff`, `mypy`, `mvd schema`), extension points, and known limitations.
 - [Changelog](CHANGELOG.md) — Versioned release notes and upgrade history.
 

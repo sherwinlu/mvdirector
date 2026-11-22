@@ -39,7 +39,9 @@ Score from 0 to 1:
   * Overlaid text & title cards: any overlaid typography, opening credits, title cards,
     subtitles, captions, logos, or watermarks—even clean, legible, or stylized serif text
     centered or in a corner—MUST score artifact_free <= 0.2 and be named in 'issues' unless
-    the specification explicitly asks for text.
+    the specification explicitly asks for text. Lettering that physically belongs to the scene
+    (a shop sign, a book cover, a print on clothing) is not an overlay; penalize it only when
+    it is garbled.
   * Body proportions & height-to-width ratios: check human head-to-body, torso-to-leg and
     height-to-width proportions carefully. Vertically squashed or compressed bodies, dwarf or
     stubby legs beneath a wide coat or torso, oversized heads, or stiff front-facing reference

@@ -346,7 +346,9 @@ Rules:
 - No text-bearing props or movie-title framing: avoid signage, neon signs, storefronts, books,
   screens, posters, or plaques; describe 'style' with photographic or architectural terms (e.g.
   'atmospheric ambient photography') rather than 'cinematic' or movie-trailer phrasing so video
-  models do not invent opening credits.
+  models do not invent opening credits. Never mention text, titles, credits, subtitles, or
+  captions in any field except 'negative_prompt', not even to exclude them: naming them in a
+  prompt primes video models to render them.
 - Seamless loop physics: design every 'clip_prompts' entry and 'motion_style' for short (4-8s)
   crossfade-looped clips. Use continuous cyclical or steady ambient motion (drifting fog, rippling
   water, slow volumetric light sweeps, floating dust/embers, gentle camera glide). Avoid one-off

@@ -19,7 +19,7 @@ from typer.testing import CliRunner
 from mvdirector import api
 from mvdirector.cli import app
 from mvdirector.comfy.client import ComfyClient
-from mvdirector.config import ProjectConfig, load_config
+from mvdirector.config import ProjectConfig, VideoConfig, load_config
 from mvdirector.errors import ConfigError, MVDError
 from mvdirector.models import AssetKind, AssetStatus, ProjectMode, ShotType
 from mvdirector.planning import prompts
@@ -369,9 +369,6 @@ def test_project_relative_tracklist_override_and_empty_approve_guard(tmp_path: P
 
 
 def test_mix_motion_prompt_omits_no_subtitles_and_cinematic_default(tmp_path: Path) -> None:
-    from mvdirector.config import VideoConfig
-    from mvdirector.planning import prompts
-
     project = _make_mix_project(tmp_path)
     api.analyze(project)
     _, manifest = api.plan(project, overwrite=True)
@@ -384,3 +381,30 @@ def test_mix_motion_prompt_omits_no_subtitles_and_cinematic_default(tmp_path: Pa
     assert "No subtitles" not in motion
     assert "no text" not in motion.lower()
     assert "cinematic" not in motion.lower()
+
+
+def test_mix_theme_request_defaults_to_non_cinematic_brief_and_text_free_rules(
+    tmp_path: Path,
+) -> None:
+    project = _make_mix_project(tmp_path)
+    _, analysis = api.analyze(project)
+    llm = _ScriptedMixLLM()
+    build_mix_manifest(project.config, analysis, "  \n ", llm)  # type: ignore[arg-type]
+
+    assert "GLOBAL STYLE BRIEF:\nAtmospheric ambient visual environments" in llm.prompts[0]
+    assert "cinematic" not in llm.prompts[0].lower()
+    system = llm.calls[0]
+    assert "never hex" in system and "avoid signage" in system
+    assert "not even to exclude them" in system
+
+
+def test_mix_fallback_themes_follow_text_free_theme_rules() -> None:
+    from mvdirector.planning.mix_planner import _THEME_ARCHETYPES
+
+    # The deterministic fallback (LLM off, or a failed LLM batch) must obey the same rules that
+    # MIX_THEMES_SYSTEM gives the LLM: no text-bearing props, movie framing, or hex colors.
+    banned = ("signage", "neon sign", "storefront", "book", "screen", "poster", "plaque", "#")
+    for archetype in _THEME_ARCHETYPES:
+        text = " ".join(archetype).lower()
+        assert "cinematic" not in text, archetype
+        assert [word for word in banned if word in text] == [], archetype

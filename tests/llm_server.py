@@ -165,7 +165,7 @@ class FakeLLMServer:
 
 
 def _kind(system: str) -> str:
-    if "Write the visual bible" in system:
+    if "write the visual bible" in system.lower():
         return "bible"
     if "exactly one entry per shot id" in system:
         return "shots"
@@ -208,7 +208,8 @@ def _read_gemini(body: dict[str, Any]) -> tuple[str, str, int]:
     for content in body["contents"]:
         for part in content["parts"]:
             if "inlineData" in part:
-                images += 1
+                if part["inlineData"].get("mimeType", "").startswith("image/"):
+                    images += 1
             else:
                 texts.append(part["text"])
     return system, "\n".join(texts), images

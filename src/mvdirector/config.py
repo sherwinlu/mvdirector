@@ -21,7 +21,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from mvdirector.errors import ConfigError
-from mvdirector.models import Framing, ProjectMode, RetryStrategy
+from mvdirector.models import Framing, ProjectMode, RetryStrategy, VideoStyle
 
 CONFIG_FILENAME = "project.yaml"
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -418,6 +418,15 @@ class LLMConfig(_Section):
 
 
 class PlanningConfig(_Section):
+    video_style: VideoStyle = Field(
+        default=VideoStyle.LIPSYNC,
+        description=(
+            "Direction style for standard-mode music videos: 'lipsync' (default: on-camera "
+            "singing intercut with performance and b-roll), 'narrative' (no lip-sync: recurring "
+            "character(s) in performance shots intercut with b-roll), or 'visual' (no lip-sync "
+            "and no recurring characters: 100% b-roll visual/atmospheric film)."
+        ),
+    )
     wardrobe_monotonic: bool = Field(
         default=True,
         description="A costume change is one-way: once a later wardrobe state appears, "

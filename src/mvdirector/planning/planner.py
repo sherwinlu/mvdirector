@@ -48,6 +48,7 @@ from mvdirector.models import (
     ShotType,
     SongInterpretation,
     TimeSpan,
+    VideoStyle,
     VisualBible,
     WardrobeState,
     ascii_fold,
@@ -318,13 +319,24 @@ def build_manifest(
     else:
         snap_sections = config.video.snap_sections == "always"
     manifest.shots = _timed_shots(config, analysis, snap_sections=snap_sections)
+    video_style = config.planning.video_style
     if llm is None:
         log.warning("LLM disabled: using rule-based direction. Edit manifest.json to refine it.")
         manifest.visual_bible = VisualBible(style=" ".join(style_text.split()))
     else:
-        _write_bible(manifest, lyrics_text, style_text, llm, analysis=analysis, mix_path=mix_path)
-    voice_map = _map_voices_to_characters(analysis, manifest)
-    if config.planning.max_lipsync_share is not None:
+        _write_bible(
+            manifest,
+            lyrics_text,
+            style_text,
+            llm,
+            analysis=analysis,
+            mix_path=mix_path,
+            video_style=video_style,
+        )
+    voice_map = (
+        _map_voices_to_characters(analysis, manifest) if video_style is VideoStyle.LIPSYNC else {}
+    )
+    if video_style is VideoStyle.LIPSYNC and config.planning.max_lipsync_share is not None:
         # After the bible, so each shot can be matched to its section or acoustic singer.
         _thin_lipsync(
             manifest.shots,
@@ -380,6 +392,7 @@ def _write_bible(
     *,
     analysis: Analysis | None = None,
     mix_path: Path | None = None,
+    video_style: VideoStyle = VideoStyle.LIPSYNC,
 ) -> None:
     section_list = "\n".join(f"- {name}" for name in _section_order(lyrics_text)) or "(none)"
     parts = [f"MUSIC STYLE AND BRIEF:\n{style_text}"]
@@ -395,10 +408,16 @@ def _write_bible(
             parts.append(f"ARRANGEMENT & INSTRUMENTATION:\n{analysis.stems.summary}")
     parts.append(f"SONG SECTIONS, IN ORDER:\n{section_list}")
     parts.append(f"LYRICS:\n{lyrics_text}")
+    if video_style is VideoStyle.VISUAL:
+        bible_system = prompts.VISUAL_BIBLE_SYSTEM
+    elif video_style is VideoStyle.NARRATIVE:
+        bible_system = f"{prompts.BIBLE_SYSTEM}\n\n{prompts.NARRATIVE_BIBLE_ADDENDUM}"
+    else:
+        bible_system = prompts.BIBLE_SYSTEM
     try:
         bible = complete_json_with_optional_audio(
             llm,
-            system=prompts.BIBLE_SYSTEM,
+            system=bible_system,
             text="\n\n".join(parts),
             schema=BibleReply,
             audio_path=mix_path,
@@ -408,41 +427,47 @@ def _write_bible(
             f"Could not get the visual bible from the model: {exc} Run `mvd llm-check` to test the "
             "model, or try a more capable one."
         ) from exc
-    characters: dict[str, Character] = {}
-    for item in bible.characters:
-        if not item.appearance.strip():
-            continue
-        characters[item.id] = Character(
-            name=item.name or item.id,
-            appearance=item.appearance,
-            invariants=item.invariants,
-            wardrobe=[WardrobeState(id=w.id, description=w.description) for w in item.wardrobe],
-        )
-    if len(characters) > 1:
-        primary = next(iter(characters.values()))
-        if not primary.wardrobe and bible.wardrobe:
-            primary.wardrobe = [
-                WardrobeState(id=w.id, description=w.description) for w in bible.wardrobe
-            ]
-        if not primary.invariants and bible.invariants:
-            primary.invariants = bible.invariants
-        manifest.characters = characters
-        manifest.character = primary
-    elif len(characters) == 1:
-        single = next(iter(characters.values()))
-        if not single.wardrobe and bible.wardrobe:
-            single.wardrobe = [
-                WardrobeState(id=w.id, description=w.description) for w in bible.wardrobe
-            ]
-        if not single.invariants and bible.invariants:
-            single.invariants = bible.invariants
-        manifest.character = single
+    if video_style is VideoStyle.VISUAL:
+        manifest.characters = {}
+        manifest.character = Character()
     else:
-        manifest.character = Character(
-            appearance=bible.appearance,
-            invariants=bible.invariants,
-            wardrobe=[WardrobeState(id=w.id, description=w.description) for w in bible.wardrobe],
-        )
+        characters: dict[str, Character] = {}
+        for item in bible.characters:
+            if not item.appearance.strip():
+                continue
+            characters[item.id] = Character(
+                name=item.name or item.id,
+                appearance=item.appearance,
+                invariants=item.invariants,
+                wardrobe=[WardrobeState(id=w.id, description=w.description) for w in item.wardrobe],
+            )
+        if len(characters) > 1:
+            primary = next(iter(characters.values()))
+            if not primary.wardrobe and bible.wardrobe:
+                primary.wardrobe = [
+                    WardrobeState(id=w.id, description=w.description) for w in bible.wardrobe
+                ]
+            if not primary.invariants and bible.invariants:
+                primary.invariants = bible.invariants
+            manifest.characters = characters
+            manifest.character = primary
+        elif len(characters) == 1:
+            single = next(iter(characters.values()))
+            if not single.wardrobe and bible.wardrobe:
+                single.wardrobe = [
+                    WardrobeState(id=w.id, description=w.description) for w in bible.wardrobe
+                ]
+            if not single.invariants and bible.invariants:
+                single.invariants = bible.invariants
+            manifest.character = single
+        else:
+            manifest.character = Character(
+                appearance=bible.appearance,
+                invariants=bible.invariants,
+                wardrobe=[
+                    WardrobeState(id=w.id, description=w.description) for w in bible.wardrobe
+                ],
+            )
     manifest.visual_bible = VisualBible(
         interpretation=_build_interpretation(bible.interpretation),
         concept=bible.concept,
@@ -482,18 +507,24 @@ def _section_order(lyrics_text: str) -> list[str]:
 def _timed_shots(
     config: ProjectConfig, analysis: Analysis, *, snap_sections: bool = False
 ) -> list[Shot]:
-    video, shots = config.video, []
+    video, video_style, shots = config.video, config.planning.video_style, []
     for index, seg in enumerate(segment(analysis, video, snap_sections=snap_sections)):
         shot_id = f"s{index + 1:03d}"
         slice_start = max(0.0, seg.start - video.handle_seconds)
         slice_end = min(analysis.duration, seg.end + video.handle_seconds)
+        if video_style is VideoStyle.VISUAL:
+            shot_type = ShotType.BROLL
+        elif video_style is VideoStyle.NARRATIVE:
+            shot_type = ShotType.PERFORMANCE
+        else:
+            shot_type = seg.type
         shots.append(
             Shot(
                 id=shot_id,
                 index=index,
                 start=seg.start,
                 end=seg.end,
-                type=seg.type,
+                type=shot_type,
                 section=seg.section,
                 lyrics=seg.lyrics,
                 intensity=seg.intensity,
@@ -1134,6 +1165,7 @@ def _direct_shots(
                     analysis=analysis,
                     voice_map=voice_map,
                     style_text=style_text,
+                    video_style=config.planning.video_style,
                 )
             except LLMError as exc:
                 # One bad batch must not lose the whole plan: these shots get simple rule-based
@@ -1291,6 +1323,7 @@ def _ask_for_batch(
     analysis: Analysis | None = None,
     voice_map: dict[str, str] | None = None,
     style_text: str = "",
+    video_style: VideoStyle = VideoStyle.LIPSYNC,
 ) -> dict[str, ShotCreative]:
     bible, character = manifest.visual_bible, manifest.character
     lines = []
@@ -1403,7 +1436,7 @@ def _ask_for_batch(
         )
         last_pace = pace
         singer_hint = ""
-        if len(manifest.characters) > 1:
+        if video_style is VideoStyle.LIPSYNC and len(manifest.characters) > 1:
             resolved_singers = _resolve_shot_singers(s, analysis, manifest.characters, voice_map)
             if len(resolved_singers) >= 2:
                 joined = ", ".join(repr(cid) for cid in resolved_singers)
@@ -1432,8 +1465,14 @@ def _ask_for_batch(
             "write timestamped multi-angle beats (e.g. '0-2s: overhead... 2-4s: low angle...') "
             "with hard cuts between distinct angles."
         )
+    if video_style is VideoStyle.VISUAL:
+        shots_system = prompts.VISUAL_SHOTS_SYSTEM
+    elif video_style is VideoStyle.NARRATIVE:
+        shots_system = f"{prompts.SHOTS_SYSTEM}\n\n{prompts.NARRATIVE_SHOTS_ADDENDUM}"
+    else:
+        shots_system = prompts.SHOTS_SYSTEM
     reply = llm.complete_json(
-        system=prompts.SHOTS_SYSTEM,
+        system=shots_system,
         content=[text_block("\n\n".join(lines))],
         schema=ShotBatchReply,
     )

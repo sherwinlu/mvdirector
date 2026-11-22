@@ -43,7 +43,23 @@ METRIC_CONFIG: dict[str, tuple[str, bool]] = {
         True,
     ),
 }
-_IGNORED_METRICS = {"width", "height", "duration", "lag_seconds"}
+# Measurements with no threshold to fit: dimensions, lags, and advisory telemetry.
+_IGNORED_METRICS = {
+    "width",
+    "height",
+    "duration",
+    "lag_seconds",
+    "sync_delay_seconds",
+    "desync_risk",
+    "median_face_fraction",
+    "velocity_jump",
+    "speed_dip_ratio",
+    "duplicate_boundary_frame",
+    "beat_correlation",
+    "best_lag_seconds",
+    "chance_baseline",
+    "z_score",
+}
 
 
 @dataclass(frozen=True)

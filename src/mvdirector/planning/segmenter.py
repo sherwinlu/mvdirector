@@ -47,6 +47,181 @@ def frames_for(duration: float, fps: int, multiple: int, offset: int) -> int:
     return multiple * steps + offset
 
 
+def split_long_span_at_silences(
+    start: float,
+    end: float,
+    vocal_windows: list[TimeSpan],
+    fps: int,
+    *,
+    min_seconds: float,
+    max_seconds: float,
+) -> list[int]:
+    """Split ``[start, end]`` into exact-integer frame counts preferring inter-vocal silence gaps.
+
+    Guarantees ``sum(counts) == round(end * fps) - round(start * fps)`` so chained sub-clips
+    never accumulate frame drift.
+
+    Credits & Attribution:
+        Silence-midpoint exact-integer sub-clip splitting inspired by ``tsondo/musicvision``
+        (https://github.com/tsondo/musicvision — ``src/musicvision/engine_registry.py``).
+    """
+    total_frames = max(1, round(end * fps) - round(start * fps))
+    max_frames = max(1, int(math.floor(max_seconds * fps)))
+    min_frames = max(1, min(max_frames, int(math.ceil(min_seconds * fps))))
+    if total_frames <= max_frames:
+        return [total_frames]
+
+    # Collect silence gap midpoints inside (start, end) between sorted vocal windows.
+    clipped = sorted(
+        (
+            (max(start, w.start), min(end, w.end))
+            for w in vocal_windows
+            if min(end, w.end) > max(start, w.start)
+        ),
+        key=lambda pair: pair[0],
+    )
+    silence_frames: list[int] = []
+    for prev_w, next_w in zip(clipped[:-1], clipped[1:]):
+        if next_w[0] - prev_w[1] >= 0.15:
+            mid = 0.5 * (prev_w[1] + next_w[0])
+            f_idx = round((mid - start) * fps)
+            if 0 < f_idx < total_frames:
+                silence_frames.append(f_idx)
+
+    counts: list[int] = []
+    cursor = 0
+    while total_frames - cursor > max_frames:
+        remaining = total_frames - cursor
+        lo = cursor + min_frames
+        hi = min(cursor + max_frames, total_frames - min_frames)
+        if hi < lo:
+            half = remaining // 2
+            counts.append(half)
+            cursor += half
+            continue
+        ideal = cursor + remaining / max(2, math.ceil(remaining / max_frames))
+        candidates = [f for f in silence_frames if lo <= f <= hi]
+        cut = min(candidates, key=lambda f: abs(f - ideal)) if candidates else int(round(ideal))
+        cut = max(lo, min(hi, cut))
+        counts.append(cut - cursor)
+        cursor = cut
+    counts.append(total_frames - cursor)
+    return counts
+
+
+def dp_phrase_cuts(
+    analysis: Analysis,
+    video: VideoConfig,
+    candidate_points: list[float],
+) -> list[float]:
+    """Shortest-path DP over ``candidate_points`` minimizing mid-phrase/mid-lyric splits.
+
+    Selects a subset of ``candidate_points`` (keeping ``0.0`` and ``analysis.duration``) such
+    that every segment stays within ``[min_clip_seconds, max_clip_seconds]`` when possible and
+    avoids slicing through active lyric lines or vocal windows.
+
+    Credits & Attribution:
+        Global shortest-path phrase-aware slicing inspired by ``JavaDerek/music-video-pipeline``
+        (https://github.com/JavaDerek/music-video-pipeline — ``slicing.py:phrase_aware_slicing``).
+    """
+    pts = sorted(
+        {
+            round(p, 3)
+            for p in [*candidate_points, 0.0, analysis.duration]
+            if 0.0 <= p <= analysis.duration
+        }
+    )
+    n = len(pts)
+    if n <= 2:
+        return pts
+
+    def _split_penalty(cut_time: float) -> float:
+        if cut_time <= 0.0 or cut_time >= analysis.duration:
+            return 0.0
+        penalty = 0.0
+        for line in analysis.lyric_lines:
+            if (
+                line.start is not None
+                and line.end is not None
+                and line.start + 0.08 < cut_time < line.end - 0.08
+            ):
+                penalty += 10.0
+        for win in analysis.vocal_windows:
+            if win.start + 0.12 < cut_time < win.end - 0.12:
+                penalty += 3.0
+        return penalty
+
+    penalties = [_split_penalty(p) for p in pts]
+    target_dur = 0.5 * (video.min_clip_seconds + video.max_clip_seconds)
+    inf = float("inf")
+    dp = [inf] * n
+    prev = [-1] * n
+    dp[0] = 0.0
+
+    for j in range(1, n):
+        for i in range(j - 1, -1, -1):
+            span = pts[j] - pts[i]
+            if span > video.max_clip_seconds + 1e-6:
+                break
+            if span < video.min_clip_seconds - 1e-6:
+                continue
+            dur_cost = 0.15 * abs(span - target_dur)
+            cost = dp[i] + penalties[j] + dur_cost
+            if cost < dp[j]:
+                dp[j] = cost
+                prev[j] = i
+
+    if prev[n - 1] == -1:
+        return []  # no feasible constrained tiling; caller falls back cleanly
+
+    chosen: list[float] = []
+    cur = n - 1
+    while cur >= 0:
+        chosen.append(pts[cur])
+        cur = prev[cur]
+    chosen.reverse()
+    return chosen
+
+
+def shift_to_vocal_onset(
+    points: list[float],
+    vocal_windows: list[TimeSpan],
+    video: VideoConfig,
+    *,
+    max_shift_seconds: float = 0.45,
+) -> list[float]:
+    """Locally nudge cut boundaries (zero cascade) to trim leading silence before vocal onsets.
+
+    When a vocal phrase begins shortly after a cut (within ``max_shift_seconds``), shifts only
+    that single boundary forward to the vocal onset if both neighboring shots remain within
+    ``[min_clip_seconds, max_clip_seconds]`` and the previous shot is not actively sung there.
+
+    Credits & Attribution:
+        Zero-cascade local vocal-onset shifting inspired by ``JavaDerek/music-video-pipeline``
+        (https://github.com/JavaDerek/music-video-pipeline — ``slicing.py:_prefer_vocal_onset``).
+    """
+    if len(points) < 3 or not vocal_windows:
+        return list(points)
+    result = list(points)
+    for idx in range(1, len(result) - 1):
+        cut = result[idx]
+        prev_cut = result[idx - 1]
+        next_cut = result[idx + 1]
+        # Skip if vocals are already active across this boundary.
+        if any(w.start <= cut <= w.end for w in vocal_windows):
+            continue
+        upcoming = [w.start for w in vocal_windows if cut < w.start <= cut + max_shift_seconds]
+        if not upcoming:
+            continue
+        onset = round(min(upcoming), 3)
+        if (
+            onset - prev_cut <= video.max_clip_seconds + 1e-6
+            and next_cut - onset >= video.min_clip_seconds - 1e-6
+        ):
+            result[idx] = onset
+    return result
+
+
 def _allowed_bar_steps(bar_length: float, video: VideoConfig) -> list[int]:
     """Bar step sizes (from 8, 4, 2, 1) that fit within [min_clip_seconds, max_clip_seconds]."""
     max_bars = next((n for n in _VALID_BAR_STEPS if n * bar_length <= video.max_clip_seconds), 1)
@@ -247,6 +422,18 @@ def cut_points(
                         next_idx = candidate
                         break
                 idx = next_idx
+    if video.phrase_dp_slicing:
+        candidates = sorted(
+            {
+                round(p, 3)
+                for p in [*analysis.bars, *points, *_phrase_points(analysis, bars)]
+                if 0.0 <= p <= duration
+            }
+        )
+        dp_points = dp_phrase_cuts(analysis, video, candidates)
+        if dp_points:
+            points = dp_points
+
     if handoff_cuts:
         points = sorted({round(p, 3) for p in [*points, *handoff_cuts, 0.0, duration]})
     elif points[-1] != duration:
@@ -277,7 +464,10 @@ def cut_points(
         parts = max(1, math.ceil(span / video.max_clip_seconds - 1e-9))
         origin = final[-1]
         final += [origin + span * k / parts for k in range(1, parts + 1)]
-    return [round(p, 3) for p in final]
+    cuts = [round(p, 3) for p in final]
+    if video.prefer_vocal_onset and analysis.vocal_windows and not handoff_cuts:
+        cuts = shift_to_vocal_onset(cuts, analysis.vocal_windows, video)
+    return cuts
 
 
 def section_timeline(analysis: Analysis) -> list[tuple[float, str]]:

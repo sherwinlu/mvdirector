@@ -18,11 +18,15 @@ from typing import Literal
 import numpy as np
 
 from mvdirector import tuning as tuning_mod
+from mvdirector.audio import alignment_qa as alignment_qa_mod
+from mvdirector.audio import broadcast_qa as broadcast_qa_mod
 from mvdirector.audio import lyrics as lyrics_mod
 from mvdirector.audio import stem_pack as stem_pack_mod
+from mvdirector.errors import MediaToolError
 from mvdirector.models import (
     BOTH_VOICES,
     Analysis,
+    BroadcastAudioQA,
     MusicalFeatures,
     TimeSpan,
     VideoStyle,
@@ -51,7 +55,16 @@ _MIN_KEY_CORRELATION = 0.25
 def load_mono(path: Path, sr: int = ANALYSIS_SR) -> np.ndarray:
     import librosa  # imported lazily: slow to import and unused by most commands
 
-    samples, _ = librosa.load(str(path), sr=sr, mono=True)
+    try:
+        samples, _ = librosa.load(str(path), sr=sr, mono=True)
+    except librosa.util.exceptions.ParameterError as exc:
+        raise MediaToolError(
+            f"{path.name} cannot be analyzed ({exc}); re-export it, e.g. as 24-bit PCM WAV."
+        ) from exc
+    if not np.all(np.isfinite(samples)):
+        raise MediaToolError(
+            f"{path.name} contains NaN or infinite samples; re-export it, e.g. as 24-bit PCM WAV."
+        )
     return samples
 
 
@@ -739,7 +752,8 @@ def analyze_project(project: Project) -> Analysis:
     """Analyze the project's mix and stems and return the result (does not save it)."""
     inputs, video = project.config.inputs, project.config.video
     require_vocals = project.config.planning.video_style is VideoStyle.LIPSYNC
-    mix = load_mono(project.input_path(inputs.mix, "mix"))
+    mix_path = project.input_path(inputs.mix, "mix")
+    mix = load_mono(mix_path)
     vocals_path = project.path(inputs.vocals) if inputs.vocals else None
     if require_vocals:
         vocals: np.ndarray | None = load_mono(project.input_path(inputs.vocals, "vocals"))
@@ -833,6 +847,20 @@ def analyze_project(project: Project) -> Analysis:
         lines = lyrics_mod.align_lines_to_words(lines, words)
     lines = lyrics_mod.estimate_missing_timings(lines, windows)
 
+    alignment_warnings = (
+        alignment_qa_mod.audit_lyric_alignment(vocals, ANALYSIS_SR, lines, windows)
+        if vocals is not None and lines
+        else []
+    )
+    if words and bars:
+        word_spans = [(w.word, w.start, w.end) for w in words]
+        alignment_warnings.extend(alignment_qa_mod.detect_boundary_word_cuts(bars, word_spans))
+    if alignment_warnings:
+        log.info(
+            "Pre-spend alignment QA flagged %d warning(s) (see analysis.json alignment_warnings)",
+            len(alignment_warnings),
+        )
+
     multi_singer_hint = lyrics_mod.labels_have_multiple_singers(line.section for line in lines)
     vocal_turns = (
         detect_vocal_turns(vocals, ANALYSIS_SR, force_two_voices=multi_singer_hint)
@@ -873,6 +901,21 @@ def analyze_project(project: Project) -> Analysis:
     if stem_arrangement and stem_arrangement.summary:
         log.info("Stem arrangement: %s", stem_arrangement.summary)
 
+    # Diagnostic only: a measurement failure must not stop the analysis (assembly treats it alike).
+    broadcast_qa_model: BroadcastAudioQA | None = None
+    try:
+        bqa_report = broadcast_qa_mod.analyze_broadcast_audio(mix_path, drum_onset_times=beats)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Skipped broadcast audio QA on %s: %s", mix_path.name, exc)
+    else:
+        broadcast_qa_model = BroadcastAudioQA(
+            integrated_lufs=bqa_report.integrated_lufs,
+            true_peak_dbtp=bqa_report.true_peak_dbtp,
+            splice_clicks=bqa_report.splice_clicks,
+        )
+        level = logging.WARNING if bqa_report.problems() else logging.INFO
+        log.log(level, "Broadcast audio QA: %s", bqa_report.summary())
+
     analysis = Analysis(
         duration=round(duration, 3),
         tempo_bpm=round(tempo, 2),
@@ -882,6 +925,8 @@ def analyze_project(project: Project) -> Analysis:
         vocal_windows=windows,
         vocal_turns=vocal_turns,
         lyric_lines=lines,
+        alignment_warnings=alignment_warnings,
+        broadcast_qa=broadcast_qa_model,
         musical_features=musical_features,
         stems=stem_arrangement,
     )

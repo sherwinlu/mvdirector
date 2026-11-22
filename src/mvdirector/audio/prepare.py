@@ -709,6 +709,7 @@ def prepare_project(
             model_size=effective_prepare.whisper_model,
             language=effective_prepare.whisper_language,
             multilingual=effective_prepare.whisper_multilingual,
+            stall_timeout_seconds=effective_prepare.whisper_stall_timeout_seconds,
         )
     transcript = trans.transcribe(vocals_path)
     if not transcript.words:

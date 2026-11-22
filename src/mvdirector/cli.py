@@ -856,10 +856,13 @@ def clean(
     except MVDError as exc:
         raise _fail(exc) from exc
     verb = "Deleted" if yes else "Would delete"
-    typer.echo(
-        f"{verb} {len(plan.superseded)} superseded and {len(plan.orphaned)} orphaned files "
-        f"({plan.size_bytes / 1e6:.0f} MB)." + ("" if yes else " Run again with --yes to delete.")
+    cache_note = f", {len(plan.cache_files)} cached" if plan.cache_files else ""
+    summary = (
+        f"{verb} {len(plan.superseded)} superseded, "
+        f"{len(plan.orphaned)} orphaned{cache_note} files "
+        f"({plan.size_bytes / 1e6:.0f} MB)."
     )
+    typer.echo(summary + ("" if yes else " Run again with --yes to delete."))
 
 
 @app.command()
@@ -941,6 +944,30 @@ def assemble(
     sidecar = mix_assemble.chapters_sidecar_path(result)
     if sidecar.is_file():
         typer.echo(f"Wrote {sidecar}")
+
+
+@app.command("audio-qc")
+def audio_qc_cmd(
+    project_dir: Path = ProjectDir,
+    audio: Path | None = typer.Option(
+        None, "--audio", help="Optional audio file to inspect instead of inputs.mix."
+    ),
+) -> None:
+    """Measure ITU-R BS.1770-4 LUFS loudness, 4x True Peak, and splice clicks."""
+    try:
+        report = api.audio_qc(project_dir, audio_path=audio)
+    except MVDError as exc:
+        raise _fail(exc) from exc
+    typer.echo(f"Integrated loudness : {report.integrated_lufs:.2f} LUFS")
+    typer.echo(f"True peak (4x)      : {report.true_peak_dbtp:.2f} dBTP")
+    if report.splice_clicks:
+        clicks_str = ", ".join(f"{t:.3f}s" for t in report.splice_clicks[:12])
+        extra = (
+            f" (+{len(report.splice_clicks) - 12} more)" if len(report.splice_clicks) > 12 else ""
+        )
+        _yellow(f"Splice clicks ({len(report.splice_clicks)})   : {clicks_str}{extra}")
+    else:
+        typer.echo("Splice clicks       : none")
 
 
 @app.command()

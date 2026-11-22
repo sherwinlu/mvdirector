@@ -296,6 +296,7 @@ def _build_chapter_stamp(
         "visual_source": mix_cfg.visual_source,
         "clip_seconds": round(mix_cfg.clip_seconds, 4),
         "xfade_seconds": round(mix_cfg.xfade_seconds, 4),
+        "loop_blend": mix_cfg.loop_blend,
         "chapter_fade_seconds": round(mix_cfg.chapter_fade_seconds, 4),
         "beat_pulse": round(mix_cfg.beat_pulse, 4),
         "hud": hud_cfg.model_dump(mode="json"),
@@ -444,6 +445,19 @@ def _conform_unit_clip(
     media.run(cmd)
 
 
+def loop_xfade_transition(loop_blend: str) -> str:
+    """FFmpeg ``xfade`` transition options for a chapter's loop-unit boundaries.
+
+    ``smoothstep`` is a Hermite S-curve (``3P^2 - 2P^3``) dissolve (inspired by
+    atomtanstudio/sound-and-vision ``server/sv/video/loops.py``). In a custom ``xfade``
+    expression ``P`` falls from 1 at the start of the transition to 0 at its end, so the
+    outgoing input ``A`` takes ``smoothstep(P)`` and the incoming input ``B`` takes the rest.
+    """
+    if loop_blend == "smoothstep":
+        return "transition=custom:expr='A*(3*P*P-2*P*P*P)+B*(1-(3*P*P-2*P*P*P))'"
+    return "transition=fade"
+
+
 def _build_seamless_loop(
     sources: Sequence[LoopUnitSource],
     loop_dst: Path,
@@ -512,11 +526,12 @@ def _build_seamless_loop(
     )
 
     prev_label = "s0"
+    xfade_mode = loop_xfade_transition(mix_cfg.loop_blend)
     for step in range(1, k + 1):
         out_label = "vloop" if step == k else f"xf{step}"
         offset_sec = ((step - 1) * stride_frames) / fps
         filter_parts.append(
-            f"[{prev_label}][s{step}]xfade=transition=fade:"
+            f"[{prev_label}][s{step}]xfade={xfade_mode}:"
             f"duration={xfade_sec:.6f}:offset={offset_sec:.6f}[{out_label}]"
         )
         prev_label = out_label
@@ -902,6 +917,18 @@ def assemble_mix(
         sidecar = chapters_sidecar_path(output)
         atomic_write(sidecar, yt_text)
         log.info("Wrote YouTube chapters sidecar: %s", sidecar)
+
+    from mvdirector.audio import broadcast_qa as broadcast_qa_mod
+
+    chapter_boundaries = [ch.start for ch in manifest.chapters if ch.start > 0.0]
+    try:
+        bqa = broadcast_qa_mod.analyze_broadcast_audio(
+            mix_path, boundary_times=chapter_boundaries or None
+        )
+        level = logging.WARNING if bqa.problems() else logging.INFO
+        log.log(level, "Mix audio QA (clicks checked at chapter joins): %s", bqa.summary())
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Skipped mix broadcast audio QA on %s: %s", mix_path.name, exc)
 
     log.info(
         "Wrote %s (%d chapters: %d rendered, %d cached)",

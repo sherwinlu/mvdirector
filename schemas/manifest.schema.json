@@ -153,6 +153,18 @@
           ],
           "default": null
         },
+        "sync_delay_seconds": {
+          "default": 0.0,
+          "description": "Measured audio-video lip-sync offset applied to clip in-point during assembly (inspired by VisualFrisson/ComfyUI-OneShotMV).",
+          "title": "Sync Delay Seconds",
+          "type": "number"
+        },
+        "regressed": {
+          "default": false,
+          "description": "True when an in-place repair did not strictly improve on the previous attempt and should be excluded from best_attempt selection.",
+          "title": "Regressed",
+          "type": "boolean"
+        },
         "error": {
           "anyOf": [
             {
@@ -346,6 +358,16 @@
         "skipped"
       ],
       "title": "CheckStatus",
+      "type": "string"
+    },
+    "ContinuityMode": {
+      "description": "How a shot connects visually to the preceding shot.\n\nInspired by ``afj176/open-cinema-studio`` (``cut`` / ``reframe`` / ``continue``).",
+      "enum": [
+        "cut",
+        "reframe",
+        "continue"
+      ],
+      "title": "ContinuityMode",
       "type": "string"
     },
     "Framing": {
@@ -593,8 +615,10 @@
     "RetryStrategy": {
       "enum": [
         "initial",
+        "handoff",
         "new_seed",
         "rewrite_prompt",
+        "repair_still",
         "adjust_params"
       ],
       "title": "RetryStrategy",
@@ -936,11 +960,86 @@
           "description": "Optional 3D blocking / previz video path guiding camera motion and staging.",
           "title": "Previz Video"
         },
+        "previz_depth_video": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional linear view-space depth pass rendered alongside previz_video (white=near, black=far; inspired by heroesjouney/aimoviestudiov2).",
+          "title": "Previz Depth Video"
+        },
         "previz_mapping": {
           "default": "",
           "description": "Stand-in mapping from blocking shapes in previz_video to real subjects/props.",
           "title": "Previz Mapping",
           "type": "string"
+        },
+        "continuity": {
+          "$ref": "#/$defs/ContinuityMode",
+          "default": "cut",
+          "description": "Shot continuity link to the preceding shot ('cut', 'reframe', or 'continue')."
+        },
+        "end_frame_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional target end-frame image path for first/last-frame (FLF2V) workflows.",
+          "title": "End Frame Path"
+        },
+        "camera_path_zoom": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 1.0,
+              "maximum": 3.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional Lanczos zoom factor for an auto-generated end-frame camera-path guide on empty wide shots (inspired by afj176/open-cinema-studio).",
+          "title": "Camera Path Zoom"
+        },
+        "sfx_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional project-relative diegetic SFX/foley audio file leveled and blended over the music track with smooth ducking during assembly.",
+          "title": "Sfx Path"
+        },
+        "sfx_gain_db": {
+          "default": 0.0,
+          "description": "Playback gain in dB for shot.sfx_path after active-RMS leveling.",
+          "maximum": 24.0,
+          "minimum": -40.0,
+          "title": "Sfx Gain Db",
+          "type": "number"
+        },
+        "sfx_duck_db": {
+          "default": -6.0,
+          "description": "Music ducking attenuation in dB while shot.sfx_path plays.",
+          "maximum": 0.0,
+          "minimum": -40.0,
+          "title": "Sfx Duck Db",
+          "type": "number"
         },
         "audio_slice": {
           "$ref": "#/$defs/AudioSlice"
@@ -1095,6 +1194,14 @@
           "title": "Props",
           "type": "array"
         },
+        "world_facts": {
+          "description": "Tracked physical world/prop/lighting states across shot indices.",
+          "items": {
+            "$ref": "#/$defs/WorldFact"
+          },
+          "title": "World Facts",
+          "type": "array"
+        },
         "rules": {
           "description": "Rules every shot follows, shown to the director model.",
           "items": {
@@ -1125,6 +1232,45 @@
         "description"
       ],
       "title": "WardrobeState",
+      "type": "object"
+    },
+    "WorldFact": {
+      "additionalProperties": false,
+      "description": "A mutable or irreversible physical world-state fact tracked across shots.\n\nInspired by ``afj176/open-cinema-studio`` and ``JavaDerek/music-video-pipeline``.",
+      "properties": {
+        "entity": {
+          "minLength": 1,
+          "title": "Entity",
+          "type": "string"
+        },
+        "attribute": {
+          "minLength": 1,
+          "title": "Attribute",
+          "type": "string"
+        },
+        "value": {
+          "minLength": 1,
+          "title": "Value",
+          "type": "string"
+        },
+        "start_shot": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Start Shot",
+          "type": "integer"
+        },
+        "irreversible": {
+          "default": false,
+          "title": "Irreversible",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "entity",
+        "attribute",
+        "value"
+      ],
+      "title": "WorldFact",
       "type": "object"
     }
   },

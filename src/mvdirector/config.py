@@ -150,6 +150,15 @@ class PrepareConfig(_Section):
             "multi-language songs)."
         ),
     )
+    whisper_stall_timeout_seconds: float = Field(
+        default=600.0,
+        ge=0.0,
+        allow_inf_nan=False,
+        description=(
+            "Abort transcription when faster-whisper produces no segment for this many seconds "
+            "(three times as long for the first segment); 0 disables the watchdog."
+        ),
+    )
 
     @field_validator("stem_model", "whisper_model")
     @classmethod
@@ -293,6 +302,95 @@ class VideoConfig(_Section):
             "video models like Seedance that read lyrics from the prompt rather than an input)."
         ),
     )
+    # Audio-grid alignment, lip-sync offset repair, phrase slicing & finishing options.
+    audio_vae_offset_seconds: float = Field(
+        default=0.0,
+        ge=-0.25,
+        le=0.25,
+        allow_inf_nan=False,
+        description=(
+            "Optional VAE front-crop audio shift compensation in seconds (e.g. 0.046 for "
+            "LTX-2.3/2.5 or 0.0125 for MiniMax H3; clean-room concept inspired by "
+            "ComfyUI-Sonder-Editor)."
+        ),
+    )
+    audio_mirror_pad: bool = Field(
+        default=False,
+        description=(
+            "Pad clip audio tails up to the quantized frame-grid duration using a periodic "
+            "triangle-wave mirror gather rather than leaving silence cliffs on joint AV models "
+            "(clean-room concept inspired by ComfyUI-Sonder-Editor)."
+        ),
+    )
+    sync_delay_compensation: bool = Field(
+        default=False,
+        description=(
+            "Apply measured per-take lip-sync lag (clamped within handles) to clip in-points at "
+            "assembly (inspired by VisualFrisson/ComfyUI-OneShotMV). Opt-in: the default "
+            "MediaPipe lag estimate is noisy on sung vocals, and a wrong shift of up to a handle "
+            "length (0.25 s by default) is clearly visible. Enable it once lag estimates are "
+            "trustworthy, e.g. qc.lipsync_backend: stable_syncnet with a "
+            "qc.video.lipsync_min_confidence floor."
+        ),
+    )
+    phrase_dp_slicing: bool = Field(
+        default=False,
+        description=(
+            "Use shortest-path dynamic programming over valid frame-grid lengths to minimize "
+            "mid-phrase splits (inspired by JavaDerek/music-video-pipeline)."
+        ),
+    )
+    prefer_vocal_onset: bool = Field(
+        default=False,
+        description=(
+            "Locally shift cut boundaries (without cascading) to minimize leading vocal dead air "
+            "on lip-sync shots (inspired by JavaDerek/music-video-pipeline)."
+        ),
+    )
+    color_drift_correction: bool = Field(
+        default=False,
+        description=(
+            "Apply ridge-regularized 3x4 RGB affine color-drift cancellation across chained "
+            "shots during assembly (clean-room concept inspired by ComfyUI-Sonder-Editor)."
+        ),
+    )
+    transition: Literal["cut", "blend", "whip", "flash"] = Field(
+        default="cut",
+        description=(
+            "Standard-mode transition between shots; non-'cut' values borrow spare tail handle "
+            "frames so cuts stay beat-locked (inspired by thefullnacho/on-the-one)."
+        ),
+    )
+    transition_seconds: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+        description="Overlap duration in seconds for beat-preserving xfade transitions.",
+    )
+    color_grade: Literal[
+        "none", "portra_dusk", "cinestill_night", "faded_pastel", "neutral_film"
+    ] = Field(
+        default="none",
+        description=(
+            "Optional RGB-space (gbrp) film color grade applied during assembly "
+            "(inspired by hexeosis-prime/nightshift)."
+        ),
+    )
+    film_grain: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=25.0,
+        allow_inf_nan=False,
+        description="Optional subtle film grain strength applied during assembly (0 disables).",
+    )
+    strip_metadata: bool = Field(
+        default=True,
+        description=(
+            "Strip container/workflow metadata from assembled MP4s "
+            "(inspired by hexeosis-prime/nightshift)."
+        ),
+    )
 
     @model_validator(mode="after")
     def _check_draft_dimensions(self) -> VideoConfig:
@@ -338,6 +436,48 @@ class ComfyConfig(_Section):
         description=(
             "How composed prompts refer to multi-image/video workflow inputs: 'prose' "
             "('first/second reference image') or 'tags' ('@image1', '@image2', '@video1')."
+        ),
+    )
+    cache_enabled: bool = Field(
+        default=False,
+        description=(
+            "Opt-in content-addressed cache of ComfyUI outputs under <project>/.comfy_cache "
+            "(keyed by canonical graph + input file SHA-256; note that changing model weights "
+            "without renaming them is not detected — run `mvd clean` to purge). Inspired by "
+            "tysonfarrington-cmyk/xenoform."
+        ),
+    )
+    dedup_uploads: bool = Field(
+        default=False,
+        description=(
+            "Upload reference files under content-addressed SHA-256 names and skip re-uploading "
+            "when ComfyUI confirms via HEAD /view (inspired by afj176/open-cinema-studio)."
+        ),
+    )
+    sort_batch_for_cache: bool = Field(
+        default=False,
+        description=(
+            "Sort shot generation order by workflow/setting/prompt prefix to keep ComfyUI text "
+            "encoder and reference caches warm (inspired by xenoform and musicvision)."
+        ),
+    )
+    min_free_vram_gb: float | None = Field(
+        default=None,
+        ge=0.5,
+        le=256.0,
+        allow_inf_nan=False,
+        description=(
+            "Optional minimum free GPU VRAM (GiB) probed via /system_stats before queueing a "
+            "render job (inspired by JavaDerek/music-video-pipeline)."
+        ),
+    )
+    max_prompt_chars: int | None = Field(
+        default=None,
+        ge=120,
+        le=8000,
+        description=(
+            "Optional prompt character budget preserving head + continuity tail sentences "
+            "(inspired by GeekatplayStudio/ComfyUI-Music-to-Video)."
         ),
     )
     # Logical workflow name -> bindings file inside workflows_dir.
@@ -555,6 +695,24 @@ class VideoQCConfig(_Section):
     lipsync_bad: float = 0.25
     lipsync_good: float = 0.65
     lipsync_min: float = 0.40
+    lipsync_min_confidence: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum SyncNet confidence required before applying automatic sync_delay offset "
+            "compensation at assembly."
+        ),
+    )
+    desync_face_fraction_min: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Face height fraction above which lip-sync offset becomes viewer-visible for "
+            "desync_risk triage (inspired by JavaDerek/music-video-pipeline)."
+        ),
+    )
     lipsync_max_lag_seconds: float = 0.25
     # Advisory by default: on sung vocals the mouth-vs-loudness correlation did not separate
     # clips a person judged in sync from ones out of sync, so a low score sends the shot to
@@ -582,6 +740,14 @@ class VideoQCConfig(_Section):
 class QCConfig(_Section):
     pass_score: float = 0.70
     vision_enabled: bool = True
+    vision_blind_observer: bool = Field(
+        default=False,
+        description=(
+            "Run two-pass Blind-Observer / Split-Auditor vision checks (Pass 1 describes the "
+            "image without seeing requirements; Pass 2 audits text-only against the spec; "
+            "inspired by afj176/open-cinema-studio)."
+        ),
+    )
     face_backend: Literal["mediapipe", "insightface"] = Field(
         default="mediapipe",
         description=(
@@ -658,8 +824,38 @@ class RetryConfig(_Section):
         default=True,
         description=(
             "When a singing shot's video uses up its attempts, turn it into a performance shot "
-            "(the singer on camera, not singing) and render that instead of leaving the shot "
-            "stuck. The conversion is flagged for review."
+            "(the singer on camera, not singing) or b-roll cutaway and render that instead of "
+            "leaving the shot stuck. The conversion is flagged for review."
+        ),
+    )
+    lipsync_fallback_mode: Literal["performance", "broll"] = Field(
+        default="performance",
+        description=(
+            "Target shot type when a lip-sync shot exhausts retries ('performance' keeps the "
+            "singer on camera silently; 'broll' rescues it with a cutaway when within the "
+            "2-cutaway run limit, inspired by VisualFrisson/ComfyUI-OneShotMV)."
+        ),
+    )
+    smart_cutaway_rescue: bool = Field(
+        default=False,
+        description=(
+            "Automatically convert critically weak lip-sync takes below "
+            "smart_cutaway_max_correlation into b-roll cutaways when within the 2-cutaway run "
+            "limit (inspired by VisualFrisson/ComfyUI-OneShotMV)."
+        ),
+    )
+    smart_cutaway_max_correlation: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        description="Lip-sync correlation ceiling below which smart_cutaway_rescue triggers.",
+    )
+    in_place_repair: bool = Field(
+        default=False,
+        description=(
+            "Attempt a targeted in-place image-edit repair on stills that pass face checks but "
+            "fail isolated vision_spec/artifact issues, accepting only strict non-regressions "
+            "(inspired by afj176/open-cinema-studio)."
         ),
     )
     # Workflow parameters applied by the adjust_params strategy.
@@ -730,6 +926,13 @@ class MixConfig(_Section):
         le=3.0,
         allow_inf_nan=False,
         description="Crossfade overlap in seconds inside each chapter's seamless loop cycle.",
+    )
+    loop_blend: Literal["xfade", "smoothstep"] = Field(
+        default="xfade",
+        description=(
+            "Loop boundary blend curve ('xfade' linear FFmpeg fade or 'smoothstep' S-curve "
+            "tail-over-head closure inspired by atomtanstudio/sound-and-vision)."
+        ),
     )
     chapter_fade_seconds: float = Field(
         default=0.75,

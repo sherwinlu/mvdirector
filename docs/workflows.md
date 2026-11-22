@@ -23,7 +23,7 @@ Each workflow is a pair of files in the project's `workflows/` folder:
 
 **All image and video generation runs through ComfyUI.** Because `mvdirector` talks to ComfyUI purely through your exported `<name>.api.json` graph and `<name>.bindings.json` map, you can swap in any open-weight model **or** any paid cloud model (via ComfyUI Official Partner Nodes or custom API nodes such as FAL.ai / Replicate / vendor nodes) without changing Python code:
 
-1. **Build and test the workflow in ComfyUI** (local GPU, RunPod, or CPU-only ComfyUI if using cloud API nodes).
+1. **Build and test the workflow in ComfyUI** (local GPU, remote cloud GPU, or CPU-only ComfyUI if using cloud API nodes).
 2. **Export it with Save (API Format)** into your project's `workflows/` folder.
 3. **Map its inputs in `<name>.bindings.json`**. The pipeline only sends parameters you bind; unbound parameters are ignored:
    - **Stills (`t2i`, `still`):** `positive_prompt`, `negative_prompt`, `seed`, `width`, `height`, plus `reference_image` (and optional `reference_profile`, `reference_three_quarter`, `reference_face`, `reference_image_2` on two-shots, `set_image`, `prop_image`, `prop_image_2`) on `still`.
@@ -67,7 +67,7 @@ For lip-sync models that ingest an audio-bearing video clip rather than a raw `.
 ## Tips for Paid Cloud API Nodes in ComfyUI
 
 - **ComfyUI is still the runner, even without a local GPU:** When your workflows use ComfyUI Partner Nodes or cloud API nodes, ComfyUI acts as a lightweight local orchestrator (`http://127.0.0.1:8188`) that uploads reference images/audio, calls the paid API, and hands the output to `mvdirector` for quality checks and assembly.
-- **Never commit API keys in `.api.json`:** Configure your API key in ComfyUI's server environment / Partner Node settings, or bind an `"api_key"` input in `<name>.bindings.json` and pass it via environment variable expansion in `defaults`. Only `MVD_*`, `COMFY_*`, and `RUNPOD_TOKEN` names expand by default (export `MVD_ALLOWED_ENV_VARS=VAR1,VAR2` in your shell to allow others), so a project file you did not write can never read your other secrets:
+- **Never commit API keys in `.api.json`:** Configure your API key in ComfyUI's server environment / Partner Node settings, or bind an `"api_key"` input in `<name>.bindings.json` and pass it via environment variable expansion in `defaults`. Only `MVD_*` and `COMFY_*` names expand by default (export `MVD_ALLOWED_ENV_VARS=VAR1,VAR2` in your shell to allow others), so a project file you did not write can never read your other secrets:
   ```json
   "inputs": {
     "api_key": [{"node": "10", "field": "api_key"}]

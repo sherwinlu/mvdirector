@@ -88,7 +88,7 @@ Pass it as `comfy_provider=` to any api function that talks to ComfyUI.
 from mvdirector import api, Project
 
 project = Project.open(workspace, state=MyDbState(job_id), storage=MyS3Storage(prefix))
-api.generate(project, kinds, comfy_provider=MyRunpodRouter())
+api.generate(project, kinds, comfy_provider=MyCloudComfyRouter())
 ```
 
 Every `api` function accepts a `Project` in place of a folder path. A `review_mode=` override

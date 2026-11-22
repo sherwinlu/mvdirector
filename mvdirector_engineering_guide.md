@@ -6,7 +6,7 @@ Version 0.1.0 (Manifest Schema v1). Updated November 2026\.
 
 # **Summary**
 
-mvdirector (CLI command `mvd`) is a command-line application that turns a Suno song (full mix, vocal stem, lyrics and a style brief) into a lip-synced performance music video. It runs on a developer's machine and coordinates three outside systems. ComfyUI—on RunPod, a local GPU, or a lightweight local instance driving paid cloud API nodes—executes all image and video workflows (such as Qwen, Z-Image, Krea, Nano Banana, or Grok for stills, and LTX, Wan, MOSS, Seedance, or P-H3 / MiniMax for video). A configured language model (Claude, OpenAI, Gemini, Ollama, or any OpenAI-compatible server) plans the shots, judges visual quality, and rewrites failed prompts. ffmpeg slices audio and assembles the final cut.
+mvdirector (CLI command `mvd`) is a command-line application that turns a Suno song (full mix, vocal stem, lyrics and a style brief) into a lip-synced performance music video. It runs on a developer's machine and coordinates three outside systems. ComfyUI—on a remote cloud GPU, a local GPU, or a lightweight local instance driving paid cloud API nodes—executes all image and video workflows (such as Qwen, Z-Image, Krea, Nano Banana, or Grok for stills, and LTX, Wan, MOSS, Seedance, or P-H3 / MiniMax for video). A configured language model (Claude, OpenAI, Gemini, Ollama, or any OpenAI-compatible server) plans the shots, judges visual quality, and rewrites failed prompts. ffmpeg slices audio and assembles the final cut.
 
 Four design decisions shape the rest of the system:
 
@@ -20,7 +20,7 @@ Four design decisions shape the rest of the system:
 
 ## **Verification status**
 
-The code has over 350 automated tests across 14 test modules, including full-pipeline tests against a fake ComfyUI server with real ffmpeg and socket-level tests against a fake multi-protocol LLM server (OpenAI, Ollama, Gemini). In addition, a 29-shot duet project has been executed end-to-end against live RunPod ComfyUI workflows (Qwen-Image T2I, Qwen-Image-Edit 2.1, LTX-2.5) and a live Ollama (`qwen2.5:14b`) server, producing a complete assembled `.mp4` via `mvd assemble --force`.
+The code has over 350 automated tests across 14 test modules, including full-pipeline tests against a fake ComfyUI server with real ffmpeg and socket-level tests against a fake multi-protocol LLM server (OpenAI, Ollama, Gemini). In addition, a 29-shot duet project has been executed end-to-end against live remote GPU ComfyUI workflows (Qwen-Image T2I, Qwen-Image-Edit 2.1, LTX-2.5) and a live Ollama (`qwen2.5:14b`) server, producing a complete assembled `.mp4` via `mvd assemble --force`.
 
 That live run proved the orchestration against real servers, using text-only `qwen2.5:14b` without `mediapipe`, `insightface`, or `faster-whisper` installed locally and without hitting live cloud LLM APIs. Because multimodal vision QC and MediaPipe were absent, only `dimensions`, `sharpness`, `duration`, and `temporal` ran (`face_*`, `lipsync`, `identity`, and `vision_*` checks were skipped), so the QC gates themselves remain uncalibrated on live clips. In that test, LTX-2.5's audio-conditioned A2V drifted on tight singing lip-sync, so dedicated singing lip-sync workflows (such as InfiniteTalk or LatentSync) are recommended for `lipsync` shots alongside threshold calibration on your own labelled clips.
 
@@ -81,7 +81,7 @@ flowchart LR
 | :---- | :---- | :---- | :---- |
 | `mvd` CLI and library | Developer machine | Orchestration, state, planning, quality gates, assembly. | Required. |
 | `ffmpeg` and `ffprobe` | Developer machine | Audio slicing, frame extraction, clip conforming, final mux. | Required. `mvd validate` reports it. |
-| ComfyUI | RunPod pod or local | Runs the Qwen (`t2i`, `still`) and LTX (`lipsync`, `i2v`) workflows. | Required for generation. An unreachable server stops the run without using attempts. |
+| ComfyUI | Remote cloud GPU or local | Runs the Qwen (`t2i`, `still`) and LTX (`lipsync`, `i2v`) workflows. | Required for generation. An unreachable server stops the run without using attempts. |
 | LLM Provider (`anthropic`, `openai`, `gemini`, `ollama`, `openai_compatible`) | Cloud API or local server | Visual bible, shot direction, vision checks, prompt rewrites. | Optional. With `llm.enabled: false`, planning is rule-based and vision checks and prompt rewrites are off. |
 | MediaPipe | Developer machine (CPU) | Commercially permissive (Apache-2.0) face detection, face framing, face presence, and mouth opening for the lip-sync check (`qc` extra, default `qc.face_backend: mediapipe`). | Optional (`qc` extra). Checks are recorded as `skipped`, or the run stops if `qc.on_missing_dependency` is `fail`. |
 | InsightFace | Developer machine (CPU) | Optional multi-angle face-embedding identity checks (`insightface` extra, `qc.face_backend: insightface`; non-commercial research weights). | Optional (`insightface` extra). Off by default so runs are commercially permissive out of the box (`vision_character` checks identity instead). |
@@ -504,7 +504,7 @@ Seeds are derived from the project seed, shot id, asset kind and attempt number,
 
 ## **Workflow templates and bindings**
 
-All image and video generation runs through ComfyUI, and the pipeline is not tied to any specific model release. Each of four logical workflows (`t2i`, `still`, `lipsync`, `i2v`) is a pair of files in the project's `workflows/` folder. `<name>.api.json` is a graph exported from ComfyUI with **Save (API Format)** (using either local open-weight nodes like Qwen, Z-Image, Krea, LTX, Wan, MOSS, or paid cloud API Partner Nodes like Nano Banana, Seedance, Grok, or P-H3 / MiniMax). `<name>.bindings.json` maps logical parameters onto node inputs in that graph. Strings in `bindings.defaults` also support `${ENV_VAR}` expansion (via `expand_env`, limited to `MVD_*`, `COMFY_*`, `RUNPOD_TOKEN` and names listed in `MVD_ALLOWED_ENV_VARS`) so paid API keys (e.g. `{"api_key": "${COMFY_SEEDANCE_API_KEY}"}`) never need to be stored in `.api.json` or `.bindings.json`.
+All image and video generation runs through ComfyUI, and the pipeline is not tied to any specific model release. Each of four logical workflows (`t2i`, `still`, `lipsync`, `i2v`) is a pair of files in the project's `workflows/` folder. `<name>.api.json` is a graph exported from ComfyUI with **Save (API Format)** (using either local open-weight nodes like Qwen, Z-Image, Krea, LTX, Wan, MOSS, or paid cloud API Partner Nodes like Nano Banana, Seedance, Grok, or P-H3 / MiniMax). `<name>.bindings.json` maps logical parameters onto node inputs in that graph. Strings in `bindings.defaults` also support `${ENV_VAR}` expansion (via `expand_env`, limited to `MVD_*`, `COMFY_*`, and names listed in `MVD_ALLOWED_ENV_VARS`) so paid API keys (e.g. `{"api_key": "${COMFY_SEEDANCE_API_KEY}"}`) never need to be stored in `.api.json` or `.bindings.json`.
 
 ```json
 {  
@@ -554,7 +554,7 @@ Retry overrides from `retry.adjust_params` (such as `steps`) are sent on later a
 | Wait | `GET /history/<id>` | Polled every `comfy.poll_interval` (3 s) until the job completes or errors, with a timeout of `comfy.job_timeout` (1,800 s). |
 | Download | `GET /view` | Takes the first output on the bound node whose extension matches the binding. Streams chunks into a `.part` temp file, rejects unsafe paths, and caps downloads at 512 MiB before atomic rename. |
 
-Transport errors, 429 rate-limit responses and 5xx responses are retried three times with a 2 s, 4 s and 6 s pause (or the server's `Retry-After` header via `retry_delay()`), then raise `ComfyConnectionError`. Other 4xx responses raise `ComfyJobError`. Polling is used instead of a websocket because it works through RunPod's HTTP proxy and needs no reconnection logic. `comfy.headers` can carry an authorization header, and the base URL comes from `COMFY_URL`.
+Transport errors, 429 rate-limit responses and 5xx responses are retried three times with a 2 s, 4 s and 6 s pause (or the server's `Retry-After` header via `retry_delay()`), then raise `ComfyConnectionError`. Other 4xx responses raise `ComfyJobError`. Polling is used instead of a websocket because it works through hosted HTTP proxies and needs no reconnection logic. `comfy.headers` can carry an authorization header, and the base URL comes from `COMFY_URL`.
 
 # **Quality control**
 
@@ -721,7 +721,7 @@ The default output is `output/<title>.mp4`. A forced build adds a `_draft` suffi
 
 # **Configuration reference**
 
-Configuration lives in `project.yaml` and is validated by pydantic models in `config.py`. Unknown keys are errors. Only `comfy.base_url`, `comfy.headers`, `llm.base_url` and workflow `defaults` may reference environment variables as `${NAME}` or `${NAME:-default}`, and only `MVD_*`, `COMFY_*`, `RUNPOD_TOKEN` or names listed in `MVD_ALLOWED_ENV_VARS` are expanded; `llm.api_key_env` accepts the standard provider key names, `MVD_*`, or `MVD_ALLOWED_ENV_VARS` entries. Unrelated system and cloud credentials such as `AWS_*`, `GITHUB_*` and `SSH_*` are always rejected.
+Configuration lives in `project.yaml` and is validated by pydantic models in `config.py`. Unknown keys are errors. Only `comfy.base_url`, `comfy.headers`, `llm.base_url` and workflow `defaults` may reference environment variables as `${NAME}` or `${NAME:-default}`, and only `MVD_*`, `COMFY_*`, or names listed in `MVD_ALLOWED_ENV_VARS` are expanded; `llm.api_key_env` accepts the standard provider key names, `MVD_*`, or `MVD_ALLOWED_ENV_VARS` entries. Unrelated system and cloud credentials such as `AWS_*`, `GITHUB_*` and `SSH_*` are always rejected.
 
 | Key | Default | Meaning |
 | :---- | :---- | :---- |
@@ -736,7 +736,7 @@ Configuration lives in `project.yaml` and is validated by pydantic models in `co
 | `video.dynamic_pacing` | `false` | When `true`, cut faster on high-intensity bars and snap cuts to lyric section transitions. |
 | `video.lipsync_min_vocal_fraction` | `0.25` | Share of a shot that must be sung to make it lip-sync. |
 | `video.lipsync_audio_source` | `vocals` | Audio sent to the lip-sync workflow: `vocals` or `mix`. |
-| `comfy.base_url` | `${COMFY_URL:-http://127.0.0.1:8188}` | ComfyUI address. Use the RunPod proxy URL for a pod. |
+| `comfy.base_url` | `${COMFY_URL:-http://127.0.0.1:8188}` | ComfyUI address (local or remote HTTPS URL). |
 | `comfy.headers` | `{}` | Extra HTTP headers, such as an authorization token. |
 | `comfy.request_timeout`, `job_timeout`, `poll_interval` | `60`, `1800`, `3` (seconds) | HTTP timeout, maximum job time, history polling interval. |
 | `comfy.workflows_dir`, `workflows` | `workflows`, `t2i` / `still` / `lipsync` / `i2v` | Workflows directory and logical workflow name to bindings file. |
@@ -816,7 +816,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev,ui,align]"  
 pip install -e ".[qc]"       # may need: xcode-select --install  
 export ANTHROPIC_API_KEY=...  
-export COMFY_URL=https://<pod-id>-8188.proxy.runpod.net
+export COMFY_URL=http://127.0.0.1:8188  # or your remote ComfyUI HTTPS URL
 ```
 
 Python 3.12 is a safer choice than the newest release, because MediaPipe and InsightFace often lack builds for it.

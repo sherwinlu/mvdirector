@@ -49,7 +49,7 @@ Rules:
 - A parameter listed in `required` must have a binding.
 - One parameter can drive several node inputs (see `fps` in the LTX examples).
 - `defaults` sets values for any bound parameter, for example `{"steps": 30}`. Strings in
-  `defaults` support `${ENV_VAR}` expansion for `COMFY_*`, `MVD_*`, and `RUNPOD_TOKEN`
+  `defaults` support `${ENV_VAR}` expansion for `COMFY_*` and `MVD_*`
   (for example `{"api_key": "${COMFY_SEEDANCE_API_KEY}"}`), so you never have to hard-code paid
   API keys in `.api.json` or `.bindings.json`.
 - An optional reference image a shot does not have (`set_image`, `prop_image`, and the others

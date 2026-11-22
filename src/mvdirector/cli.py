@@ -164,7 +164,14 @@ def setup(
     ),
     title: str | None = typer.Option(None, "--title", help="Project title."),
     comfy_url: str | None = typer.Option(
-        None, "--comfy-url", help="ComfyUI server URL (default: COMFY_URL or http://127.0.0.1:8188)."
+        None,
+        "--comfy-url",
+        help="ComfyUI server URL — local or remote (default: COMFY_URL or http://127.0.0.1:8188).",
+    ),
+    comfy_token_env: str | None = typer.Option(
+        None,
+        "--comfy-token-env",
+        help="Optional COMFY_*/MVD_* env var name for Bearer auth on a remote ComfyUI server.",
     ),
     ollama_url: str | None = typer.Option(
         None,
@@ -199,7 +206,14 @@ def setup(
     ),
 ) -> None:
     """Inspect local prerequisites and interactively configure a project."""
-    report = api.inspect_environment(comfy_url=comfy_url, ollama_url=ollama_url)
+    try:
+        report = api.inspect_environment(
+            comfy_url=comfy_url,
+            comfy_token_env=comfy_token_env,
+            ollama_url=ollama_url,
+        )
+    except MVDError as exc:
+        raise _fail(exc) from exc
     typer.echo(setup_mod.render_environment_report(report))
 
     if check_only:
@@ -221,6 +235,7 @@ def setup(
 
     chosen_title = title or _default_project_title(directory)
     chosen_comfy = comfy_url or report.comfy.url
+    chosen_comfy_token_env: str | None = comfy_token_env
     chosen_provider = (llm_provider or setup_mod.DEFAULT_LLM_PROVIDER).strip().lower()
     if chosen_provider not in _VALID_SETUP_PROVIDERS:
         valid = ", ".join(_VALID_SETUP_PROVIDERS)
@@ -237,7 +252,36 @@ def setup(
 
     if not non_interactive:
         chosen_title = typer.prompt("Project title", default=chosen_title).strip()
-        chosen_comfy = typer.prompt("ComfyUI URL", default=chosen_comfy).strip()
+        chosen_comfy = typer.prompt(
+            "ComfyUI URL (local or separate server)", default=chosen_comfy
+        ).strip()
+        if chosen_comfy_token_env is None and not setup_mod.is_loopback_url(chosen_comfy):
+            raw_token_env = typer.prompt(
+                "Bearer auth env var for remote ComfyUI (blank for none, e.g. COMFY_TOKEN)",
+                default="",
+            ).strip()
+            if raw_token_env:
+                chosen_comfy_token_env = raw_token_env
+
+        if (
+            chosen_comfy.rstrip("/") != report.comfy.url
+            or chosen_comfy_token_env != comfy_token_env
+        ):
+            try:
+                reprobe = api.inspect_environment(
+                    comfy_url=chosen_comfy,
+                    comfy_token_env=chosen_comfy_token_env,
+                    ollama_url=ollama_url,
+                ).comfy
+            except MVDError as exc:
+                raise _fail(exc) from exc
+            if reprobe.reachable:
+                gpu = f" ({reprobe.devices[0]})" if reprobe.devices else ""
+                typer.secho(
+                    f"  OK   Connected to ComfyUI at {reprobe.url}{gpu}", fg=typer.colors.GREEN
+                )
+            else:
+                _yellow(f"  WARN Could not reach ComfyUI at {reprobe.url}: {reprobe.error}")
 
         providers_label = "/".join(_VALID_SETUP_PROVIDERS)
         while True:
@@ -331,6 +375,7 @@ def setup(
         title=chosen_title,
         mode=mode if is_new else None,
         comfy_url=chosen_comfy,
+        comfy_token_env=chosen_comfy_token_env,
         llm_enabled=chosen_llm_enabled,
         llm_provider=chosen_provider,
         llm_model=chosen_model,
@@ -347,6 +392,11 @@ def setup(
 
     action_word = "Created and configured" if is_new else "Updated"
     typer.secho(f"\n{action_word} {directory / CONFIG_FILENAME}", fg=typer.colors.GREEN)
+
+    if chosen_comfy_token_env and not os.environ.get(chosen_comfy_token_env):
+        _yellow(
+            f"Note: export {chosen_comfy_token_env}=<your-token> before running `mvd validate`."
+        )
 
     preset_obj = setup_mod.VIDEO_PRESETS[chosen_preset]
     if preset_obj.workflow_note:

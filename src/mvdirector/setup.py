@@ -29,6 +29,7 @@ from mvdirector.config import (
     DEFAULT_LLM_PROVIDER,
     ComfyConfig,
     ProjectConfig,
+    is_allowed_env_var,
 )
 from mvdirector.errors import ComfyConnectionError, ConfigError
 from mvdirector.models import ProjectMode
@@ -164,6 +165,7 @@ class SetupOptions:
     title: str | None = None
     mode: ProjectMode | None = None
     comfy_url: str | None = None
+    comfy_token_env: str | None = None
     llm_enabled: bool | None = None
     llm_provider: str | None = None
     llm_model: str | None = None
@@ -171,6 +173,39 @@ class SetupOptions:
     qc_on_missing_dependency: str | None = None
     qc_vision_enabled: bool | None = None
     video_preset: str | None = None
+
+
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "host.docker.internal"})
+
+
+def is_loopback_url(url: str) -> bool:
+    """Return True when ``url`` points to the local host (not a separate remote server)."""
+    parsed = urllib.parse.urlparse(url.strip())
+    host = (parsed.hostname or "").lower()
+    return host in _LOOPBACK_HOSTS
+
+
+def validate_comfy_token_env(name: str) -> str:
+    """Validate an environment variable name for ``comfy.headers`` Bearer auth."""
+    cleaned = name.strip()
+    if not cleaned:
+        raise ConfigError("ComfyUI auth token env var name must not be empty.")
+    if not is_allowed_env_var(cleaned):
+        raise ConfigError(
+            f"Environment variable {cleaned!r} is not allowed in {CONFIG_FILENAME}. "
+            "Use a COMFY_* or MVD_* name (for example COMFY_TOKEN), or list it in "
+            "MVD_ALLOWED_ENV_VARS."
+        )
+    return cleaned
+
+
+def _comfy_probe_headers(token_env: str | None) -> dict[str, str]:
+    if not token_env:
+        return {}
+    validated = validate_comfy_token_env(token_env)
+    if not os.environ.get(validated, "").strip():
+        return {}
+    return {"Authorization": f"Bearer ${{{validated}}}"}
 
 
 def validate_http_url(url: str, label: str = "URL") -> str:
@@ -243,6 +278,7 @@ def probe_ollama(
 def probe_comfy(
     base_url: str,
     *,
+    headers: dict[str, str] | None = None,
     timeout: float = DEFAULT_PROBE_TIMEOUT,
     transport: httpx.BaseTransport | None = None,
 ) -> ComfyProbe:
@@ -252,7 +288,12 @@ def probe_comfy(
     except ConfigError as exc:
         return ComfyProbe(url=base_url, reachable=False, error=str(exc))
 
-    config = ComfyConfig(base_url=normalized, request_timeout=timeout)
+    try:
+        config = ComfyConfig(
+            base_url=normalized, headers=headers or {}, request_timeout=timeout
+        )
+    except (ConfigError, ValidationError) as exc:
+        return ComfyProbe(url=normalized, reachable=False, error=str(exc))
     try:
         with ComfyClient(config, transport=transport) as client:
             stats = client.ping()
@@ -298,6 +339,7 @@ def probe_comfy(
 def inspect_environment(
     *,
     comfy_url: str | None = None,
+    comfy_token_env: str | None = None,
     ollama_url: str | None = None,
     comfy_transport: httpx.BaseTransport | None = None,
     ollama_transport: httpx.BaseTransport | None = None,
@@ -311,6 +353,7 @@ def inspect_environment(
     )
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     plat = f"{platform.system()} {platform.machine()}".strip()
+    comfy_headers = _comfy_probe_headers(comfy_token_env)
     return EnvironmentReport(
         python_version=py_ver,
         platform_label=plat,
@@ -318,7 +361,9 @@ def inspect_environment(
         ffprobe_ok=shutil.which("ffprobe") is not None,
         extras=check_extras(),
         ollama=probe_ollama(resolved_ollama, transport=ollama_transport),
-        comfy=probe_comfy(resolved_comfy, transport=comfy_transport),
+        comfy=probe_comfy(
+            resolved_comfy, headers=comfy_headers, transport=comfy_transport
+        ),
     )
 
 
@@ -366,9 +411,21 @@ def apply_setup_config(project_dir: Path, options: SetupOptions) -> Path:
 
     # Section scalars
     section_updates: list[tuple[str, str, Any]] = []
+    raw_yaml_updates: list[tuple[str, str, str]] = []
+    unset_token_env: str | None = None
     if options.comfy_url is not None:
         normalized_comfy = validate_http_url(options.comfy_url, "ComfyUI URL")
         section_updates.append(("comfy", "base_url", normalized_comfy))
+    if options.comfy_token_env is not None:
+        if options.comfy_token_env == "":
+            raw_yaml_updates.append(("comfy", "headers", "{}"))
+        else:
+            token_env = validate_comfy_token_env(options.comfy_token_env)
+            raw_yaml_updates.append(
+                ("comfy", "headers", f'{{Authorization: "Bearer ${{{token_env}}}"}}')
+            )
+            if os.environ.get(token_env) is None:
+                unset_token_env = token_env
 
     if options.llm_enabled is not None:
         section_updates.append(("llm", "enabled", options.llm_enabled))
@@ -422,6 +479,19 @@ def apply_setup_config(project_dir: Path, options: SetupOptions) -> Path:
             updated_text, section, field_name, format_yaml_scalar(value)
         )
 
+    for section, field_name, formatted_val in raw_yaml_updates:
+        if (
+            isinstance(parsed_before.get(section), dict) is False
+            and parsed_before.get(section) is not None
+        ):
+            raise ConfigError(f"Section '{section}' in {yaml_path} must be a mapping or null.")
+        sec_empty_re = re.compile(
+            rf"^{re.escape(section)}:[ \t]*(?:null|~|\{{[ \t]*\}})([ \t]*#[^\r\n]*)?$",
+            re.MULTILINE,
+        )
+        updated_text = sec_empty_re.sub(rf"{section}:\1", updated_text)
+        updated_text = update_yaml_scalar(updated_text, section, field_name, formatted_val)
+
     try:
         parsed_after = yaml.safe_load(updated_text) or {}
     except yaml.YAMLError as exc:
@@ -429,8 +499,15 @@ def apply_setup_config(project_dir: Path, options: SetupOptions) -> Path:
     if not isinstance(parsed_after, dict):
         raise ConfigError(f"Updated {yaml_path} must hold a YAML mapping at top level.")
 
+    to_validate: dict[str, Any] = parsed_after
+    if unset_token_env is not None and isinstance(parsed_after.get("comfy"), dict):
+        # Allow configuring `${COMFY_TOKEN}` before the user exports it in their shell.
+        comfy_copy = dict(parsed_after["comfy"])
+        comfy_copy["headers"] = {"Authorization": "Bearer placeholder"}
+        to_validate = {**parsed_after, "comfy": comfy_copy}
+
     try:
-        ProjectConfig.model_validate(parsed_after)
+        ProjectConfig.model_validate(to_validate)
     except ValidationError as exc:
         raise ConfigError(f"Invalid configuration after setup in {yaml_path}:\n{exc}") from exc
 
@@ -465,7 +542,7 @@ def render_environment_report(report: EnvironmentReport) -> str:
         )
 
     lines.append("")
-    lines.append("Local services:")
+    lines.append("Services:")
     if report.ollama.reachable:
         if report.ollama.models:
             shown = ", ".join(report.ollama.models[:6])
@@ -502,8 +579,8 @@ def render_environment_report(report: EnvironmentReport) -> str:
     else:
         lines.append(f"  MISS ComfyUI at {report.comfy.url}: {report.comfy.error}")
         lines.append(
-            "       -> Start ComfyUI locally on port 8188 "
-            "(or set `COMFY_URL` to your ComfyUI address)."
+            "       -> Start ComfyUI locally on port 8188, or point at a separate server with "
+            "`--comfy-url <url>` (and `--comfy-token-env COMFY_TOKEN` if authenticated)."
         )
 
     return "\n".join(lines)
@@ -524,9 +601,11 @@ __all__ = [
     "apply_setup_config",
     "check_extras",
     "inspect_environment",
+    "is_loopback_url",
     "pick_default_ollama_model",
     "probe_comfy",
     "probe_ollama",
     "render_environment_report",
+    "validate_comfy_token_env",
     "validate_http_url",
 ]

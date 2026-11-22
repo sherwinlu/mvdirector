@@ -24,10 +24,12 @@ from mvdirector.setup import (
     OllamaProbe,
     SetupOptions,
     apply_setup_config,
+    is_loopback_url,
     pick_default_ollama_model,
     probe_comfy,
     probe_ollama,
     render_environment_report,
+    validate_comfy_token_env,
     validate_http_url,
 )
 
@@ -368,3 +370,136 @@ def test_cli_setup_rejects_invalid_provider_and_missing_cloud_model(
     )
     assert missing_model.exit_code == 1
     assert "--llm-model is required" in missing_model.output
+
+
+# ------------------------------------------------------------------ remote ComfyUI server
+
+
+def test_is_loopback_url_and_token_env_validation() -> None:
+    assert is_loopback_url("http://127.0.0.1:8188") is True
+    assert is_loopback_url("http://localhost:8188") is True
+    assert is_loopback_url("http://[::1]:8188") is True
+    assert is_loopback_url("http://host.docker.internal:8188") is True
+    assert is_loopback_url("http://192.168.1.50:8188") is False
+    assert is_loopback_url("https://gpu.example.com:8188") is False
+
+    assert validate_comfy_token_env("COMFY_TOKEN") == "COMFY_TOKEN"
+    assert validate_comfy_token_env("MVD_COMFY_KEY") == "MVD_COMFY_KEY"
+    for bad in ("", "   ", "AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "BAD VAR"):
+        with pytest.raises(ConfigError):
+            validate_comfy_token_env(bad)
+
+
+def test_probe_comfy_sends_bearer_auth_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COMFY_TOKEN", "secret-remote-tok")
+    seen_auth: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_auth.append(request.headers.get("authorization"))
+        return httpx.Response(
+            200,
+            json={"devices": [{"name": "cuda:0 A100", "vram_total": 80 * 1024**3}]},
+        )
+
+    probe = probe_comfy(
+        "https://gpu.example.com:8188",
+        headers={"Authorization": "Bearer ${COMFY_TOKEN}"},
+        transport=httpx.MockTransport(handler),
+    )
+    assert probe.reachable is True
+    assert seen_auth == ["Bearer secret-remote-tok"]
+    assert probe.devices == ["cuda:0 A100"]
+
+
+def test_apply_setup_config_remote_comfy_with_unset_token_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("COMFY_TOKEN", raising=False)
+    project_dir = tmp_path / "remote-song"
+    api.init_project(project_dir)
+
+    apply_setup_config(
+        project_dir,
+        SetupOptions(
+            comfy_url="https://gpu.example.com:8188/",
+            comfy_token_env="COMFY_TOKEN",
+        ),
+    )
+
+    raw_text = (project_dir / CONFIG_FILENAME).read_text(encoding="utf-8")
+    assert 'headers: {Authorization: "Bearer ${COMFY_TOKEN}"}' in raw_text
+
+    # Once exported, load_config resolves the Bearer header cleanly.
+    monkeypatch.setenv("COMFY_TOKEN", "live-token")
+    cfg = load_config(project_dir / CONFIG_FILENAME)
+    assert cfg.comfy.base_url == "https://gpu.example.com:8188"
+    assert cfg.comfy.headers == {"Authorization": "Bearer live-token"}
+
+    # Passing empty string clears comfy.headers back to {}.
+    apply_setup_config(project_dir, SetupOptions(comfy_token_env=""))
+    cfg_cleared = load_config(project_dir / CONFIG_FILENAME)
+    assert cfg_cleared.comfy.headers == {}
+
+
+def test_cli_setup_remote_comfy_interactive_and_non_interactive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("COMFY_TOKEN", raising=False)
+    probed_urls: list[str | None] = []
+
+    def fake_inspect(**kw: object) -> EnvironmentReport:
+        url = kw.get("comfy_url")
+        probed_urls.append(url if isinstance(url, str) else None)
+        is_remote = isinstance(url, str) and "gpu.example.com" in url
+        return EnvironmentReport(
+            python_version="3.12.4",
+            platform_label="Darwin arm64",
+            ffmpeg_ok=True,
+            ffprobe_ok=True,
+            extras=[
+                ExtraStatus("qc", True, "MediaPipe QC"),
+                ExtraStatus("align", True, "Whisper alignment"),
+            ],
+            ollama=OllamaProbe("http://127.0.0.1:11434", True, ["gemma3:12b"]),
+            comfy=ComfyProbe(
+                url if isinstance(url, str) else "http://127.0.0.1:8188",
+                reachable=is_remote,
+                devices=["cuda:0 RTX 6000 Ada"] if is_remote else [],
+                vram_total_gb=48.0 if is_remote else None,
+                error=None if is_remote else "Connection refused",
+            ),
+        )
+
+    monkeypatch.setattr(api, "inspect_environment", fake_inspect)
+
+    # Interactive: enter remote ComfyUI URL + COMFY_TOKEN -> triggers re-probe and note.
+    target = tmp_path / "remote-interactive"
+    answers = (
+        "y\nRemote Track\nhttps://gpu.example.com:8188\nCOMFY_TOKEN\nollama\ngemma3:12b\nltx\n"
+    )
+    res = runner.invoke(app, ["setup", str(target)], input=answers)
+    assert res.exit_code == 0, res.output
+    assert "Connected to ComfyUI at https://gpu.example.com:8188" in res.stdout
+    assert "export COMFY_TOKEN=<your-token>" in res.stdout
+    assert "https://gpu.example.com:8188" in probed_urls
+
+    # Non-interactive with --comfy-url and --comfy-token-env
+    target2 = tmp_path / "remote-cli"
+    res2 = runner.invoke(
+        app,
+        [
+            "setup",
+            str(target2),
+            "--non-interactive",
+            "--comfy-url",
+            "https://gpu.example.com:8188",
+            "--comfy-token-env",
+            "COMFY_TOKEN",
+        ],
+    )
+    assert res2.exit_code == 0, res2.output
+    assert "export COMFY_TOKEN=<your-token>" in res2.stdout
+    raw_yaml = (target2 / CONFIG_FILENAME).read_text(encoding="utf-8")
+    assert "https://gpu.example.com:8188" in raw_yaml
+    assert "${COMFY_TOKEN}" in raw_yaml
+

@@ -2,14 +2,15 @@
 
 This guide walks you from a clean machine to your first rendered draft music video running **100% locally** — no cloud API keys required.
 
-Everything runs on your own machine:
+Everything runs on your own machine (or with ComfyUI on a separate GPU server):
 - **`mvdirector` (`mvd`)**: Python orchestrator, audio analysis, quality checks, and FFmpeg assembly.
 - **Ollama**: local multimodal LLM (`gemma3:12b` by default) for directing the shot list, writing prompts, and running vision QC.
-- **ComfyUI**: local image and video generation server (`http://127.0.0.1:8188`).
+- **ComfyUI**: image and video generation server — either local (`http://127.0.0.1:8188`) or on a separate LAN / cloud GPU server over HTTP(S).
 
 > **Hardware guidelines**
 > - **Apple Silicon Mac (M1–M4):** 32 GB+ unified memory is comfortable for running Ollama (`gemma3:12b`) and ComfyUI; on 16–24 GB Macs, use a smaller vision model such as `qwen2.5vl:7b` and keep only one heavy model loaded at a time. Run Ollama and ComfyUI **natively on macOS** (Docker Desktop on macOS cannot access Apple Metal/MPS).
 > - **Windows / Linux with NVIDIA GPU:** 16–24 GB+ VRAM is recommended for local open-weight video models (LTX, Wan 2.1 + InfiniteTalk). You can run natively or via Docker Compose (`--profile comfy-gpu`).
+> - **Separate GPU server (LAN PC, Tailscale, or cloud GPU):** Run `mvdirector` + Ollama on your laptop and point `comfy.base_url` at your remote ComfyUI server. `mvdirector` uploads reference images and audio over HTTP and polls `/history`, so no shared filesystem or NFS mount is needed.
 > - **No local GPU?** You can still run `mvdirector` + Ollama locally and point a lightweight CPU-only ComfyUI at paid cloud API nodes (see [ComfyUI Workflows & Model Bindings](workflows.md#tips-for-paid-cloud-api-nodes-in-comfyui)).
 
 ---
@@ -77,9 +78,9 @@ ollama pull gemma3:12b          # default recommended local model
 
 ---
 
-## Step 4: Install and start ComfyUI
+## Step 4: Start or connect to ComfyUI
 
-### Option A: Native install (recommended for macOS Apple Silicon; works on Linux/Windows too)
+### Option A: Native local install (recommended for macOS Apple Silicon; works on Linux/Windows too)
 
 1. Install [ComfyUI](https://github.com/comfyanonymous/ComfyUI) (or ComfyUI Desktop) and download the checkpoints/custom nodes for the image and video models you plan to use (for example: Qwen-Image + Qwen-Image-Edit for stills, and LTX-2.x or Wan 2.1 + InfiniteTalk for video).
 2. Start ComfyUI so it listens on `http://127.0.0.1:8188`:
@@ -99,11 +100,31 @@ COMFY_URL=http://comfy-gpu:8188 MVD_LLM_URL=http://ollama-gpu:11434 \
 
 See [Installation, Docker & Language Models](setup.md#running-with-docker-local-or-cloud-gpu-stack) for all Compose profiles and volume mounts.
 
+### Option C: Separate ComfyUI server (LAN GPU workstation, Tailscale, or cloud GPU)
+
+ComfyUI only needs to be reachable over HTTP(S) from your machine — `mvdirector` uploads reference images and audio clips automatically, so no shared disk is required:
+
+1. **On your GPU server**, start ComfyUI listening on a private/LAN interface (for example on a trusted home LAN or Tailscale IP; **do not** expose unauthenticated ComfyUI to the public internet):
+   ```bash
+   python main.py --listen 0.0.0.0 --port 8188
+   ```
+   *(If you use a cloud GPU host behind HTTPS + a Bearer token reverse proxy, note its URL and set `export COMFY_TOKEN=<your-token>` on your local machine.)*
+2. **On your local machine**, verify reachability with `mvd setup --check-only`:
+   ```bash
+   # Unauthenticated LAN / Tailscale server:
+   mvd setup --check-only --comfy-url http://192.168.1.50:8188
+
+   # Authenticated HTTPS cloud server:
+   export COMFY_TOKEN="your-bearer-token"
+   mvd setup --check-only --comfy-url https://gpu.example.com:8188 --comfy-token-env COMFY_TOKEN
+   ```
+   *(Note: fresh cloud GPU containers often start without your checkpoints or custom nodes — always run `mvd validate` after restarting a remote instance.)*
+
 ---
 
 ## Step 5: Run `mvd setup`
 
-`mvd setup` checks `ffmpeg`/`ffprobe`, installed Python extras, local Ollama (and its pulled models), and local ComfyUI (and its GPU/VRAM), then interactively creates and configures your project's `project.yaml`.
+`mvd setup` checks `ffmpeg`/`ffprobe`, installed Python extras, local Ollama (and its pulled models), and ComfyUI (local or remote GPU/VRAM), then interactively creates and configures your project's `project.yaml`.
 
 To inspect your machine without creating a project yet:
 ```bash
@@ -117,13 +138,18 @@ mvd setup projects/my-song
 
 `mvd setup` will prompt you for:
 - **Project title**
-- **ComfyUI URL** (defaults to `http://127.0.0.1:8188` or `COMFY_URL`)
+- **ComfyUI URL** (local `http://127.0.0.1:8188` or your separate server URL; for non-local URLs it also offers an optional Bearer auth env var such as `COMFY_TOKEN` and re-probes the server immediately to confirm connectivity)
 - **LLM provider & model** (defaults to `ollama` and automatically picks `gemma3:12b` or another vision model you already pulled)
 - **Video model family preset** (`ltx`, `wan`, `wan-i2v`, or `custom`), which writes the matching `frame_multiple`, `frame_offset`, `size_multiple`, and `max_clip_seconds` into `project.yaml`
 
 You can also run it non-interactively with flags:
 ```bash
+# Everything local:
 mvd setup projects/my-song --non-interactive --title "My Song" --video-preset ltx
+
+# Separate ComfyUI server (with optional Bearer auth via COMFY_TOKEN):
+mvd setup projects/my-song --non-interactive --title "My Song" \
+  --comfy-url https://gpu.example.com:8188 --comfy-token-env COMFY_TOKEN --video-preset wan
 ```
 
 ---

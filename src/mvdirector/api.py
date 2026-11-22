@@ -230,10 +230,15 @@ SetupOptions = setup_mod.SetupOptions
 def inspect_environment(
     *,
     comfy_url: str | None = None,
+    comfy_token_env: str | None = None,
     ollama_url: str | None = None,
 ) -> EnvironmentReport:
     """Inspect local tools, Python extras, Ollama, and ComfyUI readiness."""
-    return setup_mod.inspect_environment(comfy_url=comfy_url, ollama_url=ollama_url)
+    return setup_mod.inspect_environment(
+        comfy_url=comfy_url,
+        comfy_token_env=comfy_token_env,
+        ollama_url=ollama_url,
+    )
 
 
 def setup_project(

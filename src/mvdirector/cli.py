@@ -252,16 +252,28 @@ def setup(
 
     if not non_interactive:
         chosen_title = typer.prompt("Project title", default=chosen_title).strip()
-        chosen_comfy = typer.prompt(
-            "ComfyUI URL (local or separate server)", default=chosen_comfy
-        ).strip()
-        if chosen_comfy_token_env is None and not setup_mod.is_loopback_url(chosen_comfy):
-            raw_token_env = typer.prompt(
-                "Bearer auth env var for remote ComfyUI (blank for none, e.g. COMFY_TOKEN)",
-                default="",
+        while True:
+            raw_comfy = typer.prompt(
+                "ComfyUI URL (local or separate server)", default=chosen_comfy
             ).strip()
-            if raw_token_env:
-                chosen_comfy_token_env = raw_token_env
+            try:
+                chosen_comfy = setup_mod.validate_http_url(raw_comfy, "ComfyUI URL")
+                break
+            except MVDError as exc:
+                _yellow(str(exc))
+        if chosen_comfy_token_env is None and not setup_mod.is_loopback_url(chosen_comfy):
+            while True:
+                raw_token_env = typer.prompt(
+                    "Bearer auth env var for remote ComfyUI (blank for none, e.g. COMFY_TOKEN)",
+                    default="",
+                ).strip()
+                if not raw_token_env:
+                    break
+                try:
+                    chosen_comfy_token_env = setup_mod.validate_comfy_token_env(raw_token_env)
+                    break
+                except MVDError as exc:
+                    _yellow(str(exc))
 
         if (
             chosen_comfy.rstrip("/") != report.comfy.url

@@ -40,6 +40,8 @@ from mvdirector.tuning import (
     update_yaml_scalar,
 )
 
+_ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}")
+
 DEFAULT_COMFY_URL = "http://127.0.0.1:8188"
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 DEFAULT_PROBE_TIMEOUT = 5.0
@@ -380,8 +382,95 @@ def pick_default_ollama_model(
     return preferred
 
 
+def validate_setup_options(options: SetupOptions) -> None:
+    """Validate ``SetupOptions`` before creating or modifying any files on disk."""
+    if options.title is not None and not options.title.strip():
+        raise ConfigError("Project title must not be empty.")
+    if options.comfy_url is not None:
+        validate_http_url(options.comfy_url, "ComfyUI URL")
+    if options.comfy_token_env:
+        validate_comfy_token_env(options.comfy_token_env)
+    if options.llm_model is not None and not options.llm_model.strip():
+        raise ConfigError("llm.model must not be empty.")
+    if options.llm_base_url:
+        validate_http_url(options.llm_base_url, "LLM base URL")
+    if options.video_preset is not None and options.video_preset not in VIDEO_PRESETS:
+        valid = ", ".join(VIDEO_PRESETS)
+        raise ConfigError(
+            f"Unknown video preset {options.video_preset!r}. Choose from: {valid}"
+        )
+
+
+def _replace_section_field_block(
+    text: str, section: str, field_name: str, formatted_val: str
+) -> str:
+    """Replace a field under ``section`` even if it previously held a multi-line YAML block."""
+    lines = text.splitlines(keepends=True)
+    sec_start: int | None = None
+    sec_end = len(lines)
+    top_header_re = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*):[ \t]*(?:#.*)?$")
+    top_key_re = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*):")
+    for idx, raw in enumerate(lines):
+        stripped_line = raw.rstrip("\r\n")
+        if sec_start is None:
+            m = top_header_re.match(stripped_line)
+            if m and m.group(1) == section:
+                sec_start = idx
+        elif top_key_re.match(stripped_line):
+            sec_end = idx
+            break
+
+    if sec_start is not None:
+        field_re = re.compile(
+            rf"^([ \t]+){re.escape(field_name)}:[ \t]*([^#\r\n]*?)([ \t]*#[^\r\n]*)?(\r?\n?)$"
+        )
+        for idx in range(sec_start + 1, sec_end):
+            m = field_re.match(lines[idx])
+            if m:
+                indent, _old_val, comment, newline = m.groups()
+                newline = newline or "\n"
+                comment_part = ""
+                if comment:
+                    gap = comment[: len(comment) - len(comment.lstrip())] or "  "
+                    comment_part = f"{gap}{comment.lstrip()}"
+                # Remove any nested child lines belonging to a prior multi-line mapping/list.
+                drop_end = idx + 1
+                while drop_end < sec_end:
+                    nxt = lines[drop_end]
+                    if not nxt.strip():
+                        break
+                    nxt_indent = nxt[: len(nxt) - len(nxt.lstrip(" \t"))]
+                    if len(nxt_indent) > len(indent):
+                        drop_end += 1
+                    else:
+                        break
+                replacement = f"{indent}{field_name}: {formatted_val}{comment_part}{newline}"
+                lines[idx:drop_end] = [replacement]
+                return "".join(lines)
+
+    return update_yaml_scalar(text, section, field_name, formatted_val)
+
+
+def _mask_unset_allowed_env_refs(value: Any) -> Any:
+    """Replace unset allowed ``${VAR}`` placeholders so validation works pre-export."""
+    if isinstance(value, str):
+        def _sub(match: re.Match[str]) -> str:
+            var_name = match.group(1)
+            if is_allowed_env_var(var_name) and os.environ.get(var_name) is None:
+                return "placeholder"
+            return match.group(0)
+
+        return _ENV_REF_RE.sub(_sub, value)
+    if isinstance(value, dict):
+        return {k: _mask_unset_allowed_env_refs(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_mask_unset_allowed_env_refs(item) for item in value]
+    return value
+
+
 def apply_setup_config(project_dir: Path, options: SetupOptions) -> Path:
     """Apply setup selections to ``project.yaml`` in place, preserving comments and validating."""
+    validate_setup_options(options)
     yaml_path = project_dir / CONFIG_FILENAME
     if not yaml_path.is_file():
         raise ConfigError(f"Config file not found: {yaml_path}")
@@ -398,73 +487,85 @@ def apply_setup_config(project_dir: Path, options: SetupOptions) -> Path:
 
     # Top-level scalars
     if options.title is not None:
-        cleaned_title = options.title.strip()
-        if not cleaned_title:
-            raise ConfigError("Project title must not be empty.")
         updated_text = update_top_level_yaml_scalar(
-            updated_text, "title", format_yaml_scalar(cleaned_title)
+            updated_text, "title", format_yaml_scalar(options.title.strip())
         )
     if options.mode is not None:
         updated_text = update_top_level_yaml_scalar(
             updated_text, "mode", format_yaml_scalar(options.mode.value)
         )
 
-    # Section scalars
-    section_updates: list[tuple[str, str, Any]] = []
-    raw_yaml_updates: list[tuple[str, str, str]] = []
-    unset_token_env: str | None = None
+    # Section updates: (section, field_name, formatted_yaml, replace_block)
+    formatted_updates: list[tuple[str, str, str, bool]] = []
     if options.comfy_url is not None:
         normalized_comfy = validate_http_url(options.comfy_url, "ComfyUI URL")
-        section_updates.append(("comfy", "base_url", normalized_comfy))
+        formatted_updates.append(
+            ("comfy", "base_url", format_yaml_scalar(normalized_comfy), False)
+        )
     if options.comfy_token_env is not None:
         if options.comfy_token_env == "":
-            raw_yaml_updates.append(("comfy", "headers", "{}"))
+            formatted_updates.append(("comfy", "headers", "{}", True))
         else:
             token_env = validate_comfy_token_env(options.comfy_token_env)
-            raw_yaml_updates.append(
-                ("comfy", "headers", f'{{Authorization: "Bearer ${{{token_env}}}"}}')
+            formatted_updates.append(
+                ("comfy", "headers", f'{{Authorization: "Bearer ${{{token_env}}}"}}', True)
             )
-            if os.environ.get(token_env) is None:
-                unset_token_env = token_env
 
     if options.llm_enabled is not None:
-        section_updates.append(("llm", "enabled", options.llm_enabled))
+        formatted_updates.append(
+            ("llm", "enabled", format_yaml_scalar(options.llm_enabled), False)
+        )
     if options.llm_provider is not None:
-        section_updates.append(("llm", "provider", options.llm_provider))
+        formatted_updates.append(
+            ("llm", "provider", format_yaml_scalar(options.llm_provider), False)
+        )
     if options.llm_model is not None:
-        cleaned_model = options.llm_model.strip()
-        if not cleaned_model:
-            raise ConfigError("llm.model must not be empty.")
-        section_updates.append(("llm", "model", cleaned_model))
+        formatted_updates.append(
+            ("llm", "model", format_yaml_scalar(options.llm_model.strip()), False)
+        )
     if options.llm_base_url is not None:
         if options.llm_base_url == "":
-            section_updates.append(("llm", "base_url", None))
+            formatted_updates.append(("llm", "base_url", format_yaml_scalar(None), False))
         else:
             normalized_llm = validate_http_url(options.llm_base_url, "LLM base URL")
-            section_updates.append(("llm", "base_url", normalized_llm))
+            formatted_updates.append(
+                ("llm", "base_url", format_yaml_scalar(normalized_llm), False)
+            )
 
     if options.qc_on_missing_dependency is not None:
-        section_updates.append(("qc", "on_missing_dependency", options.qc_on_missing_dependency))
+        formatted_updates.append(
+            (
+                "qc",
+                "on_missing_dependency",
+                format_yaml_scalar(options.qc_on_missing_dependency),
+                False,
+            )
+        )
     if options.qc_vision_enabled is not None:
-        section_updates.append(("qc", "vision_enabled", options.qc_vision_enabled))
+        formatted_updates.append(
+            ("qc", "vision_enabled", format_yaml_scalar(options.qc_vision_enabled), False)
+        )
 
     if options.video_preset is not None:
-        preset = VIDEO_PRESETS.get(options.video_preset)
-        if preset is None:
-            valid = ", ".join(VIDEO_PRESETS)
-            raise ConfigError(
-                f"Unknown video preset {options.video_preset!r}. Choose from: {valid}"
-            )
+        preset = VIDEO_PRESETS[options.video_preset]
         if preset.frame_multiple is not None:
-            section_updates.append(("video", "frame_multiple", preset.frame_multiple))
+            formatted_updates.append(
+                ("video", "frame_multiple", format_yaml_scalar(preset.frame_multiple), False)
+            )
         if preset.frame_offset is not None:
-            section_updates.append(("video", "frame_offset", preset.frame_offset))
+            formatted_updates.append(
+                ("video", "frame_offset", format_yaml_scalar(preset.frame_offset), False)
+            )
         if preset.size_multiple is not None:
-            section_updates.append(("video", "size_multiple", preset.size_multiple))
+            formatted_updates.append(
+                ("video", "size_multiple", format_yaml_scalar(preset.size_multiple), False)
+            )
         if preset.max_clip_seconds is not None:
-            section_updates.append(("video", "max_clip_seconds", preset.max_clip_seconds))
+            formatted_updates.append(
+                ("video", "max_clip_seconds", format_yaml_scalar(preset.max_clip_seconds), False)
+            )
 
-    for section, field_name, value in section_updates:
+    for section, field_name, formatted_val, replace_block in formatted_updates:
         if (
             isinstance(parsed_before.get(section), dict) is False
             and parsed_before.get(section) is not None
@@ -475,22 +576,12 @@ def apply_setup_config(project_dir: Path, options: SetupOptions) -> Path:
             re.MULTILINE,
         )
         updated_text = sec_empty_re.sub(rf"{section}:\1", updated_text)
-        updated_text = update_yaml_scalar(
-            updated_text, section, field_name, format_yaml_scalar(value)
-        )
-
-    for section, field_name, formatted_val in raw_yaml_updates:
-        if (
-            isinstance(parsed_before.get(section), dict) is False
-            and parsed_before.get(section) is not None
-        ):
-            raise ConfigError(f"Section '{section}' in {yaml_path} must be a mapping or null.")
-        sec_empty_re = re.compile(
-            rf"^{re.escape(section)}:[ \t]*(?:null|~|\{{[ \t]*\}})([ \t]*#[^\r\n]*)?$",
-            re.MULTILINE,
-        )
-        updated_text = sec_empty_re.sub(rf"{section}:\1", updated_text)
-        updated_text = update_yaml_scalar(updated_text, section, field_name, formatted_val)
+        if replace_block:
+            updated_text = _replace_section_field_block(
+                updated_text, section, field_name, formatted_val
+            )
+        else:
+            updated_text = update_yaml_scalar(updated_text, section, field_name, formatted_val)
 
     try:
         parsed_after = yaml.safe_load(updated_text) or {}
@@ -499,13 +590,7 @@ def apply_setup_config(project_dir: Path, options: SetupOptions) -> Path:
     if not isinstance(parsed_after, dict):
         raise ConfigError(f"Updated {yaml_path} must hold a YAML mapping at top level.")
 
-    to_validate: dict[str, Any] = parsed_after
-    if unset_token_env is not None and isinstance(parsed_after.get("comfy"), dict):
-        # Allow configuring `${COMFY_TOKEN}` before the user exports it in their shell.
-        comfy_copy = dict(parsed_after["comfy"])
-        comfy_copy["headers"] = {"Authorization": "Bearer placeholder"}
-        to_validate = {**parsed_after, "comfy": comfy_copy}
-
+    to_validate = _mask_unset_allowed_env_refs(parsed_after)
     try:
         ProjectConfig.model_validate(to_validate)
     except ValidationError as exc:
@@ -608,4 +693,5 @@ __all__ = [
     "render_environment_report",
     "validate_comfy_token_env",
     "validate_http_url",
+    "validate_setup_options",
 ]

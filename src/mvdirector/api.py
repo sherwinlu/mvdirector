@@ -248,6 +248,7 @@ def setup_project(
     mode: ProjectMode = ProjectMode.STANDARD,
 ) -> Path:
     """Initialize ``directory`` if needed and apply ``options`` to its ``project.yaml``."""
+    setup_mod.validate_setup_options(options)
     if not (directory / CONFIG_FILENAME).exists():
         init_project(directory, mode=options.mode or mode)
     setup_mod.apply_setup_config(directory, options)

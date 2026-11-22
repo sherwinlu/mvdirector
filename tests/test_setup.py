@@ -503,3 +503,41 @@ def test_cli_setup_remote_comfy_interactive_and_non_interactive(
     assert "https://gpu.example.com:8188" in raw_yaml
     assert "${COMFY_TOKEN}" in raw_yaml
 
+
+def test_setup_regression_multiline_headers_unset_env_and_atomic_init(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("COMFY_TOKEN", raising=False)
+
+    # 1. Invalid options must fail BEFORE creating the project folder.
+    not_created = tmp_path / "should-not-exist"
+    with pytest.raises(ConfigError):
+        api.setup_project(not_created, SetupOptions(comfy_url="file:///etc/passwd"))
+    assert not not_created.exists()
+
+    # 2. Replacing a multi-line comfy.headers block must not leave orphaned child lines.
+    proj = tmp_path / "multiline"
+    api.init_project(proj)
+    cfg_path = proj / CONFIG_FILENAME
+    raw = cfg_path.read_text(encoding="utf-8")
+    raw = raw.replace(
+        'headers: {}                    # e.g. {Authorization: "Bearer ${COMFY_TOKEN}"}',
+        'headers:\n    Authorization: "Bearer ${COMFY_OLD}"\n    X-Custom: "1"',
+        1,
+    )
+    cfg_path.write_text(raw, encoding="utf-8")
+
+    apply_setup_config(proj, SetupOptions(comfy_token_env="COMFY_TOKEN"))
+    updated = cfg_path.read_text(encoding="utf-8")
+    assert "COMFY_OLD" not in updated
+    assert "X-Custom" not in updated
+    assert 'headers: {Authorization: "Bearer ${COMFY_TOKEN}"}' in updated
+
+    # 3. Re-running setup on a project with an unset ${COMFY_TOKEN} succeeds for other fields.
+    apply_setup_config(proj, SetupOptions(title="Updated Title"))
+    monkeypatch.setenv("COMFY_TOKEN", "tok-after")
+    cfg = load_config(cfg_path)
+    assert cfg.title == "Updated Title"
+    assert cfg.comfy.headers == {"Authorization": "Bearer tok-after"}
+
+

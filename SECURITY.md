@@ -34,6 +34,8 @@ You can expect an acknowledgment within 72 hours and a coordinated fix before pu
    All external tools (`ffmpeg`, `ffprobe`) are invoked as argument lists without `shell=True`, with resolved paths so filenames starting with `-` cannot be parsed as CLI flags, and `ffmpeg -f concat` runs without `-safe 0`.
 5. **ComfyUI Output & Upload Hardening (`ComfyClient.download_output`, `ComfyClient.upload`):**
    Server-returned `filename` and `subfolder` fields are checked against path traversal before requesting `/view`, downloads stream in chunks to a temporary `.part` file and abort at a 512 MiB cap before atomic rename, uploads isolate each project under a portable `mvdirector/<slug>_<hash8>` subfolder (independent of absolute host path), and `POST /prompt` skips `ReadTimeout`/`500` retries so timeouts do not queue duplicate GPU jobs.
+6. **MCP Server Hardening (`mvdirector.mcp`):**
+   `mvd mcp --http` binds to `127.0.0.1` by default, refuses non-loopback binds without a bearer token (`--token` / `MVD_MCP_TOKEN`, compared with `hmac.compare_digest`) unless `--allow-unauthenticated` is explicitly passed, rejects non-loopback `Host` (on loopback binds) and `Origin` headers to block DNS rebinding and CSRF, caps request bodies at 1 MiB, and confines all project and file path arguments to the configured `--workspace` / `--project` root(s).
 
 ---
 

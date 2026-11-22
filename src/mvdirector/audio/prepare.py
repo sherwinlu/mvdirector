@@ -16,16 +16,21 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
 
 import numpy as np
+import soundfile as sf
 from pydantic import BaseModel, ConfigDict
 
 from mvdirector import media
 from mvdirector import tuning as tuning_mod
 from mvdirector.audio import analysis as analysis_mod
+from mvdirector.audio import stem_pack as stem_pack_mod
 from mvdirector.audio.lyrics import (
     Transcriber,
     Transcript,
@@ -71,6 +76,7 @@ class AudioSummary:
     energy_arc: list[str]
     vocal_turns: list[VocalTurn] = field(default_factory=list)
     musical_features: MusicalFeatures | None = None
+    stem_summary: str = ""
 
 
 @dataclass(frozen=True)
@@ -86,6 +92,7 @@ class PrepareResult:
     vocal_windows: int
     transcribed_words: int
     inferred_with_llm: bool
+    stems_ingested: int = 0
 
 
 def _format_mmss(seconds: float) -> str:
@@ -131,6 +138,10 @@ def summarize_audio(
     vocals: np.ndarray,
     beats_per_bar: int,
     drums: np.ndarray | None = None,
+    *,
+    harmonic_mix: np.ndarray | None = None,
+    stems: Sequence[stem_pack_mod.IngestedStem] = (),
+    project_root: Path | None = None,
 ) -> AudioSummary:
     """Compute compact tempo, vocal coverage, and energy-arc cues for lyric/style inference."""
     duration = len(mix) / analysis_mod.ANALYSIS_SR
@@ -143,8 +154,19 @@ def summarize_audio(
     vocal_turns = analysis_mod.detect_vocal_turns(vocals)
     intensities = analysis_mod.bar_intensity(mix_rms, mix_times, bars, duration)
     musical_features = analysis_mod.analyze_musical_features(
-        mix, analysis_mod.ANALYSIS_SR, tempo_bpm=tempo
+        mix, analysis_mod.ANALYSIS_SR, tempo_bpm=tempo, harmonic_mix=harmonic_mix
     )
+    stem_summary = ""
+    if stems and project_root is not None:
+        arrangement = stem_pack_mod.analyze_stems(
+            stems,
+            project_root=project_root,
+            bars=bars,
+            duration=duration,
+            sr=analysis_mod.ANALYSIS_SR,
+            loader=analysis_mod.load_mono,
+        )
+        stem_summary = arrangement.summary if arrangement else ""
     vocal_seconds = sum(w.duration for w in windows)
     vocal_fraction = min(1.0, vocal_seconds / duration) if duration > 0 else 0.0
     return AudioSummary(
@@ -155,6 +177,7 @@ def summarize_audio(
         energy_arc=format_energy_arc(bars, intensities, duration),
         vocal_turns=vocal_turns,
         musical_features=musical_features,
+        stem_summary=stem_summary,
     )
 
 
@@ -216,6 +239,8 @@ def _build_inference_prompt(transcript: Transcript, summary: AudioSummary) -> st
         header.append("ENERGY ARC: " + ", ".join(summary.energy_arc))
     if summary.musical_features and summary.musical_features.summary:
         header.append(f"MUSICAL CHARACTER: {summary.musical_features.summary}")
+    if summary.stem_summary:
+        header.append(f"INSTRUMENTATION & STEMS: {summary.stem_summary}")
     voices = {t.voice for t in summary.vocal_turns}
     if len(voices) >= 2 or BOTH_VOICES in voices:
         both_note = (
@@ -369,68 +394,298 @@ def _ingest_mix(src: Path, dst: Path, *, overwrite: bool) -> Path:
     )
 
 
+_MIX_STEM_NAMES = frozenset({"mix", "master", "full mix", "full_mix", "song", "track"})
+
+
+def _is_explicit_mix_name(path: Path) -> bool:
+    return stem_pack_mod.clean_stem_label(path.name).lower() in _MIX_STEM_NAMES
+
+
+def _discover_dropped_stem_sources(project: Project, stems_dir: Path) -> list[Path]:
+    """Find .zip archives or stem files dropped into ``inputs/stems/`` or ``inputs/*.zip``."""
+    found: list[Path] = []
+    if stems_dir.is_dir():
+        for entry in sorted(stems_dir.iterdir()):
+            if entry.is_symlink() or not entry.is_file():
+                continue
+            if entry.suffix.lower() in (
+                stem_pack_mod.ARCHIVE_SUFFIXES | stem_pack_mod.STEM_AUDIO_SUFFIXES
+            ):
+                found.append(entry)
+    inputs_dir = project.root / "inputs"
+    if inputs_dir.is_dir():
+        for entry in sorted(inputs_dir.iterdir()):
+            if (
+                not entry.is_symlink()
+                and entry.is_file()
+                and entry.suffix.lower() in stem_pack_mod.ARCHIVE_SUFFIXES
+            ):
+                found.append(entry)
+    return found
+
+
+def _partition_prepare_inputs(
+    project: Project,
+    audio: Path | Sequence[Path] | None,
+    stems_dir: Path,
+) -> tuple[Path | None, list[Path]]:
+    """Split prepare inputs into ``(master_mix_path, stem_sources)``.
+
+    Preserves classic single-file behavior when one audio file is passed with no stem packs.
+    When any .zip archive, directory, or multiple audio files are given (or dropped into
+    ``inputs/stems/`` / ``inputs/*.zip``), classifies mix vs. stem sources automatically.
+    """
+    if audio is None:
+        raw_paths: list[Path] = []
+    elif isinstance(audio, Path):
+        raw_paths = [audio]
+    else:
+        raw_paths = list(audio)
+
+    for p in raw_paths:
+        if not p.exists():
+            raise ConfigError(f"Audio or stem file not found: {p}")
+
+    # Single explicit audio file with no zip/dir: classic single-mix mode unless stems_dir has zips.
+    if (
+        len(raw_paths) == 1
+        and raw_paths[0].is_file()
+        and raw_paths[0].suffix.lower() not in stem_pack_mod.ARCHIVE_SUFFIXES
+    ):
+        dropped = _discover_dropped_stem_sources(project, stems_dir)
+        return _validate_audio_file(raw_paths[0]), dropped
+
+    # No explicit args: check for dropped stem packs + optional existing mix.
+    if not raw_paths:
+        dropped = _discover_dropped_stem_sources(project, stems_dir)
+        if not dropped:
+            return resolve_source_audio(project, None), []
+        _, mix_target = _target_file(project, project.config.inputs.mix, "mix")
+        existing_mix: Path | None = None
+        if mix_target.is_file():
+            existing_mix = mix_target
+        elif mix_target.suffix.lower() == ".wav" and mix_target.with_suffix(".mp3").is_file():
+            existing_mix = mix_target.with_suffix(".mp3")
+        return existing_mix, dropped
+
+    # Multiple paths, or at least one .zip / directory.
+    pack_sources: list[Path] = []
+    loose_audio: list[Path] = []
+    for p in raw_paths:
+        if p.is_dir() or p.suffix.lower() in stem_pack_mod.ARCHIVE_SUFFIXES:
+            pack_sources.append(p)
+        elif p.suffix.lower() in stem_pack_mod.STEM_AUDIO_SUFFIXES:
+            loose_audio.append(p)
+        else:
+            supported = ", ".join(
+                sorted(stem_pack_mod.STEM_AUDIO_SUFFIXES | stem_pack_mod.ARCHIVE_SUFFIXES)
+            )
+            raise ConfigError(
+                f"Unsupported input {p.name!r}. Supported formats: {supported} or a folder."
+            )
+
+    master_mix: Path | None = None
+    remaining_loose: list[Path] = []
+    if len(loose_audio) == 1 and pack_sources:
+        candidate = loose_audio[0]
+        if (
+            _is_explicit_mix_name(candidate)
+            or stem_pack_mod.classify_stem_name(candidate.name) == "other"
+        ):
+            master_mix = candidate
+        else:
+            remaining_loose.append(candidate)
+    else:
+        for candidate in loose_audio:
+            if master_mix is None and _is_explicit_mix_name(candidate):
+                master_mix = candidate
+            else:
+                remaining_loose.append(candidate)
+
+    return master_mix, [*pack_sources, *remaining_loose]
+
+
+def _write_silent_wav(
+    dst: Path, duration_seconds: float, sr: int = analysis_mod.ANALYSIS_SR
+) -> Path:
+    """Write a silent mono PCM16 WAV of ``duration_seconds`` atomically (instrumental fallback)."""
+    n_samples = max(1, int(round(max(duration_seconds, 0.1) * sr)))
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".mvd_sil_", suffix=".wav", dir=dst.parent)
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        sf.write(str(tmp_path), np.zeros(n_samples, dtype=np.float32), sr, subtype="PCM_16")
+        os.replace(tmp_path, dst)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    return dst
+
+
+def _target_dir(project: Project, relative: str | None, label: str) -> Path:
+    if not relative or not relative.strip():
+        raise ConfigError(f"inputs.{label} is empty in project.yaml.")
+    cleaned = relative.strip()
+    target = project.path(cleaned)
+    if target == project.root or target.is_file():
+        raise ConfigError(
+            f"inputs.{label} must name a subfolder inside {project.root}: {relative!r}"
+        )
+    return target
+
+
 def prepare_project(
     project: Project,
-    audio: Path | None = None,
+    audio: Path | Sequence[Path] | None = None,
     *,
     overwrite: bool = False,
     separator: StemSeparator | None = None,
     transcriber: Transcriber | None = None,
     llm: LLMClient | None = None,
 ) -> PrepareResult:
-    """Build mix, vocal stem, lyrics.txt, and style.md from a single .mp3 or .wav file."""
+    """Build mix, vocal stem, lyrics.txt, and style.md from audio or Suno/DAW stem packs."""
     inputs = project.config.inputs
     prepare_cfg = project.config.prepare
 
-    # Fail fast before running stem separation, transcription, or LLM calls.
+    # Fail fast before running stem extraction, separation, transcription, or LLM calls.
     lyrics_rel, style_rel = ensure_writable(project, overwrite=overwrite)
     _, mix_target = _target_file(project, inputs.mix, "mix")
     _, vocals_target = _target_file(project, inputs.vocals, "vocals")
     drums_target = _target_file(project, inputs.drums, "drums")[1] if inputs.drums else None
+    stems_dir = _target_dir(project, inputs.stems_dir, "stems_dir")
     timestamps_rel = (
         _target_file(project, inputs.word_timestamps, "word_timestamps")[0]
         if inputs.word_timestamps
         else None
     )
 
-    source_audio = resolve_source_audio(project, audio)
-    if source_audio.resolve() != mix_target.resolve() and mix_target.is_file() and not overwrite:
+    master_mix_src, stem_sources = _partition_prepare_inputs(project, audio, stems_dir)
+    if (
+        master_mix_src is not None
+        and master_mix_src.resolve() != mix_target.resolve()
+        and mix_target.is_file()
+        and not overwrite
+    ):
         raise ConfigError(
             f"Existing mix at {mix_target} would be overwritten. Pass --overwrite to replace."
         )
 
-    # 1. Ingest/normalize mix into inputs.mix.
-    mix_path = _ingest_mix(source_audio, mix_target, overwrite=overwrite)
-
-    # 2. Separate vocal stem (and optional drum stem) for lip-sync and vocal activity.
-    need_stems = (
-        overwrite
-        or not vocals_target.is_file()
-        or (drums_target is not None and not drums_target.is_file())
-    )
-    if need_stems:
-        sep = separator or DemucsSeparator(
-            model=prepare_cfg.stem_model, device=prepare_cfg.stem_device
+    # 1. Extract/ingest any stem packs (.zip, folder, or loose stems) into inputs/stems/.
+    ingested_stems: list[stem_pack_mod.IngestedStem] = []
+    if stem_sources:
+        ingested_stems = stem_pack_mod.ingest_stem_sources(
+            stem_sources, stems_dir, overwrite=overwrite
         )
-        stem_result = sep.separate(mix_path, vocals_target, drums_out=drums_target)
-        vocals_path, drums_path = stem_result.vocals, stem_result.drums
-    else:
-        log.info("Using existing vocal stem at %s", vocals_target)
-        vocals_path, drums_path = vocals_target, drums_target
+    if not ingested_stems:
+        ingested_stems = stem_pack_mod.discover_stems(stems_dir)
 
-    # 3. Extract tempo/energy/vocal summary and transcribe the isolated vocals.
+    # 2. Ingest/normalize mix into inputs.mix (or synthesize from stems if no master mix given).
+    synthesized_mix = False
+    if master_mix_src is not None:
+        mix_path = _ingest_mix(master_mix_src, mix_target, overwrite=overwrite)
+    elif mix_target.is_file() and not overwrite:
+        mix_path = mix_target
+    elif ingested_stems:
+        mix_stems = stem_pack_mod.select_mix_stems(ingested_stems)
+        log.info(
+            "No master mix provided; synthesizing %s from %d stem(s).",
+            mix_target.name,
+            len(mix_stems),
+        )
+        mix_path = stem_pack_mod.mix_stems_to_wav([s.path for s in mix_stems], mix_target)
+        synthesized_mix = True
+    else:
+        raise ConfigError(
+            f"No source audio or stem pack found at {mix_target} or {stems_dir}. "
+            "Pass an .mp3/.wav file or a Suno stem .zip: `mvd prepare /path/to/stems.zip`."
+        )
+
+    # 3. Route vocal stem (preferring lead vocals from stem pack) and optional drum stem.
+    pack_vocals = stem_pack_mod.select_vocal_stems(ingested_stems)
+    pack_drums = stem_pack_mod.select_drum_stems(ingested_stems)
+
+    vocals_path: Path
+    drums_path: Path | None = drums_target if (drums_target and drums_target.is_file()) else None
+
+    if pack_vocals and (overwrite or not vocals_target.is_file()):
+        log.info(
+            "Using %s from stem pack for %s (skipping Demucs).",
+            ", ".join(s.name for s in pack_vocals),
+            vocals_target.name,
+        )
+        vocals_path = stem_pack_mod.mix_stems_to_wav([s.path for s in pack_vocals], vocals_target)
+        if drums_target is not None and pack_drums and (overwrite or not drums_target.is_file()):
+            drums_path = stem_pack_mod.mix_stems_to_wav([s.path for s in pack_drums], drums_target)
+    elif ingested_stems and not pack_vocals and synthesized_mix:
+        # Instrumental-only stem pack (no vocals stem and no external master mix).
+        mix_info = sf.info(str(mix_path))
+        log.info(
+            "Stem pack has no vocal stem; writing silent %s for instrumental track.",
+            vocals_target.name,
+        )
+        vocals_path = _write_silent_wav(vocals_target, mix_info.duration)
+        if drums_target is not None and pack_drums and (overwrite or not drums_target.is_file()):
+            drums_path = stem_pack_mod.mix_stems_to_wav([s.path for s in pack_drums], drums_target)
+    else:
+        if drums_target is not None and pack_drums and (overwrite or not drums_target.is_file()):
+            drums_path = stem_pack_mod.mix_stems_to_wav([s.path for s in pack_drums], drums_target)
+        need_stems = (
+            overwrite
+            or not vocals_target.is_file()
+            or (drums_target is not None and not drums_target.is_file())
+        )
+        if need_stems:
+            sep = separator or DemucsSeparator(
+                model=prepare_cfg.stem_model, device=prepare_cfg.stem_device
+            )
+            need_drums_out = drums_target if (drums_target and not drums_target.is_file()) else None
+            stem_result = sep.separate(mix_path, vocals_target, drums_out=need_drums_out)
+            vocals_path = stem_result.vocals
+            if stem_result.drums is not None:
+                drums_path = stem_result.drums
+        else:
+            log.info("Using existing vocal stem at %s", vocals_target)
+            vocals_path = vocals_target
+
+    # 4. Extract tempo/energy/vocal summary and transcribe the isolated vocals.
     mix_samples = analysis_mod.load_mono(mix_path)
     vocal_samples = analysis_mod.load_mono(vocals_path)
-    drum_samples = analysis_mod.load_mono(drums_path) if drums_path else None
+    if drums_path is not None and drums_path.is_file():
+        drum_samples: np.ndarray | None = analysis_mod.load_mono(drums_path)
+    else:
+        rhythm_stems = stem_pack_mod.select_rhythm_stems(ingested_stems)
+        drum_samples = (
+            stem_pack_mod.load_stems_mono_sum(
+                rhythm_stems, analysis_mod.ANALYSIS_SR, loader=analysis_mod.load_mono
+            )
+            if rhythm_stems
+            else None
+        )
+    harmonic_stems = stem_pack_mod.select_harmonic_stems(ingested_stems)
+    harmonic_samples = (
+        stem_pack_mod.load_stems_mono_sum(
+            harmonic_stems, analysis_mod.ANALYSIS_SR, loader=analysis_mod.load_mono
+        )
+        if harmonic_stems
+        else None
+    )
     summary = summarize_audio(
-        mix_samples, vocal_samples, project.config.video.beats_per_bar, drums=drum_samples
+        mix_samples,
+        vocal_samples,
+        project.config.video.beats_per_bar,
+        drums=drum_samples,
+        harmonic_mix=harmonic_samples,
+        stems=ingested_stems,
+        project_root=project.root,
     )
 
     if transcriber is not None:
         trans = transcriber
     else:
         lyrics_hint, style_hint = tuning_mod.read_optional_project_inputs(project)
-        stem_hint = "" if source_audio.stem.lower() == "mix" else source_audio.stem
+        hint_src = master_mix_src or (stem_sources[0] if stem_sources else mix_path)
+        stem_hint = "" if hint_src.stem.lower() == "mix" else hint_src.stem
         title_hint = (
             f"{project.config.title} {stem_hint}".strip()
             if project.config.title.strip().lower() not in ("", "my song", "untitled")
@@ -462,12 +717,12 @@ def prepare_project(
             vocals_path,
         )
 
-    # 4. Infer structured lyrics.txt and lip-sync-ready style.md from the transcript.
+    # 5. Infer structured lyrics.txt and lip-sync-ready style.md from the transcript.
     inferred, used_llm = infer_inputs_from_transcript(
         transcript, summary, llm=llm, audio_path=mix_path
     )
 
-    # 5. Persist generated text inputs atomically under the project lock.
+    # 6. Persist generated text inputs atomically under the project lock.
     lyrics_text = inferred.lyrics.strip() + "\n"
     style_text = (
         f"Music style: {inferred.music_style.strip()}\n\n"
@@ -497,4 +752,5 @@ def prepare_project(
         vocal_windows=len(summary.vocal_windows),
         transcribed_words=len(transcript.words),
         inferred_with_llm=used_llm,
+        stems_ingested=len(ingested_stems),
     )

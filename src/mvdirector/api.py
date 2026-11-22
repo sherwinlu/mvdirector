@@ -17,7 +17,7 @@ import shutil
 import sys
 import unicodedata
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from functools import partial
@@ -306,14 +306,14 @@ _UNSET = object()
 
 def prepare(
     project_dir: ProjectRef,
-    audio: Path | None = None,
+    audio: Path | Sequence[Path] | None = None,
     *,
     overwrite: bool = False,
     separator: StemSeparator | None = None,
     transcriber: Transcriber | None = None,
     llm: LLMClient | None | object = _UNSET,
 ) -> PrepareResult:
-    """Prepare a project from a single .mp3 or .wav file (stems, lyrics, and style brief)."""
+    """Prepare a project from audio files or Suno/DAW stem packs (.zip, folders, or loose stems)."""
     project = open_project(project_dir)
     resolved_llm: LLMClient | None = (
         build_llm(project.config.llm) if llm is _UNSET else llm  # type: ignore[assignment]

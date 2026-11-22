@@ -284,6 +284,118 @@
       "title": "MusicalFeatures",
       "type": "object"
     },
+    "StemArrangement": {
+      "additionalProperties": false,
+      "description": "Multi-stem instrumentation and arrangement analysis derived from extracted song stems.",
+      "properties": {
+        "stems": {
+          "description": "Catalog of analyzed stems with roles and active time spans.",
+          "items": {
+            "$ref": "#/$defs/StemTrackInfo"
+          },
+          "title": "Stems",
+          "type": "array"
+        },
+        "backing_vocal_windows": {
+          "description": "Time spans where backing vocals or harmonies are active.",
+          "items": {
+            "$ref": "#/$defs/TimeSpan"
+          },
+          "title": "Backing Vocal Windows",
+          "type": "array"
+        },
+        "rhythm_drops": {
+          "description": "Bar timestamps (seconds) where drums/bass drop out or slam back in.",
+          "items": {
+            "type": "number"
+          },
+          "title": "Rhythm Drops",
+          "type": "array"
+        },
+        "summary": {
+          "default": "",
+          "description": "Compact human-readable instrumentation and arrangement summary for planning.",
+          "title": "Summary",
+          "type": "string"
+        }
+      },
+      "title": "StemArrangement",
+      "type": "object"
+    },
+    "StemTrackInfo": {
+      "additionalProperties": false,
+      "description": "Measured metadata and activity spans for one ingested instrument or vocal stem.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "description": "Human-readable stem label (e.g. 'Lead Vocals', 'Woodwinds').",
+          "title": "Name",
+          "type": "string"
+        },
+        "role": {
+          "description": "Canonical musical role inferred from the stem filename.",
+          "enum": [
+            "lead_vocals",
+            "backing_vocals",
+            "vocals",
+            "drums",
+            "percussion",
+            "bass",
+            "guitar",
+            "keys",
+            "strings",
+            "synth",
+            "brass",
+            "woodwinds",
+            "instrumental",
+            "fx",
+            "other"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "path": {
+          "description": "Project-relative path to the normalized stem WAV file.",
+          "title": "Path",
+          "type": "string"
+        },
+        "active_fraction": {
+          "default": 0.0,
+          "description": "Share (0-1) of the song duration where this stem is audibly active.",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Active Fraction",
+          "type": "number"
+        },
+        "energy_share": {
+          "default": 0.0,
+          "description": "Relative RMS energy share (0-1) compared to all analyzed stems.",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Energy Share",
+          "type": "number"
+        },
+        "active_spans": {
+          "description": "Time spans in seconds where this stem is audibly active.",
+          "items": {
+            "$ref": "#/$defs/TimeSpan"
+          },
+          "title": "Active Spans",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "role",
+        "path"
+      ],
+      "title": "StemTrackInfo",
+      "type": "object"
+    },
     "TimeSpan": {
       "additionalProperties": false,
       "properties": {
@@ -536,6 +648,18 @@
       ],
       "default": null,
       "description": "Acoustic musical qualities (key, mode, brightness, percussiveness, dynamics)."
+    },
+    "stems": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/StemArrangement"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Optional multi-stem instrumentation and arrangement analysis."
     },
     "chapters": {
       "description": "Per-track segments measured in long-form mix mode.",

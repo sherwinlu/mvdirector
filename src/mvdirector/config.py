@@ -107,6 +107,7 @@ class InputsConfig(_Section):
     mix: str = "inputs/mix.wav"
     vocals: str = "inputs/vocals.wav"
     drums: str | None = None
+    stems_dir: str = "inputs/stems"
     lyrics: str = "inputs/lyrics.txt"
     style: str = "inputs/style.md"
     word_timestamps: str | None = Field(

@@ -282,6 +282,78 @@ class MusicalFeatures(StrictModel):
     )
 
 
+StemRole = Literal[
+    "lead_vocals",
+    "backing_vocals",
+    "vocals",
+    "drums",
+    "percussion",
+    "bass",
+    "guitar",
+    "keys",
+    "strings",
+    "synth",
+    "brass",
+    "woodwinds",
+    "instrumental",
+    "fx",
+    "other",
+]
+
+
+class StemTrackInfo(StrictModel):
+    """Measured metadata and activity spans for one ingested instrument or vocal stem."""
+
+    id: str
+    name: str = Field(description="Human-readable stem label (e.g. 'Lead Vocals', 'Woodwinds').")
+    role: StemRole = Field(description="Canonical musical role inferred from the stem filename.")
+    path: str = Field(description="Project-relative path to the normalized stem WAV file.")
+    active_fraction: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+        description="Share (0-1) of the song duration where this stem is audibly active.",
+    )
+    energy_share: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+        description="Relative RMS energy share (0-1) compared to all analyzed stems.",
+    )
+    active_spans: list[TimeSpan] = Field(
+        default_factory=list,
+        description="Time spans in seconds where this stem is audibly active.",
+    )
+
+    @field_validator("id")
+    @classmethod
+    def _check_id(cls, value: str) -> str:
+        return validate_safe_id(value, "stem id")
+
+
+class StemArrangement(StrictModel):
+    """Multi-stem instrumentation and arrangement analysis derived from extracted song stems."""
+
+    stems: list[StemTrackInfo] = Field(
+        default_factory=list,
+        description="Catalog of analyzed stems with roles and active time spans.",
+    )
+    backing_vocal_windows: list[TimeSpan] = Field(
+        default_factory=list,
+        description="Time spans where backing vocals or harmonies are active.",
+    )
+    rhythm_drops: list[float] = Field(
+        default_factory=list,
+        description="Bar timestamps (seconds) where drums/bass drop out or slam back in.",
+    )
+    summary: str = Field(
+        default="",
+        description="Compact human-readable instrumentation and arrangement summary for planning.",
+    )
+
+
 class Analysis(StrictModel):
     schema_version: int = ANALYSIS_SCHEMA_VERSION
     duration: float
@@ -302,6 +374,10 @@ class Analysis(StrictModel):
     musical_features: MusicalFeatures | None = Field(
         default=None,
         description="Acoustic musical qualities (key, mode, brightness, percussiveness, dynamics).",
+    )
+    stems: StemArrangement | None = Field(
+        default=None,
+        description="Optional multi-stem instrumentation and arrangement analysis.",
     )
     chapters: list[AnalyzedChapter] = Field(
         default_factory=list,

@@ -426,6 +426,21 @@ def test_ollama_retries_without_format_when_it_is_rejected():
     assert "format" not in server.requests[1].body
 
 
+def test_ollama_retries_without_format_on_501_structured_output_unavailable():
+    server = FakeServer(
+        error_reply(501, "structured output is unavailable", "ollama"),
+        ollama_reply(GOOD),
+        ollama_reply(GOOD),
+    )
+    client = ollama(server)
+    assert ask(client).color == "teal"
+    assert "format" in server.requests[0].body
+    assert "format" not in server.requests[1].body
+    # Subsequent requests skip format immediately without another 501 round-trip
+    assert ask(client).color == "teal"
+    assert "format" not in server.requests[2].body
+
+
 def test_an_image_format_error_does_not_switch_off_ollamas_json_mode():
     server = FakeServer(error_reply(400, "unsupported image format: webp", "ollama"))
     with pytest.raises(ImagesNotSupportedError):

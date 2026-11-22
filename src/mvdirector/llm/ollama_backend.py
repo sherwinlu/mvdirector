@@ -28,7 +28,7 @@ _TRUNCATION_MARGIN = 16
 def _is_format_error(text: str) -> bool:
     """True for a rejection of the JSON ``format`` option, not of an image's file format."""
     lowered = text.lower()
-    return "format" in lowered and "image" not in lowered
+    return ("format" in lowered or "structured output" in lowered) and "image" not in lowered
 
 
 class OllamaChat(ChatBackend):
@@ -88,7 +88,11 @@ class OllamaChat(ChatBackend):
         images = has_images(messages)
         words = IMAGE_WORDS if images else ()
         response = self._http.post(self._url, payload, unreachable_hint=hint, no_retry_words=words)
-        if "format" in payload and response.status_code == 400 and _is_format_error(response.text):
+        if (
+            "format" in payload
+            and response.status_code in (400, 501)
+            and _is_format_error(response.text)
+        ):
             log.warning(
                 "Ollama does not accept this JSON format option (%s); continuing with the prompt "
                 "alone. Set llm.json_mode: off to silence this.",

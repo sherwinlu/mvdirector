@@ -19,6 +19,7 @@ import numpy as np
 
 from mvdirector import tuning as tuning_mod
 from mvdirector.audio import lyrics as lyrics_mod
+from mvdirector.audio import stem_pack as stem_pack_mod
 from mvdirector.models import BOTH_VOICES, Analysis, MusicalFeatures, TimeSpan, VocalTurn
 from mvdirector.project import Project
 
@@ -623,6 +624,7 @@ def analyze_musical_features(
     sr: int = ANALYSIS_SR,
     *,
     tempo_bpm: float | None = None,
+    harmonic_mix: np.ndarray | None = None,
 ) -> MusicalFeatures:
     """Measure key/mode, timbral brightness, percussiveness, dynamics, and onset density."""
     if mix.size == 0 or sr <= 0:
@@ -650,8 +652,25 @@ def analyze_musical_features(
     if not active.any():
         active = np.ones_like(frame_rms, dtype=bool)
 
-    power = mag**2
-    chroma = librosa.feature.chroma_stft(S=power[:, active], sr=sr, n_fft=n_fft, tuning=0.0)
+    chroma_source_power = mag**2
+    chroma_active = active
+    if harmonic_mix is not None and harmonic_mix.size >= 256:
+        h_clean = _bounded_mono(harmonic_mix, sr)
+        h_peak = float(np.max(np.abs(h_clean))) if h_clean.size else 0.0
+        if math.isfinite(h_peak) and h_peak >= 1e-6:
+            h_clean = h_clean / np.float32(h_peak)
+            h_mag = np.abs(librosa.stft(h_clean, n_fft=n_fft, hop_length=HOP_LENGTH))
+            if h_mag.size > 0:
+                h_rms = librosa.feature.rms(S=h_mag, frame_length=n_fft)[0]
+                h_peak_rms = float(np.max(h_rms)) if h_rms.size else 0.0
+                if math.isfinite(h_peak_rms) and h_peak_rms > 1e-9:
+                    h_active = h_rms > (h_peak_rms * 0.01)
+                    chroma_source_power = h_mag**2
+                    chroma_active = h_active if h_active.any() else np.ones_like(h_rms, dtype=bool)
+
+    chroma = librosa.feature.chroma_stft(
+        S=chroma_source_power[:, chroma_active], sr=sr, n_fft=n_fft, tuning=0.0
+    )
     key, mode = _estimate_key_mode(np.mean(chroma, axis=1))
 
     centroids = librosa.feature.spectral_centroid(S=mag, sr=sr)[0]
@@ -735,8 +754,31 @@ def analyze_project(project: Project) -> Analysis:
             effective_beats_per_bar,
         )
 
-    # Drums give the cleanest beat grid; fall back to the full mix.
-    beat_source = load_mono(project.input_path(inputs.drums, "drums")) if inputs.drums else mix
+    stems_dir = project.path(inputs.stems_dir) if inputs.stems_dir.strip() else None
+    discovered_stems = (
+        stem_pack_mod.discover_stems(stems_dir)
+        if stems_dir is not None and stems_dir != project.root
+        else []
+    )
+    if discovered_stems:
+        log.info(
+            "Discovered %d stem(s) in %s: %s",
+            len(discovered_stems),
+            inputs.stems_dir,
+            ", ".join(f"{s.name} ({s.role})" for s in discovered_stems),
+        )
+
+    # Drums/percussion stems give the cleanest beat grid; fall back to the full mix.
+    if inputs.drums:
+        beat_source = load_mono(project.input_path(inputs.drums, "drums"))
+    else:
+        rhythm_stems = stem_pack_mod.select_rhythm_stems(discovered_stems)
+        rhythm_audio = (
+            stem_pack_mod.load_stems_mono_sum(rhythm_stems, ANALYSIS_SR, loader=load_mono)
+            if rhythm_stems
+            else None
+        )
+        beat_source = rhythm_audio if rhythm_audio is not None else mix
     tempo, beats = detect_beats(beat_source)
     bars = bars_from_beats(beats, effective_beats_per_bar)
     log.info("Tempo %.1f BPM, %d beats, %d bars, %.1fs", tempo, len(beats), len(bars), duration)
@@ -765,9 +807,32 @@ def analyze_project(project: Project) -> Analysis:
             len({t.voice for t in vocal_turns}),
         )
 
-    musical_features = analyze_musical_features(mix, ANALYSIS_SR, tempo_bpm=tempo)
+    harmonic_stems = stem_pack_mod.select_harmonic_stems(discovered_stems)
+    harmonic_audio = (
+        stem_pack_mod.load_stems_mono_sum(harmonic_stems, ANALYSIS_SR, loader=load_mono)
+        if harmonic_stems
+        else None
+    )
+    musical_features = analyze_musical_features(
+        mix, ANALYSIS_SR, tempo_bpm=tempo, harmonic_mix=harmonic_audio
+    )
     if musical_features.summary:
         log.info("Musical character: %s", musical_features.summary)
+
+    stem_arrangement = (
+        stem_pack_mod.analyze_stems(
+            discovered_stems,
+            project_root=project.root,
+            bars=bars,
+            duration=duration,
+            sr=ANALYSIS_SR,
+            loader=load_mono,
+        )
+        if discovered_stems
+        else None
+    )
+    if stem_arrangement and stem_arrangement.summary:
+        log.info("Stem arrangement: %s", stem_arrangement.summary)
 
     analysis = Analysis(
         duration=round(duration, 3),
@@ -779,6 +844,7 @@ def analyze_project(project: Project) -> Analysis:
         vocal_turns=vocal_turns,
         lyric_lines=lines,
         musical_features=musical_features,
+        stems=stem_arrangement,
     )
     profile = tuning_mod.profile_track(
         lyrics_text=lyrics_for_tuning,

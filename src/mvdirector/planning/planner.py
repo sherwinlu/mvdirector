@@ -29,6 +29,7 @@ from mvdirector.audio.lyrics import (
     parse_lyrics,
     section_singers,
 )
+from mvdirector.audio.stem_pack import active_stems_in_span
 from mvdirector.config import ProjectConfig
 from mvdirector.errors import LLMError
 from mvdirector.llm import LLMClient, complete_json_with_optional_audio, text_block
@@ -390,6 +391,8 @@ def _write_bible(
                 f"MUSICAL ANALYSIS:\n~{analysis.tempo_bpm:.0f} BPM, "
                 f"duration {analysis.duration:.0f}s"
             )
+        if analysis.stems and analysis.stems.summary:
+            parts.append(f"ARRANGEMENT & INSTRUMENTATION:\n{analysis.stems.summary}")
     parts.append(f"SONG SECTIONS, IN ORDER:\n{section_list}")
     parts.append(f"LYRICS:\n{lyrics_text}")
     try:
@@ -1411,10 +1414,15 @@ def _ask_for_batch(
                 sec_chars = _characters_in_text(s.section, manifest.characters)
                 if sec_chars:
                     singer_hint = f"vocal='solo' singer={sec_chars[0]!r} "
+        stem_hint = ""
+        if analysis is not None and analysis.stems is not None:
+            active_stems = active_stems_in_span(analysis.stems, s.start, s.end)
+            if active_stems:
+                stem_hint = f" stems=[{', '.join(active_stems)}]"
         shot_lines.append(
             f"- id={s.id} section={s.section or '(instrumental lead-in)'!r} {singer_hint}"
             f"at={_clock(s.start)} ({s.start / total:.0%} through the song) type={s.type.value} "
-            f"duration={s.duration:.1f}s intensity={s.intensity:.2f} {pace_note} "
+            f"duration={s.duration:.1f}s intensity={s.intensity:.2f} {pace_note}{stem_hint} "
             f"lyrics={s.lyrics or '(instrumental)'!r}"
         )
     lines.append("SHOTS\n" + "\n".join(shot_lines))

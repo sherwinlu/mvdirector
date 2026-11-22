@@ -133,27 +133,34 @@ def init(
 
 @app.command()
 def prepare(
-    audio: Path | None = typer.Argument(
+    audio: list[Path] | None = typer.Argument(
         None,
-        help="Path to an .mp3 or .wav file (defaults to inputs/mix.wav or inputs/mix.mp3).",
+        help=(
+            "Audio file(s), stem folder, or Suno stem .zip archive(s) "
+            "(defaults to inputs/mix.wav, inputs/mix.mp3, or stems dropped in inputs/stems/)."
+        ),
     ),
     overwrite: bool = typer.Option(
         False,
         "--overwrite",
-        help="Re-separate stems and replace existing mix, lyrics.txt, and style.md files.",
+        help="Re-extract/re-separate stems and replace existing mix, lyrics.txt, and style.md.",
     ),
     project_dir: Path = ProjectDir,
 ) -> None:
-    """Build mix, vocal stem, lyrics.txt, and style.md from a single .mp3 or .wav file."""
+    """Build mix, vocal stem, lyrics.txt, and style.md from audio or Suno/DAW stem packs."""
     try:
-        result = api.prepare(project_dir, audio=audio, overwrite=overwrite)
+        audio_arg: Path | list[Path] | None = (
+            None if not audio else (audio[0] if len(audio) == 1 else audio)
+        )
+        result = api.prepare(project_dir, audio=audio_arg, overwrite=overwrite)
     except MVDError as exc:
         raise _fail(exc) from exc
     mode = "LLM" if result.inferred_with_llm else "fallback (llm disabled)"
+    stems_note = f", {result.stems_ingested} stems" if result.stems_ingested else ""
     typer.echo(
         f"Prepared inputs from {result.mix_path} ({result.duration:.1f}s, "
         f"{result.tempo_bpm:.0f} BPM, {result.vocal_windows} vocal windows, "
-        f"{result.transcribed_words} transcribed words, inferred via {mode}):"
+        f"{result.transcribed_words} transcribed words{stems_note}, inferred via {mode}):"
     )
     written = [result.mix_path, result.vocals_path]
     if result.drums_path is not None:

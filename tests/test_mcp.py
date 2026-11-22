@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from typer.testing import CliRunner
 
 from mvdirector import cli
@@ -397,6 +399,13 @@ def test_init_project_via_mcp_tool(tmp_path: Path):
 
 
 def test_lock_reference_and_async_generate(project, analysis, sample_png):
+    cfg_path = project.root / "project.yaml"
+    cfg_raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    cfg_raw.setdefault("llm", {})["enabled"] = False
+    cfg_raw.setdefault("qc", {})["vision_enabled"] = False
+    cfg_raw["qc"]["on_missing_dependency"] = "skip"
+    cfg_path.write_text(yaml.safe_dump(cfg_raw), encoding="utf-8")
+
     project.config.llm.enabled = False
     manifest = build_manifest(project.config, analysis, "lyrics", "style", llm=None)
     project.save_manifest(manifest)
@@ -469,15 +478,18 @@ def test_job_manager_cooperative_cancel():
 
 def test_cli_mcp_help_and_non_loopback_guard():
     runner = CliRunner()
-    help_res = runner.invoke(cli.app, ["mcp", "--help"])
+    help_res = runner.invoke(cli.app, ["mcp", "--help"], env={"NO_COLOR": "1", "TERM": "dumb"})
     assert help_res.exit_code == 0
-    assert "--http" in help_res.output
-    assert "--workspace" in help_res.output
+    plain_help = re.sub(r"\x1b\[[0-9;]*m", "", help_res.output)
+    assert "--http" in plain_help
+    assert "--workspace" in plain_help
 
     # Refuses non-loopback HTTP bind without --token
-    bad = runner.invoke(cli.app, ["mcp", "--http", "--host", "0.0.0.0"])
+    bad = runner.invoke(
+        cli.app, ["mcp", "--http", "--host", "0.0.0.0"], env={"NO_COLOR": "1", "TERM": "dumb"}
+    )
     assert bad.exit_code == 1
-    assert "bearer token" in bad.output.lower()
+    assert "bearer token" in re.sub(r"\x1b\[[0-9;]*m", "", bad.output).lower()
 
 
 # ------------------------------------------------------------------ QA & security hardening

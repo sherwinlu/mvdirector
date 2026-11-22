@@ -445,6 +445,19 @@ def _conform_unit_clip(
     media.run(cmd)
 
 
+def loop_xfade_transition(loop_blend: str) -> str:
+    """FFmpeg ``xfade`` transition options for a chapter's loop-unit boundaries.
+
+    ``smoothstep`` is a Hermite S-curve (``3P^2 - 2P^3``) dissolve (inspired by
+    atomtanstudio/sound-and-vision ``server/sv/video/loops.py``). In a custom ``xfade``
+    expression ``P`` falls from 1 at the start of the transition to 0 at its end, so the
+    outgoing input ``A`` takes ``smoothstep(P)`` and the incoming input ``B`` takes the rest.
+    """
+    if loop_blend == "smoothstep":
+        return "transition=custom:expr='A*(3*P*P-2*P*P*P)+B*(1-(3*P*P-2*P*P*P))'"
+    return "transition=fade"
+
+
 def _build_seamless_loop(
     sources: Sequence[LoopUnitSource],
     loop_dst: Path,
@@ -513,13 +526,7 @@ def _build_seamless_loop(
     )
 
     prev_label = "s0"
-    # Optional Hermite smoothstep S-curve (3P^2 - 2P^3) forward-only loop blend
-    # (inspired by atomtanstudio/sound-and-vision server/sv/video/loops.py).
-    xfade_mode = (
-        "transition=custom:expr='A*(1-(3*P*P-2*P*P*P))+B*(3*P*P-2*P*P*P)'"
-        if mix_cfg.loop_blend == "smoothstep"
-        else "transition=fade"
-    )
+    xfade_mode = loop_xfade_transition(mix_cfg.loop_blend)
     for step in range(1, k + 1):
         out_label = "vloop" if step == k else f"xf{step}"
         offset_sec = ((step - 1) * stride_frames) / fps

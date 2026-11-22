@@ -891,28 +891,31 @@ def analyze_project(project: Project) -> Analysis:
     if stem_arrangement and stem_arrangement.summary:
         log.info("Stem arrangement: %s", stem_arrangement.summary)
 
-    bqa_report = broadcast_qa_mod.analyze_broadcast_audio(
-        mix_path,
-        drum_onset_times=beats,
-    )
-    broadcast_qa_model = BroadcastAudioQA(
-        integrated_lufs=bqa_report.integrated_lufs,
-        true_peak_dbtp=bqa_report.true_peak_dbtp,
-        splice_clicks=bqa_report.splice_clicks,
-    )
-    if bqa_report.true_peak_dbtp > -0.5 or bqa_report.splice_clicks:
-        log.warning(
-            "Broadcast audio QA: %.1f LUFS, %.2f dBTP, %d splice click(s)",
-            bqa_report.integrated_lufs,
-            bqa_report.true_peak_dbtp,
-            len(bqa_report.splice_clicks),
-        )
+    # Diagnostic only: a measurement failure must not stop the analysis (assembly treats it alike).
+    broadcast_qa_model: BroadcastAudioQA | None = None
+    try:
+        bqa_report = broadcast_qa_mod.analyze_broadcast_audio(mix_path, drum_onset_times=beats)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Skipped broadcast audio QA on %s: %s", mix_path.name, exc)
     else:
-        log.info(
-            "Broadcast audio QA: %.1f LUFS, %.2f dBTP (clean)",
-            bqa_report.integrated_lufs,
-            bqa_report.true_peak_dbtp,
+        broadcast_qa_model = BroadcastAudioQA(
+            integrated_lufs=bqa_report.integrated_lufs,
+            true_peak_dbtp=bqa_report.true_peak_dbtp,
+            splice_clicks=bqa_report.splice_clicks,
         )
+        if bqa_report.true_peak_dbtp > -0.5 or bqa_report.splice_clicks:
+            log.warning(
+                "Broadcast audio QA: %.1f LUFS, %.2f dBTP, %d splice click(s)",
+                bqa_report.integrated_lufs,
+                bqa_report.true_peak_dbtp,
+                len(bqa_report.splice_clicks),
+            )
+        else:
+            log.info(
+                "Broadcast audio QA: %.1f LUFS, %.2f dBTP (clean)",
+                bqa_report.integrated_lufs,
+                bqa_report.true_peak_dbtp,
+            )
 
     analysis = Analysis(
         duration=round(duration, 3),

@@ -21,10 +21,12 @@ if TYPE_CHECKING:
     from mvdirector.config import VideoConfig
 
 # Still-photography tokens that can cause I2V/FLF2V video models (e.g. LTX) to freeze or crossfade.
+# A bare "photograph" is deliberately absent: it is also an ordinary prop noun ("she studies a
+# faded photograph"), and deleting it would corrupt the action description.
 # Credit: GeekatplayStudio/ComfyUI-Music-to-Video (nodes.py: STILL_WORDS).
 _STILL_WORDS_RE = re.compile(
-    r"\b(?:film\s+still|still\s+frame|still\s+photo(?:graph)?|photograph|photographic\s+still|"
-    r"static\s+photo|freeze\s+frame)\b[:,;]?\s*",
+    r"\b(?:film\s+still(?:\s+photo(?:graph)?)?|still\s+frame|still\s+photo(?:graph)?|"
+    r"photographic\s+still|static\s+photo|freeze\s+frame)\b[:,;]?\s*",
     re.IGNORECASE,
 )
 

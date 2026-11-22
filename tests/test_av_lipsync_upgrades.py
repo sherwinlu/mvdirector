@@ -19,6 +19,8 @@ from PIL import Image
 
 from mvdirector import assemble, media, mix_assemble
 from mvdirector.audio import alignment_qa, broadcast_qa, foley
+from mvdirector.audio import lyrics as lyrics_mod
+from mvdirector.audio.analysis import analyze_project
 from mvdirector.audio.lyrics import (
     Word,
     _drain_segments_with_timeout,
@@ -449,6 +451,9 @@ def test_blind_observer_vision_judge_splits_image_and_spec():
     verdict = judge.judge([frame], shot, manifest, AssetKind.STILL)
     assert verdict.spec_match == 0.95
     assert len(calls) == 2
+    # Both passes carry the overlaid-typography rule (hallucinated title cards / credits).
+    assert "title cards" in calls[0]["system"] and "title cards" in calls[1]["system"]
+    assert "artifact_free <= 0.2" in calls[1]["system"]
     # Pass 1 (Blind Observer) sees image, NEVER sees target exclusions ("no cape").
     p1_text = " ".join(b.get("text", "") for b in calls[0]["content"] if b.get("type") == "text")
     assert any(b.get("type") == "image" for b in calls[0]["content"])
@@ -678,6 +683,7 @@ def test_assemble_sync_delay_xfade_grade_and_mix_smoothstep(
     cfg.video.color_grade = "portra_dusk"
     cfg.video.film_grain = 2.0
     cfg.video.strip_metadata = True
+    cfg.video.sync_delay_compensation = True  # opt-in
     proj = Project(project.root, cfg)
 
     s1 = Shot(
@@ -747,6 +753,9 @@ def test_assemble_sync_delay_xfade_grade_and_mix_smoothstep(
     assert plans[0].sync_delay == pytest.approx(0.12, abs=1e-4)
     assert plans[1].head_handle == 0.0
     assert plans[1].drop_first_frame is True
+    # Off by default: a measured lag is recorded but never moves the in-point unasked.
+    assert project.config.video.sync_delay_compensation is False
+    assert assemble.plan_clips(project, manifest, force=True)[0].sync_delay == 0.0
 
     # Legacy CONTINUE manifest with non-zero head_handle preserves head_handle & avoids desync.
     s2_legacy = s2.model_copy(
@@ -1299,3 +1308,87 @@ def test_pr_review_wave_chaining_vae_mutes_blind_refs_streaming_bqa_and_auto_wir
         zero_tail_proj, Manifest(title="Z", duration=2.0, fps=24, shots=[z1, z2]), z_out, force=True
     )
     assert media.probe(z_out).duration == pytest.approx(2.0, abs=0.12)
+
+
+# ------------------------------------------------------------------ Review regression tests
+
+
+def test_mix_smoothstep_loop_blend_dissolves_from_outgoing_to_incoming(tmp_path: Path):
+    red = make_video(tmp_path / "red.mp4", duration=2.0, color="red")
+    blue = make_video(tmp_path / "blue.mp4", duration=2.0, color="blue")
+    assert mix_assemble.loop_xfade_transition("xfade") == "transition=fade"
+    out = tmp_path / "blend.mp4"
+    transition = mix_assemble.loop_xfade_transition("smoothstep")
+    media.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-v",
+            "error",
+            "-i",
+            str(red),
+            "-i",
+            str(blue),
+            "-filter_complex",
+            f"[0:v][1:v]xfade={transition}:duration=1:offset=1",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            str(out),
+        ]
+    )
+    frames = media.extract_frames(out, 32)
+    red_minus_blue = [float(f[..., 0].mean()) - float(f[..., 2].mean()) for f in frames]
+    # 24 fps: frames 0-23 are red, the 1 s S-curve dissolve spans frames 24-47, then blue. The
+    # dissolve must open on the outgoing clip and close on the incoming one (no pop at either end).
+    assert red_minus_blue[24] > 150
+    assert red_minus_blue[47] < -150
+    samples = [red_minus_blue[i] for i in (24, 30, 36, 42, 47)]
+    assert samples == sorted(samples, reverse=True)
+
+
+@pytest.mark.parametrize(("name", "codec"), [("hit.mp3", "libmp3lame"), ("hit.m4a", "aac")])
+def test_write_leveled_foley_accepts_compressed_sfx(tmp_path: Path, name: str, codec: str):
+    src = tmp_path / name
+    media.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=0.5",
+            "-c:a",
+            codec,
+            str(src),
+        ]
+    )
+    dst = foley.write_leveled_foley(src, tmp_path / "leveled.wav")
+    assert sf.info(str(dst)).subtype == "PCM_24"
+    leveled, _ = sf.read(str(dst))
+    assert 0.01 < float(np.max(np.abs(leveled))) <= 10 ** (-6.0 / 20.0) + 1e-3
+
+
+def test_strip_still_words_keeps_photograph_props():
+    prop = "She studies a faded photograph of him as the camera pushes in."
+    assert prompts.strip_still_words(prop) == prop
+    assert prompts.strip_still_words("Film still photograph, slow push-in.") == "slow push-in."
+    assert prompts.strip_still_words("Freeze frame: rain streaks down.") == "rain streaks down."
+
+
+def test_analyze_project_survives_broadcast_qa_failure(
+    project: Project, monkeypatch: pytest.MonkeyPatch
+):
+    def _boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("decoder exploded")
+
+    monkeypatch.setattr(broadcast_qa, "analyze_broadcast_audio", _boom)
+    monkeypatch.setattr(lyrics_mod, "load_or_transcribe_words", lambda _project: [])
+    analysis = analyze_project(project)
+    assert analysis.broadcast_qa is None
+    assert analysis.beats  # the core analysis still completed

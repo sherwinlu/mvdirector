@@ -287,17 +287,32 @@ def build_ducked_audio_mix(
     return output_path
 
 
+def _read_audio(src: Path) -> tuple[np.ndarray, int]:
+    """Decode ``src`` to float64 ``(N, C)`` samples, via ffmpeg for formats libsndfile lacks."""
+    try:
+        samples, sr = sf.read(str(src), dtype="float64", always_2d=True)
+        return samples, int(sr)
+    except sf.LibsndfileError:
+        with tempfile.TemporaryDirectory(prefix="mvd_sfx_") as tmp:
+            wav_path = media.transcode_to_wav(src, Path(tmp) / "sfx.wav")
+            samples, sr = sf.read(str(wav_path), dtype="float64", always_2d=True)
+            return samples, int(sr)
+
+
 def write_leveled_foley(src: Path, dst: Path, *, target_db: float = -26.0) -> Path:
-    """Level ``src`` by active RMS and write atomically to ``dst``."""
-    info = sf.info(str(src))
-    samples, sr = sf.read(str(src), dtype="float64", always_2d=True)
+    """Level ``src`` by active RMS and write it atomically to ``dst`` as 24-bit PCM WAV.
+
+    Accepts any format ffmpeg can decode (MP3, Opus, AAC/M4A, ...), not only WAV/FLAC: the
+    output is always PCM because compressed source subtypes are not valid inside a WAV file.
+    """
+    samples, sr = _read_audio(src)
     leveled = level_active_rms(samples, sr, target_db=target_db)
     dst.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=".mvd_lvl_", suffix=".wav", dir=dst.parent)
     os.close(fd)
     tmp_path = Path(tmp_name)
     try:
-        sf.write(str(tmp_path), leveled, sr, subtype=info.subtype or "PCM_16")
+        sf.write(str(tmp_path), leveled, sr, subtype="PCM_24")
         os.replace(tmp_path, dst)
     except BaseException:
         tmp_path.unlink(missing_ok=True)

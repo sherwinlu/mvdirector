@@ -85,8 +85,11 @@ Describe concretely:
 - setting: visible location, architecture, lighting sources, and mood.
 - props_and_objects: notable foreground/midground objects and their physical state (e.g. lit vs
   unlit, intact vs broken, hands on a clock).
-- artifacts_or_text: any visible garbled text, subtitles, watermarks, warped faces/hands,
-  unnatural body compression, or morphing across frames (empty list if none)."""
+- artifacts_or_text: any visible garbled text, warped faces/hands, unnatural body compression,
+  or morphing across frames, plus any typography overlaid on the picture (title cards, opening
+  credits, subtitles, captions, logos, watermarks) even when it is clean and legible. Say for
+  each piece of text whether it is overlaid on the picture or physically part of the scene (a
+  sign, a book cover, a clothing print). Empty list if none."""
 
 _BLIND_AUDITOR_SYSTEM = """You are a strict continuity auditor comparing neutral visual
 observations (produced by a blind observer who never saw the requirements) against a shot
@@ -97,7 +100,10 @@ Score from 0 to 1:
   explicit exclusions ('Must NOT appear') satisfy the specification. If a forbidden element was
   observed, or a required element clearly contradicted the observation, score <= 0.2.
 - artifact_free: whether observed anatomy, proportions, faces, hands, and absence of garbled
-  text/watermarks/morphing are clean.
+  text/watermarks/morphing are clean. Any observed overlaid typography (title cards, opening
+  credits, subtitles, captions, logos, watermarks), even clean and legible, MUST score
+  artifact_free <= 0.2 unless the specification explicitly asks for text; text that physically
+  belongs to the scene is penalized only when it is garbled.
 - character_match: whether observed appearance, hair, pinned details, and wardrobe match the
   character specification (use null when the spec says no singer should be visible).
 

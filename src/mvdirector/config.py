@@ -314,10 +314,14 @@ class VideoConfig(_Section):
         ),
     )
     sync_delay_compensation: bool = Field(
-        default=True,
+        default=False,
         description=(
             "Apply measured per-take lip-sync lag (clamped within handles) to clip in-points at "
-            "assembly (inspired by VisualFrisson/ComfyUI-OneShotMV)."
+            "assembly (inspired by VisualFrisson/ComfyUI-OneShotMV). Opt-in: the default "
+            "MediaPipe lag estimate is noisy on sung vocals, and a wrong shift of up to a handle "
+            "length (0.25 s by default) is clearly visible. Enable it once lag estimates are "
+            "trustworthy, e.g. qc.lipsync_backend: stable_syncnet with a "
+            "qc.video.lipsync_min_confidence floor."
         ),
     )
     phrase_dp_slicing: bool = Field(

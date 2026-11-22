@@ -282,9 +282,15 @@ def _request_llm_themes(
         for ch in batch:
             tags = ", ".join([*ch.genre_tags, *ch.mood_tags]) or "electronic / ambient"
             hint = f" | user_theme_hint={ch.theme_prompt!r}" if ch.theme_prompt else ""
+            lyric_note = ""
+            if ch.lyrics:
+                excerpt = ch.lyrics[:280].rstrip()
+                if len(ch.lyrics) > 280:
+                    excerpt += "..."
+                lyric_note = f" | lyrics_excerpt={excerpt!r}"
             chapter_lines.append(
                 f"- id={ch.id} | time={ch.start:.0f}-{ch.end:.0f}s | title={ch.title!r} | "
-                f"bpm={ch.bpm:.0f} | energy={ch.energy:.2f} | tags={tags}{hint}"
+                f"bpm={ch.bpm:.0f} | energy={ch.energy:.2f} | tags={tags}{hint}{lyric_note}"
             )
         prompt_parts = [
             f"GLOBAL STYLE BRIEF:\n{style_text.strip() or 'Cinematic atmospheric electronic mix.'}",

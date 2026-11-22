@@ -130,6 +130,7 @@ class AnalyzedChapter(StrictModel):
     genre_tags: list[str] = Field(default_factory=list)
     theme_prompt: str | None = None
     clip_prompts: list[str] = Field(default_factory=list)
+    lyrics: str | None = None
 
     @field_validator("id")
     @classmethod

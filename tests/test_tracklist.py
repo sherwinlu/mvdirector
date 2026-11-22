@@ -50,6 +50,7 @@ def test_load_weaveshift_json_and_yaml_aliases(tmp_path: Path) -> None:
                 "mood": "hypnotic, deep",
                 "genre": ["dub techno"],
                 "visual_prompt": "Misty concrete vault",
+                "lyric_excerpt": "Neon rain falls across the glass cathedral",
                 "lufs": -9.4,
                 "transition": {"type": "eq_swap", "bars": 8},
             },
@@ -74,6 +75,7 @@ def test_load_weaveshift_json_and_yaml_aliases(tmp_path: Path) -> None:
     assert t0.mood_tags == ["hypnotic", "deep"]
     assert t0.genre_tags == ["dub techno"]
     assert t0.theme_prompt == "Misty concrete vault"
+    assert t0.lyrics == "Neon rain falls across the glass cathedral"
     assert t1.start == 252.5 and t1.bpm == 128.0 and t1.mood_tags == ["kinetic", "bright"]
 
 

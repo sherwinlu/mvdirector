@@ -89,6 +89,18 @@
           },
           "title": "Clip Prompts",
           "type": "array"
+        },
+        "lyrics": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lyrics"
         }
       },
       "required": [

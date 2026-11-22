@@ -43,9 +43,11 @@ class _FakeProvider:
 class _ScriptedMixLLM:
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.prompts: list[str] = []
 
     def complete_json(self, *, system: str, content, schema):  # noqa: ANN001
         self.calls.append(system)
+        self.prompts.append(" ".join(getattr(block, "text", str(block)) for block in content))
         return schema.model_validate(
             {
                 "style": "Anamorphic 35mm atmospheric architectural cinema",
@@ -105,6 +107,7 @@ def _make_mix_project(
                             "title": "Deep Opening",
                             "artist": "Klang",
                             "mood_tags": ["deep", "misty"],
+                            "lyrics": "Drifting through obsidian water under silver skylights",
                         },
                         {
                             "start": "00:16",
@@ -179,6 +182,8 @@ def test_mix_planner_llm_and_compose_still_prompt_apply_distinct_chapter_palette
     manifest = build_mix_manifest(project.config, analysis, "Dark architectural techno", llm)  # type: ignore[arg-type]
 
     assert len(llm.calls) == 1  # Batched into a single LLM request
+    assert "lyrics_excerpt=" in llm.prompts[0]
+    assert "obsidian water under silver skylights" in llm.prompts[0]
     assert manifest.mode is ProjectMode.MIX
     assert len(manifest.chapters) == 2
     assert len(manifest.shots) == 4  # 2 chapters x 2 loop units

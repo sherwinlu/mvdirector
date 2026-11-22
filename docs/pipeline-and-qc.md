@@ -55,10 +55,11 @@ Pass `--overwrite` to regenerate existing `inputs/lyrics.txt` and `inputs/style.
 
 ### 1. The Visual Bible (one call)
 
-Given your style brief, lyrics, and song sections in order, the LLM returns:
+Given your style brief, lyrics, song sections in order, and acoustic `Analysis.musical_features` (key/mode, spectral brightness, harmonic vs. percussive texture, dynamic range, and onset density — plus a compact MP3 of `inputs/mix.wav` automatically attached when using an audio-capable backend like Gemini), the LLM returns:
 
 | Field | What it is | Where it is used |
 |---|---|---|
+| `interpretation` | Director's reading of the song (`SongInterpretation`: `meaning`, `tone`, `music_feel`, recurring `visual_motifs`, and per-section `section_beats` with emotion, visual beat, and camera energy) | Threads thematic motifs and each section's emotional/narrative beat into every shot-direction batch |
 | `concept` | The idea tying the video together | Shown to the LLM on every shot call |
 | `characters` | Permanent cast appearance (`appearance`, `invariants`, `parent_character`, `wardrobe`, `references`); solo projects use one entry (`Manifest.character` aliases the primary entry) | Added to every singer still prompt; checked by the vision judge |
 | `wardrobe` | Costume states per character in order of appearance, each with an id (`cape`, `bare`) and a full description of fabric, drape and what is absent | Tracked per character (`wardrobe` + `character_wardrobes`) |
@@ -69,7 +70,7 @@ Given your style brief, lyrics, and song sections in order, the LLM returns:
 
 ### 2. Shot Direction (batched calls)
 
-For each shot the LLM receives its song section, time, position in the song, type, duration, intensity, pace label (`calm`, `moderate` or `high`, plus the shift from the previous shot across batch boundaries), and lyrics, along with the concept, rules, wardrobe states, sets, and the last four shots already directed so batches stay consistent. It returns the framing, set, wardrobe state, `still_prompt`, and `motion_prompt`.
+For each shot the LLM receives its song section (and matching `SectionBeat` from `interpretation`), time, position in the song, type, duration, intensity, pace label (`calm`, `moderate` or `high`, plus the shift from the previous shot across batch boundaries), and lyrics, along with the concept, `visual_motifs`, rules, wardrobe states, sets, and the last four shots already directed so batches stay consistent. It returns the framing, set, wardrobe state, `still_prompt`, and `motion_prompt`.
 
 The shot-direction prompt also steers the creative arc: a section arc (restrained first verse, escalation at the first chorus, a second verse that is not a repeat of the first, a bridge that breaks the pattern, a final-chorus payoff), the four pace levers (cut speed, movement in the frame, shot scale, and camera movement), off-lens looks in verses with direct eye contact on the pre-chorus build and chorus hook, at least three looks, a visible change every 2 to 4 seconds without a camera move on singing shots, and a striking frame every 30 seconds. These steer the model rather than being hard-enforced.
 
@@ -212,6 +213,6 @@ In `mvd review` (or with `mvd approve` / `mvd reject --note "..."`), you can app
 
 For 30-to-90+ minute continuous DJ or background mixes, initialize or configure the project in mix mode (`mvd init --mode mix <dir>` or `mode: mix` in `project.yaml`):
 
-- **Tracklist & cue ingestion (`inputs.tracklist` or `--tracklist`):** Supports JSON/YAML (including WeaveShift setlist exports), `.cue` sheets, and plain-text timestamp lists (`00:00 Artist - Title`), or falls back to `mix.default_segment_seconds` (240s) chapters snapped to low-energy mix dips.
+- **Tracklist & cue ingestion (`inputs.tracklist` or `--tracklist`):** Supports JSON/YAML (including WeaveShift setlist exports), `.cue` sheets, and plain-text timestamp lists (`00:00 Artist - Title`), or falls back to `mix.default_segment_seconds` (240s) chapters snapped to low-energy mix dips. JSON/YAML track entries may also include an optional `lyrics` (or `lyric_excerpt` / `lyrics_excerpt`) field to ground each chapter's visual theme and loop prompts in the track's imagery.
 - **Windowed analysis & per-chapter visual themes:** `mvd analyze` measures per-chapter BPM, downbeat offset, and normalized energy in bounded memory without requiring vocal stems or lyrics. `mvd plan` assigns 1 uninhabited visual environment (`MixChapter`) and `mix.clips_per_segment` (2–3) loopable `broll` units per chapter (`t2i` + `i2v` when `mix.visual_source: clips`, or `t2i` hero stills with camera drift when `mix.visual_source: stills`).
 - **Seamless circular loops, HUD, & incremental segment caching:** `mvd assemble` crossfades each chapter's loop units into a circular cycle (`mix.xfade_seconds`), applies optional BPM/downbeat-synced subtle visual pulse (`mix.beat_pulse`), composites an anti-aliased track title/watermark/spectrum HUD card (`mix.hud`), and caches each rendered chapter under `assets/segments/<chapter_id>.mp4` (+ `.mp4.json` input stamp). Re-running `mvd assemble` (or targeting `--chapter ch03`) stream-copies unchanged chapters in seconds, embeds MP4 chapter markers, and writes a YouTube-ready `<output>.chapters.txt` sidecar.

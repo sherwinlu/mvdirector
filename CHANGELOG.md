@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/). While the version is 0.x, a minor release may still change the public API; every such change is listed here.
 
+## [0.6.0] - 2026-11-21
+
+### Added
+- **Song interpretation & acoustic musical-style analysis:**
+  - `mvdirector.audio.analysis.analyze_musical_features` extracts musical key/mode, spectral brightness, harmonic vs. percussive texture, dynamic range, and onset density into `Analysis.musical_features` (`MusicalFeatures`), enriching `mvd prepare`, `mvd analyze`, and `mvd plan`.
+  - `VisualBible.interpretation` (`SongInterpretation` + `SectionBeat`) records the director's reading of the song's meaning, tone, musical feel, recurring visual motifs, and per-section emotional/narrative/camera arc (`VisualBible.find_section_beat`), threading section beats and motifs into every shot-direction batch.
+  - Optional multimodal audio attachment (`audio_block`, `maybe_audio_block`, `complete_json_with_optional_audio`, and Gemini `inlineData` audio support): audio-capable backends receive a compact mono MP3 of `inputs/mix.wav` during `mvd prepare` and `mvd plan`, falling back automatically to text-only prompts with `musical_features` on non-audio providers.
+- **Per-chapter lyrics excerpts in Long-Form Mix Mode:**
+  - Tracklist entries (`TrackEntryInput`, `ResolvedTrack`, `AnalyzedChapter`) now accept an optional `lyrics` field (aliases `lyric_excerpt`, `lyrics_excerpt`); `mix_planner` sanitizes and forwards excerpts into chapter theme planning so generated environments and loop prompts draw concrete imagery from each track's lyrics.
+
+### Changed
+- Removed RunPod-specific references and generalized cloud GPU setup (`docker/Dockerfile.runpod` → `docker/Dockerfile.allinone`, `docker/runpod-entrypoint.sh` → `docker/allinone-entrypoint.sh`, plus updated docs, config comments, and issue templates).
+- Updated `schemas/analysis.schema.json` and `schemas/manifest.schema.json` with `MusicalFeatures`, `SongInterpretation`, `SectionBeat`, and `AnalyzedChapter.lyrics`.
+
+### Fixed
+- `OllamaChat` now falls back to prompt-based JSON extraction on HTTP `501` structured-output rejections (in addition to HTTP `400`).
+
 ## [0.5.0] - 2026-11-20
 
 ### Added

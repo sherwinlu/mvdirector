@@ -104,6 +104,8 @@ llm: {provider: openai_compatible, base_url: "http://localhost:1234/v1", model: 
 
 **The model should accept images.** The vision checks send frames and the reference sheet. With a text-only model, set `qc.vision_enabled: false`. Planning and prompt rewrites still work, but you lose the checks that catch a wrong costume, a mirrored mark and malformed hands. If you forget, the app turns the vision checks off after the server rejects the first image, with one warning and a note in each affected check, instead of failing every attempt.
 
+**Audio-capable models (optional).** Backends that accept audio input (such as `gemini`) automatically receive a compact mono MP3 of `inputs/mix.wav` during `mvd prepare` and `mvd plan` to deepen musical-style and song-meaning interpretation. Other providers automatically fall back to text-only prompts enriched with the extracted acoustic `musical_features` summary.
+
 ### Local Models
 
 - **Verified local setup (Ollama), the default.** Planning, vision checks and prompt rewrites ran on a local Ollama model with no API key. `llm.timeout_seconds` defaults to 600 so a slow or busy GPU does not time out:

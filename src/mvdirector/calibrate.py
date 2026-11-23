@@ -25,6 +25,7 @@ import numpy as np
 
 from mvdirector.errors import ConfigError
 from mvdirector.models import AssetKind, Manifest, ReviewDecision
+from mvdirector.store import path_is_file
 
 # Metric name -> (config key, True when a higher value is better).
 METRIC_CONFIG: dict[str, tuple[str, bool]] = {
@@ -90,7 +91,7 @@ def load_labels(path: Path) -> list[Label]:
     ``kind`` is ``still`` or ``video``. ``attempt`` may be empty for the selected attempt.
     ``label`` is ``good`` or ``bad`` (``1``/``0`` and ``pass``/``fail`` are accepted).
     """
-    if not path.is_file():
+    if not path_is_file(path):
         raise ConfigError(f"Labels file not found: {path}")
     try:
         text = path.read_text(encoding="utf-8-sig")

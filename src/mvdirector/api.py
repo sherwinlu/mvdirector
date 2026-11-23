@@ -68,6 +68,7 @@ from mvdirector.project import Project
 from mvdirector.qc.factory import build_quality_gates
 from mvdirector.retry import RetryPolicy
 from mvdirector.review import policy as review_policy
+from mvdirector.store import path_is_file
 
 __all__ = [
     # types
@@ -174,7 +175,7 @@ def _with_mode(project: Project, mode: ProjectMode | None) -> Project:
 def _resolve_tracklist_arg(project: Project, tracklist: Path | None) -> Path | None:
     if tracklist is None:
         return None
-    if tracklist.is_file():
+    if path_is_file(tracklist):
         return tracklist
     if not tracklist.is_absolute():
         return project.path(tracklist)

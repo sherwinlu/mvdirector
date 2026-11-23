@@ -21,6 +21,7 @@ from mvdirector.store import (
     LocalStateStore,
     StateStore,
     atomic_write,
+    path_is_file,
 )
 
 _ASSET_EXTENSION = {AssetKind.STILL: ".png", AssetKind.VIDEO: ".mp4"}
@@ -171,7 +172,7 @@ class Project:
         if not relative:
             raise ConfigError(f"inputs.{label} is not set in {CONFIG_FILENAME}")
         path = self.path(relative)
-        if not path.is_file():
+        if not path_is_file(path):
             raise ConfigError(f"Input file for '{label}' not found: {path}")
         return path
 

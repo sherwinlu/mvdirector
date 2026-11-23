@@ -1619,3 +1619,57 @@ def test_pass4_fallback_chapter_count_is_bounded() -> None:
         {"tracks": [{"start": 0.0, "title": "A"}, {"start": 120.0, "title": "B"}]}
     )
     assert len(resolve_chapters(spec, 1e7)) == 2
+
+
+def test_pass4_overlong_paths_report_cleanly(tmp_path: Path) -> None:
+    """An over-long path component raised ENAMETOOLONG straight out of `Path.is_file()`.
+
+    `is_file()` swallows only ENOENT/ENOTDIR/EBADF/ELOOP, so `mvd calibrate --labels <5000
+    chars>` (and reference/plate/prop locking, and `--tracklist`) dumped a raw OSError
+    traceback, and the same arguments over MCP came back as "Internal server error" with a
+    logged traceback instead of a clean ConfigError.
+    """
+    from mvdirector.audio.tracklist import load_tracklist
+    from mvdirector.generation.candidates import load_rgb_candidate
+    from mvdirector.store import path_is_file
+
+    long_name = "a" * 5000
+
+    # The helper answers False rather than raising, for any path the OS rejects outright.
+    assert path_is_file(Path(long_name)) is False
+    assert path_is_file(tmp_path / long_name) is False
+    real = tmp_path / "real.txt"
+    real.write_text("x", encoding="utf-8")
+    assert path_is_file(real) is True
+    assert path_is_file(tmp_path / "missing.txt") is False
+    assert path_is_file(tmp_path) is False  # a directory is not a file
+
+    # Each user-facing path check now reports its own ConfigError.
+    with pytest.raises(ConfigError, match="not found"):
+        calibrate_mod.load_labels(Path(long_name))
+    with pytest.raises(ConfigError, match="not found"):
+        load_tracklist(Path(long_name + ".json"))
+    with pytest.raises(ConfigError, match="not found"):
+        load_rgb_candidate(Path(long_name), "Reference")
+
+    # And over MCP the same arguments come back as a tool error, never an internal one.
+    project_dir = tmp_path / "proj"
+    api_mod.init_project(project_dir)
+    server = MCPServer(default_project=project_dir, allowed_roots=[project_dir])
+    for tool, prop in (
+        ("mvd_calibrate", "labels"),
+        ("mvd_lock_reference", "image"),
+        ("mvd_lock_reference_video", "video"),
+    ):
+        reply = server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": tool, "arguments": {prop: long_name}},
+            }
+        )
+        body = json.loads(reply["result"]["content"][0]["text"])
+        assert reply["result"]["isError"] is True
+        assert body["error_type"] == "ConfigError", body
+        assert "Internal server error" not in body["error"]

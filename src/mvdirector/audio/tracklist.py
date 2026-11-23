@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from mvdirector.errors import ConfigError
 from mvdirector.models import AnalyzedChapter, AudioCues, MixChapter
+from mvdirector.store import path_is_file
 
 SUPPORTED_TRACKLIST_SUFFIXES = {".json", ".yaml", ".yml", ".cue", ".txt", ".csv"}
 
@@ -681,7 +682,7 @@ def _parse_csv_tracklist(text: str) -> TracklistSpec:
 
 def load_tracklist(path: Path) -> TracklistSpec:
     """Load and validate a tracklist (``.json``, ``.yaml``, ``.cue``, ``.txt``, or ``.csv``)."""
-    if not path.is_file():
+    if not path_is_file(path):
         raise ConfigError(f"Tracklist file not found: {path}")
     suffix = path.suffix.lower()
     if suffix not in SUPPORTED_TRACKLIST_SUFFIXES:

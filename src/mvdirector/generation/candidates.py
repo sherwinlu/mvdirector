@@ -19,6 +19,7 @@ from mvdirector.comfy.client import ComfyClient
 from mvdirector.comfy.workflow import WorkflowTemplate
 from mvdirector.errors import ConfigError, MediaToolError
 from mvdirector.project import Project, require_safe_id
+from mvdirector.store import path_is_file
 
 log = logging.getLogger(__name__)
 
@@ -54,7 +55,7 @@ def render_candidate_batch(
 
 def load_rgb_candidate(image: Path, label: str) -> Image.Image:
     """Open and convert a candidate image to RGB, raising ConfigError if missing or invalid."""
-    if not image.is_file():
+    if not path_is_file(image):
         raise ConfigError(f"{label} image not found: {image}")
     try:
         with Image.open(image) as opened:

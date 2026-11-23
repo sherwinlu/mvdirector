@@ -35,6 +35,7 @@ from mvdirector.models import COLUMNS_PANEL_NAMES, PANEL_NAMES, Manifest, Refere
 from mvdirector.planning import prompts
 from mvdirector.planning.segmenter import frames_for
 from mvdirector.project import Project, require_safe_id
+from mvdirector.store import path_is_file
 
 log = logging.getLogger(__name__)
 
@@ -396,7 +397,7 @@ def lock_reference_video(
     character_id: str | None = None,
 ) -> str:
     """Copy a chosen turnaround reference video into the project and record it on the state."""
-    if not video_path.is_file():
+    if not path_is_file(video_path):
         raise ConfigError(f"Reference video not found: {video_path}")
     suffix = video_path.suffix.lower()
     if suffix not in _ALLOWED_VIDEO_EXTENSIONS:

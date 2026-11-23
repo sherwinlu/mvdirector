@@ -311,6 +311,20 @@ def _load_model(path: Path, model: type[_ModelT], hint: str) -> _ModelT:
         raise ConfigError(f"{path} does not match the expected schema:\n{exc}") from exc
 
 
+def path_is_file(path: Path) -> bool:
+    """``Path.is_file()`` that answers False for an unusable path instead of raising.
+
+    ``is_file()`` swallows only a short list of errnos (ENOENT, ENOTDIR, EBADF, ELOOP), so a path
+    the OS rejects outright still propagates ``OSError`` — most easily an over-long component,
+    which raises ENAMETOOLONG. Callers testing a path that came from a user or an MCP client
+    want "no such file" there, not a traceback.
+    """
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
 def atomic_write(path: Path, text: str) -> None:
     """Write via a temp file and rename so a crash never leaves a half-written file."""
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -648,9 +648,16 @@ def prepare_project(
             sep = separator or DemucsSeparator(
                 model=prepare_cfg.stem_model, device=prepare_cfg.stem_device
             )
+            # `drums_path` is already set when the stem pack supplied the drums just above.
+            # Asking Demucs for them again would overwrite the user's own stem (with
+            # `overwrite` short-circuiting the is_file() guard) and redo the work for nothing.
             need_drums_out = (
                 drums_target
-                if (drums_target and (overwrite or not drums_target.is_file()))
+                if (
+                    drums_target
+                    and drums_path is None
+                    and (overwrite or not drums_target.is_file())
+                )
                 else None
             )
             stem_result = sep.separate(mix_path, vocals_target, drums_out=need_drums_out)

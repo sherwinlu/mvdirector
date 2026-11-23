@@ -32,6 +32,9 @@ log = logging.getLogger(__name__)
 
 _TRANSIENT_RETRIES = 3
 _MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024  # 512 MiB cap per generated asset
+#: How many consecutive polls to allow a history entry that reports neither a status nor any
+#: outputs before handing it back, so the caller raises the accurate "produced no output" error.
+_STATUSLESS_GRACE_POLLS = 3
 # /free only flags ComfyUI's worker thread to unload; give it this long to release VRAM.
 _VRAM_SETTLE_POLLS = 30
 _VRAM_POLL_SECONDS = 1.0
@@ -385,6 +388,7 @@ class ComfyClient:
             if self._config.poll_interval > 0.0
             else max(0.05, self._config.job_timeout / 1000.0)
         )
+        statusless_polls = 0
         while waited <= self._config.job_timeout:
             history = _json_dict(self._request("GET", f"/history/{encoded_id}"), "GET /history")
             entry = history.get(prompt_id)
@@ -395,8 +399,19 @@ class ComfyClient:
                         raise ComfyJobError(f"ComfyUI job failed: {_summarize_failure(status)}")
                     if status.get("completed", True):
                         return entry
-                elif status is None and isinstance(entry.get("outputs"), dict) and entry["outputs"]:
-                    return entry
+                elif status is None:
+                    # Older ComfyUI builds report no status at all. Outputs mean it is done;
+                    # otherwise allow a few more polls in case this build fills them a beat
+                    # later, then hand the entry back so download_output can say "produced no
+                    # output". Waiting out the full job_timeout here (30 minutes by default)
+                    # only to raise a misleading timeout stalls the run and hides the real
+                    # problem. The budget counts polls, not seconds, so it holds whatever
+                    # poll_interval is set to — including 0.0, where the loop never sleeps.
+                    if isinstance(entry.get("outputs"), dict) and entry["outputs"]:
+                        return entry
+                    statusless_polls += 1
+                    if statusless_polls >= _STATUSLESS_GRACE_POLLS:
+                        return entry
             self._sleep(self._config.poll_interval)
             waited = max(waited + min_step, time.monotonic() - started)
         raise ComfyJobError(f"ComfyUI job {prompt_id} timed out after {self._config.job_timeout}s")

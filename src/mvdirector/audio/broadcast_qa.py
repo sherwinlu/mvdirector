@@ -14,6 +14,7 @@ Credits & Attribution:
 
 from __future__ import annotations
 
+import bisect
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -23,6 +24,21 @@ import numpy as np
 import soundfile as sf
 
 from mvdirector.errors import MediaToolError
+
+_CLICK_MIN_GAP_SECONDS = 0.05
+
+
+def _accept_click(clicks: list[float], t_sec: float) -> bool:
+    """True when ``t_sec`` is further than the de-dup gap from every click already accepted.
+
+    Scanning the whole accumulated list per candidate is O(clicks^2), and both callers run over
+    a complete mix with no boundary hints: a long set with thousands of accepted clicks turned a
+    seconds-long QA step into minutes. ``clicks`` is kept sorted so only the candidate's own
+    neighbourhood has to be probed, which is the same answer in O(log n).
+    """
+    lo = bisect.bisect_left(clicks, t_sec - _CLICK_MIN_GAP_SECONDS)
+    hi = bisect.bisect_right(clicks, t_sec + _CLICK_MIN_GAP_SECONDS)
+    return lo == hi
 
 
 @dataclass(frozen=True)
@@ -265,9 +281,9 @@ def scan_splice_clicks(
         if (
             peak / floor >= spike_ratio
             and tail_rms < 0.35 * peak
-            and all(abs(t_sec - prev) > 0.05 for prev in clicks)
+            and _accept_click(clicks, t_sec)
         ):
-            clicks.append(round(t_sec, 4))
+            bisect.insort(clicks, round(t_sec, 4))
     return clicks
 
 
@@ -481,8 +497,8 @@ def _analyze_broadcast_soundfile(
                 )
                 for rel_t in local_clicks:
                     abs_t = round(buf_start_sec + rel_t, 4)
-                    if abs_t > 0.0 and all(abs(abs_t - prev) > 0.05 for prev in clicks):
-                        clicks.append(abs_t)
+                    if abs_t > 0.0 and _accept_click(clicks, abs_t):
+                        bisect.insort(clicks, abs_t)
             click_carry = (
                 mono[-click_overlap:] if mono.size >= click_overlap else c_buf[-click_overlap:]
             )

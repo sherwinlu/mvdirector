@@ -818,20 +818,40 @@ class ShotRunner:
         return ensure_upload_audio_track(self._project, video_path)
 
     def _run_comfy(self, graph: dict[str, Any], output: OutputSpec, destination: Path) -> Path:
+        """Render ``graph``, using the content-addressed cache when it can.
+
+        The cache is an optimization, so none of its failure modes may change the outcome of a
+        render. `canonical_graph_key` rejects a non-finite float in the graph and `store` rejects
+        an empty or symlinked source, both with a bare `ValueError` that `_attempt` does not
+        catch (it handles only ComfyJobError/MediaToolError) — so a cache problem used to abort
+        the entire run with a traceback, discarding every shot's progress, even though the render
+        itself had succeeded. Each cache interaction is now best-effort and logged.
+        """
+        key: str | None = None
         if self._cache is not None:
-            key = canonical_graph_key(
-                graph,
-                self._uploaded_local,
-                uploaded_digests=self._uploaded_digests,
-                output_node=output.node,
-                extensions=tuple(output.extensions),
-            )
-            if self._cache.lookup(key, destination):
-                return destination
-            result = self._comfy.run(graph, output, destination)
-            self._cache.store(key, result)
-            return result
-        return self._comfy.run(graph, output, destination)
+            try:
+                key = canonical_graph_key(
+                    graph,
+                    self._uploaded_local,
+                    uploaded_digests=self._uploaded_digests,
+                    output_node=output.node,
+                    extensions=tuple(output.extensions),
+                )
+            except (ValueError, OSError) as exc:
+                log.warning("Skipping ComfyUI cache for this render (unusable key): %s", exc)
+            if key is not None:
+                try:
+                    if self._cache.lookup(key, destination):
+                        return destination
+                except (ValueError, OSError) as exc:
+                    log.warning("ComfyUI cache lookup failed; rendering instead: %s", exc)
+        result = self._comfy.run(graph, output, destination)
+        if self._cache is not None and key is not None:
+            try:
+                self._cache.store(key, result)
+            except (ValueError, OSError) as exc:
+                log.warning("Could not cache render %s: %s", result.name, exc)
+        return result
 
     def _extra_reference_images(self, shot: Shot) -> list[tuple[str, Path]]:
         """Reference sheets for secondary visible performers and props in this shot."""

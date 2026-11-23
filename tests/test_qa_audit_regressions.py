@@ -1673,3 +1673,164 @@ def test_pass4_overlong_paths_report_cleanly(tmp_path: Path) -> None:
         assert reply["result"]["isError"] is True
         assert body["error_type"] == "ConfigError", body
         assert "Internal server error" not in body["error"]
+
+
+def test_pr_review_cache_failure_never_aborts_a_render(tmp_path: Path) -> None:
+    """A render cache problem used to discard the whole run's progress.
+
+    `canonical_graph_key` raises ValueError on a non-finite float in the graph and `store()`
+    raises it on an empty or symlinked source, but `_attempt` catches only ComfyJobError and
+    MediaToolError — so a bare ValueError propagated out of `_attempt`, `_run_asset` and `run()`,
+    aborting `mvd generate` with a traceback even though the render itself had succeeded.
+    The cache is an optimization, so every interaction with it is now best-effort.
+    """
+    from mvdirector.comfy.cache import ComfyRenderCache
+    from mvdirector.comfy.workflow import OutputSpec
+    from mvdirector.generation.runner import ShotRunner
+
+    rendered = tmp_path / "out.png"
+    rendered.write_bytes(b"PNG")
+
+    class ExplodingCache(ComfyRenderCache):
+        def lookup(self, key: str, destination: Path) -> bool:
+            raise ValueError("cache lookup exploded")
+
+        def store(self, key: str, source: Path) -> Path:
+            raise ValueError("cache store exploded")
+
+    class StubComfy:
+        def __init__(self) -> None:
+            self.runs = 0
+
+        def run(self, graph: dict[str, Any], output: Any, destination: Path) -> Path:
+            self.runs += 1
+            return rendered
+
+    runner = ShotRunner.__new__(ShotRunner)
+    runner._cache = ExplodingCache(tmp_path / "cache")
+    comfy = StubComfy()
+    runner._comfy = comfy
+    runner._uploaded_local = {}
+    runner._uploaded_digests = {}
+    spec = OutputSpec(node="1")
+
+    # A cache that fails on both lookup and store still yields the render.
+    assert runner._run_comfy({"1": {"inputs": {"x": 1}}}, spec, tmp_path / "a.png") == rendered
+    assert comfy.runs == 1
+
+    # An unusable cache key (non-finite float in the graph) skips the cache, not the render.
+    assert (
+        runner._run_comfy({"1": {"inputs": {"x": float("inf")}}}, spec, tmp_path / "b.png")
+        == rendered
+    )
+    assert comfy.runs == 2
+
+    # The real cache still refuses an empty source, so the guard itself is intact.
+    real = ComfyRenderCache(tmp_path / "cache2")
+    empty = tmp_path / "empty.png"
+    empty.touch()
+    with pytest.raises(ValueError, match="empty"):
+        real.store("0" * 64, empty)
+
+
+def test_pr_review_statusless_history_entry_fails_fast(tmp_path: Path) -> None:
+    """A history entry with no status and no outputs burned the whole job_timeout.
+
+    Older ComfyUI builds report no `status` key. The entry was only returned once outputs
+    appeared, so a job that produced none polled for the full `comfy.job_timeout` (1800s by
+    default) and then raised a misleading timeout instead of the accurate "produced no output".
+    """
+    import time
+
+    from mvdirector.comfy import client as client_mod
+    from mvdirector.comfy.workflow import OutputSpec
+
+    polls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/history/"):
+            polls["n"] += 1
+            return httpx.Response(200, json={"p1": {"status": None, "outputs": {}}})
+        raise AssertionError(f"Unexpected path {request.url.path}")
+
+    config = ComfyConfig(base_url="http://comfy.test", poll_interval=0.0, job_timeout=1800.0)
+    comfy = ComfyClient(config, transport=httpx.MockTransport(handler), sleep=lambda _: None)
+    try:
+        started = time.monotonic()
+        entry = comfy.wait("p1")
+        elapsed = time.monotonic() - started
+        # Bounded by the poll budget, nowhere near job_timeout. The budget counts polls rather
+        # than seconds, so it holds with poll_interval=0.0 and a no-op sleep too.
+        assert polls["n"] == client_mod._STATUSLESS_GRACE_POLLS
+        assert elapsed < 10.0
+        # The entry is handed back so the caller reports the real problem.
+        with pytest.raises(ComfyError, match="produced no"):
+            comfy.download_output(entry, OutputSpec(node="9"), tmp_path / "out.png")
+    finally:
+        comfy.close()
+
+    # A status-less entry that *does* carry outputs still returns on the first poll.
+    def ready(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/history/"):
+            return httpx.Response(
+                200,
+                json={
+                    "p1": {
+                        "status": None,
+                        "outputs": {
+                            "9": {"images": [{"filename": "a.png", "subfolder": "", "type": None}]}
+                        },
+                    }
+                },
+            )
+        raise AssertionError(f"Unexpected path {request.url.path}")
+
+    quick = ComfyClient(config, transport=httpx.MockTransport(ready), sleep=lambda _: None)
+    try:
+        assert quick.wait("p1")["outputs"]["9"]["images"][0]["filename"] == "a.png"
+    finally:
+        quick.close()
+
+
+def test_pr_review_splice_click_dedup_is_not_quadratic() -> None:
+    """Click de-dup rescanned every accepted click per candidate, which is O(clicks^2).
+
+    Both callers run over a whole mix with no boundary hints, so a long set with thousands of
+    accepted clicks turned a seconds-long QA step into minutes. Measured before the fix: 3.3x
+    then 3.7x per doubling of input; after: 1.8x then 2.0x, and 12x faster in absolute terms at
+    the largest size.
+    """
+    import time
+
+    sample_rate = 22050
+
+    def dense_clicks(seconds: float) -> np.ndarray:
+        samples = (
+            0.05 * np.sin(2 * np.pi * 110 * np.arange(int(seconds * sample_rate)) / sample_rate)
+        ).astype(np.float32)
+        for index in range(0, samples.size - 10, int(0.06 * sample_rate)):
+            samples[index] = 0.95
+        return samples
+
+    timings: dict[int, float] = {}
+    counts: dict[int, int] = {}
+    for seconds in (80, 160, 320):
+        wav = dense_clicks(seconds)
+        started = time.perf_counter()
+        clicks = bqa_mod.scan_splice_clicks(wav, sample_rate)
+        timings[seconds] = time.perf_counter() - started
+        counts[seconds] = len(clicks)
+        # Output stays sorted, which is what the bisect window relies on.
+        assert clicks == sorted(clicks)
+
+    # Click count grows linearly with duration, so quadratic de-dup would roughly 4x per
+    # doubling. Allow generous headroom for a loaded machine but still fail on O(n^2).
+    assert counts[320] > counts[80] * 3
+    growth = timings[320] / max(timings[80], 1e-6)
+    assert growth < 8.0, f"de-dup looks superlinear: {timings} ({growth:.1f}x over 4x input)"
+
+    # De-dup semantics are unchanged: nothing closer than the 0.05s gap survives.
+    assert all(
+        b - a > bqa_mod._CLICK_MIN_GAP_SECONDS - 1e-9
+        for a, b in zip(clicks, clicks[1:], strict=False)
+    )

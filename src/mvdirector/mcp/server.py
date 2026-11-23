@@ -6,11 +6,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import hmac
 import ipaddress
 import json
 import logging
+import socket
 import sys
+import threading
 import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -31,6 +34,8 @@ SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 DEFAULT_PROTOCOL_VERSION = "2025-03-26"
 SKILL_RESOURCE_URI = "mvdirector://skill"
 MAX_HTTP_BODY_BYTES = 1_048_576  # 1 MiB
+MAX_CONCURRENT_HTTP_REQUESTS = 64
+_SINGLE_VALUE_HEADERS = ("host", "origin", "authorization", "content-length")
 
 _SERVER_INSTRUCTIONS = (
     "mvdirector MCP server: plan, generate, quality-check, review, and assemble music videos. "
@@ -59,7 +64,16 @@ def _reject_json_constant(token: str) -> Any:
 
 
 def _loads_strict_json(raw: str) -> Any:
-    return json.loads(raw, parse_constant=_reject_json_constant)
+    """Decode one JSON message, turning stack exhaustion into an ordinary parse error.
+
+    `json.loads` recurses per nesting level, so a body of `[[[[...` well under the 1 MiB cap
+    raises `RecursionError` — not a `ValueError` — and escapes every parse handler here: over
+    HTTP it killed the worker thread mid-response, and over stdio it tore down the serve loop.
+    """
+    try:
+        return json.loads(raw, parse_constant=_reject_json_constant)
+    except RecursionError:
+        raise ValueError("JSON nesting is too deep.") from None
 
 
 def _host_without_port(host_header: str) -> str:
@@ -78,20 +92,42 @@ def _host_without_port(host_header: str) -> str:
         if not rest.startswith(":"):
             return ""
         port_str = rest[1:]
-        if not port_str.isdigit() or not (1 <= int(port_str) <= 65535):
+        if not (port_str.isascii() and port_str.isdigit()) or not (1 <= int(port_str) <= 65535):
             return ""
         return host
     if ":" in value:
         host, port_str = value.rsplit(":", 1)
-        if ":" in host or not port_str.isdigit() or not (1 <= int(port_str) <= 65535):
+        if (
+            ":" in host
+            or not (port_str.isascii() and port_str.isdigit())
+            or not (1 <= int(port_str) <= 65535)
+        ):
             return ""
         return host
     return value
 
 
 def _is_loopback_origin(origin: str) -> bool:
-    parsed = urlparse(origin)
-    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+    value = origin.strip()
+    if not value or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        return False
+    parsed = urlparse(value)
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        return False
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    if port is not None and not (1 <= port <= 65535):
         return False
     return is_loopback_host(parsed.hostname)
 
@@ -248,6 +284,7 @@ class MCPServer:
             )
         try:
             payload = spec.handler(arguments)
+            serialized = json.dumps(payload, indent=2, allow_nan=False)
         except MVDError as exc:
             error_body = {"error": str(exc), "error_type": type(exc).__name__}
             return _rpc_result(
@@ -275,9 +312,7 @@ class MCPServer:
         return _rpc_result(
             req_id,
             {
-                "content": [
-                    {"type": "text", "text": json.dumps(payload, indent=2, allow_nan=False)}
-                ],
+                "content": [{"type": "text", "text": serialized}],
                 "isError": False,
             },
         )
@@ -288,20 +323,39 @@ def serve_stdio(
     *,
     stdin: TextIO | None = None,
     stdout: TextIO | None = None,
+    max_line_bytes: int = MAX_HTTP_BODY_BYTES,
 ) -> None:
     """Serve newline-delimited JSON-RPC 2.0 messages over stdio until EOF."""
     in_stream = stdin or sys.stdin
     out_stream = stdout or sys.stdout
-    for raw_line in in_stream:
-        line = raw_line.strip()
-        if not line:
-            continue
-        try:
-            message = _loads_strict_json(line)
-        except ValueError as exc:
-            response: dict[str, Any] | None = _rpc_error(None, -32700, f"Parse error: {exc}")
+    limit = max(1024, max_line_bytes)
+    while True:
+        raw_line = in_stream.readline(limit + 1)
+        if not raw_line:
+            break
+        oversized = len(raw_line) > limit and not (
+            len(raw_line) == limit + 1 and raw_line.endswith("\n")
+        )
+        if oversized:
+            # Drain the rest of the oversized frame so the next newline-delimited message parses.
+            if not raw_line.endswith("\n"):
+                while True:
+                    discard = in_stream.readline(limit)
+                    if not discard or discard.endswith("\n"):
+                        break
+            response: dict[str, Any] | None = _rpc_error(
+                None, -32700, f"Message exceeds {limit} bytes."
+            )
         else:
-            response = server.handle_message(message)
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                message = _loads_strict_json(line)
+            except ValueError as exc:
+                response = _rpc_error(None, -32700, f"Parse error: {exc}")
+            else:
+                response = server.handle_message(message)
         if response is not None:
             out_stream.write(json.dumps(response, separators=(",", ":"), allow_nan=False) + "\n")
             out_stream.flush()
@@ -348,8 +402,8 @@ def handle_http_request(
 
     # 1. Block DNS rebinding when bound to loopback.
     if loopback_only:
-        host_header = norm_headers.get("host", "")
-        if host_header and not is_loopback_host(_host_without_port(host_header)):
+        host_header = norm_headers.get("host")
+        if host_header is not None and not is_loopback_host(_host_without_port(host_header)):
             return _json_response(
                 HTTPStatus.FORBIDDEN,
                 {"error": "Non-loopback Host header rejected."},
@@ -357,7 +411,7 @@ def handle_http_request(
 
     # 2. Block cross-origin browser requests (CSRF).
     origin = norm_headers.get("origin")
-    if origin and not _is_loopback_origin(origin):
+    if origin is not None and not _is_loopback_origin(origin):
         return _json_response(
             HTTPStatus.FORBIDDEN,
             {"error": "Cross-origin requests are not allowed."},
@@ -417,6 +471,7 @@ def handle_http_request(
 class _MCPHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
+    request_queue_size = MAX_CONCURRENT_HTTP_REQUESTS
 
     def __init__(
         self,
@@ -425,11 +480,58 @@ class _MCPHTTPServer(ThreadingHTTPServer):
         *,
         token: str | None,
         loopback_only: bool,
+        max_concurrent_requests: int = MAX_CONCURRENT_HTTP_REQUESTS,
     ) -> None:
         self.mcp_server = mcp_server
         self.token = token
         self.loopback_only = loopback_only
+        self._request_slots = threading.BoundedSemaphore(max(1, max_concurrent_requests))
         super().__init__(server_address, _MCPHTTPRequestHandler)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        if not self._request_slots.acquire(blocking=False):
+            body = b'{"error":"Too many concurrent requests."}'
+            response = (
+                b"HTTP/1.1 503 Service Unavailable\r\n"
+                b"Content-Type: application/json; charset=utf-8\r\n"
+                b"Cache-Control: no-store\r\n"
+                + f"Content-Length: {len(body)}\r\n".encode("ascii")
+                + b"Connection: close\r\n\r\n"
+                + body
+            )
+            try:
+                # Drain any already-sent request bytes so closing the socket emits a clean TCP
+                # FIN rather than a kernel RST that drops the 503 body in transit.
+                request.settimeout(0.02)
+                with contextlib.suppress(OSError):
+                    request.recv(8192)
+                request.settimeout(0.5)
+                request.sendall(response)
+                with contextlib.suppress(OSError):
+                    request.shutdown(socket.SHUT_WR)
+                request.setblocking(False)
+                for _ in range(8):
+                    try:
+                        if not request.recv(8192):
+                            break
+                    except OSError:
+                        break
+            except OSError:
+                pass
+            finally:
+                self.close_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._request_slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._request_slots.release()
 
 
 class _MCPHTTPRequestHandler(BaseHTTPRequestHandler):
@@ -439,16 +541,33 @@ class _MCPHTTPRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         log.info("mcp-http %s - %s", self.address_string(), format % args)
 
-    def _write_response(self, status: int, headers: dict[str, str], body: bytes) -> None:
+    def _write_response(
+        self, status: int, headers: dict[str, str], body: bytes, *, send_body: bool = True
+    ) -> None:
         self.send_response(status)
         self.send_header("Content-Length", str(len(body)))
         for key, value in headers.items():
             self.send_header(key, value)
         self.end_headers()
-        if body:
+        if send_body and body:
             self.wfile.write(body)
 
+    def _reject_duplicate_headers(self, *, send_body: bool = True) -> bool:
+        for name in _SINGLE_VALUE_HEADERS:
+            values = self.headers.get_all(name)
+            if values and len(values) > 1:
+                status, headers, body = _json_response(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": f"Duplicate '{name}' header is not allowed."},
+                )
+                self._write_response(status, headers, body, send_body=send_body)
+                return True
+        return False
+
     def _dispatch(self, method: str, body: bytes = b"") -> None:
+        send_body = method != "HEAD"
+        if self._reject_duplicate_headers(send_body=send_body):
+            return
         req_headers = {k: v for k, v in self.headers.items()}
         status, headers, resp_body = handle_http_request(
             self.server.mcp_server,
@@ -459,7 +578,7 @@ class _MCPHTTPRequestHandler(BaseHTTPRequestHandler):
             token=self.server.token,
             loopback_only=self.server.loopback_only,
         )
-        self._write_response(status, headers, resp_body)
+        self._write_response(status, headers, resp_body, send_body=send_body)
 
     def do_GET(self) -> None:  # noqa: N802
         self._dispatch("GET")
@@ -480,6 +599,15 @@ class _MCPHTTPRequestHandler(BaseHTTPRequestHandler):
         self._dispatch("DELETE")
 
     def do_POST(self) -> None:  # noqa: N802
+        if self._reject_duplicate_headers():
+            return
+        if self.headers.get("Transfer-Encoding") is not None:
+            status, headers, body = _json_response(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "Transfer-Encoding is not supported; send Content-Length."},
+            )
+            self._write_response(status, headers, body)
+            return
         raw_len = self.headers.get("Content-Length")
         if raw_len is None:
             status, headers, body = _json_response(
@@ -487,15 +615,15 @@ class _MCPHTTPRequestHandler(BaseHTTPRequestHandler):
             )
             self._write_response(status, headers, body)
             return
-        try:
-            length = int(raw_len)
-        except ValueError:
+        cleaned_len = raw_len.strip()
+        if not cleaned_len or not cleaned_len.isascii() or not cleaned_len.isdigit():
             status, headers, body = _json_response(
                 HTTPStatus.BAD_REQUEST, {"error": "Invalid Content-Length header."}
             )
             self._write_response(status, headers, body)
             return
-        if length < 0 or length > MAX_HTTP_BODY_BYTES:
+        length = int(cleaned_len)
+        if length > MAX_HTTP_BODY_BYTES:
             status, headers, body = _json_response(
                 HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
                 {"error": f"Request body exceeds {MAX_HTTP_BODY_BYTES} bytes."},

@@ -18,6 +18,7 @@ import contextlib
 import functools
 import logging
 import os
+import pickle
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
@@ -565,7 +566,16 @@ def _load_stable_syncnet_checkpoint(torch_mod: Any, model_path: Path | None, dev
         model.eval()
         return model
 
-    load_errors = (RuntimeError, ValueError, OSError, KeyError, EOFError, zipfile.BadZipFile)
+    load_errors = (
+        RuntimeError,
+        ValueError,
+        OSError,
+        KeyError,
+        EOFError,
+        TypeError,
+        pickle.UnpicklingError,
+        zipfile.BadZipFile,
+    )
     try:
         return _load(resolved)
     except load_errors as exc:
@@ -653,6 +663,24 @@ class StableSyncNetScorer:
                 parts.append(self._model.encode_visual(batch).cpu().numpy())
         return np.concatenate(parts, axis=0) if parts else np.zeros((0, 0), dtype=np.float32)
 
+    def _encode_visual_from_crops(self, crops: list[np.ndarray], n_windows: int) -> np.ndarray:
+        """Stream visual windows per batch so long clips do not materialize gigabytes in RAM."""
+        torch_mod = self._torch
+        parts: list[np.ndarray] = []
+        with torch_mod.no_grad():
+            for start in range(0, n_windows, self._batch_size):
+                end = min(start + self._batch_size, n_windows)
+                batch_np = np.stack(
+                    [
+                        np.concatenate(crops[i : i + SYNCNET_NUM_FRAMES], axis=0)
+                        for i in range(start, end)
+                    ],
+                    axis=0,
+                ).astype(np.float32)
+                batch = torch_mod.from_numpy(batch_np).to(self._device, dtype=torch_mod.float32)
+                parts.append(self._model.encode_visual(batch).cpu().numpy())
+        return np.concatenate(parts, axis=0) if parts else np.zeros((0, 0), dtype=np.float32)
+
     def _encode_audio(self, audio_windows: np.ndarray) -> np.ndarray:
         torch_mod = self._torch
         parts: list[np.ndarray] = []
@@ -730,17 +758,18 @@ class StableSyncNetScorer:
         measurements: list[SyncMeasurement] = []
         for presence, boxes in tracks:
             crops = [crop_lower_face(frame, box) for frame, box in zip(frames_25, boxes)]
-            # Stack 16 (3, 128, 256) crops -> (48, 128, 256) per window (b f c h w -> b (f c) h w).
-            visual_windows = np.stack(
-                [
-                    np.concatenate(crops[i : i + SYNCNET_NUM_FRAMES], axis=0)
-                    for i in range(n_visual_windows)
-                ],
-                axis=0,
-            ).astype(np.float32)
             if cached_audio_embeds is not None:
-                v_embeds, a_embeds = self._encode_visual(visual_windows), cached_audio_embeds
+                v_embeds = self._encode_visual_from_crops(crops, n_visual_windows)
+                a_embeds = cached_audio_embeds
             else:
+                # Stack 16 (3, 128, 256) crops -> (48, 128, 256) per window (b f c h w).
+                visual_windows = np.stack(
+                    [
+                        np.concatenate(crops[i : i + SYNCNET_NUM_FRAMES], axis=0)
+                        for i in range(n_visual_windows)
+                    ],
+                    axis=0,
+                ).astype(np.float32)
                 v_embeds, a_embeds = self._encode_batches(visual_windows, audio_windows)
             measurements.append(
                 score_embedding_sequences(v_embeds, a_embeds, max_lag_frames, presence)

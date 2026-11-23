@@ -17,7 +17,14 @@ from pydantic import BaseModel
 
 from mvdirector.errors import LLMError
 from mvdirector.llm.base import ChatBackend, Message, Reply, blocks_of, has_images
-from mvdirector.llm.http import IMAGE_WORDS, HttpJSON, check_response, error_message, json_body
+from mvdirector.llm.http import (
+    IMAGE_WORDS,
+    HttpJSON,
+    check_response,
+    error_message,
+    json_body,
+    redact_url,
+)
 
 log = logging.getLogger("mvdirector.llm")
 
@@ -92,7 +99,8 @@ class OpenAIChat(ChatBackend):
         response_format = self._response_format(schema)
         if response_format:
             payload["response_format"] = response_format
-        hint = f"Is the server running at {self._url.rsplit('/chat/completions', 1)[0]}?"
+        safe_base = redact_url(self._url.rsplit("/chat/completions", 1)[0])
+        hint = f"Is the server running at {safe_base}?"
         images = has_images(messages)
         words = IMAGE_WORDS if images else ()
         response = self._http.post(self._url, payload, unreachable_hint=hint, no_retry_words=words)
@@ -117,15 +125,29 @@ class OpenAIChat(ChatBackend):
     # ----------------------------------------------------------------- response
 
     def _parse(self, data: dict[str, Any]) -> Reply:
-        choices = data.get("choices") or []
-        if not choices:
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
             raise LLMError(f"{self._provider} returned no choices: {str(data)[:200]}")
         choice = choices[0]
-        message = choice.get("message") or {}
+        if not isinstance(choice, dict):
+            raise LLMError(f"{self._provider} returned an unexpected choice: {choice!r}")
+        raw_message = choice.get("message")
+        message = raw_message if isinstance(raw_message, dict) else {}
         content = message.get("content")
         if isinstance(content, list):  # some servers return a list of parts
-            content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
-        text = content or ""
+            text = "".join(
+                part["text"]
+                for part in content
+                if isinstance(part, dict) and isinstance(part.get("text"), str)
+            )
+        elif isinstance(content, str):
+            text = content
+        elif content is None:
+            text = ""
+        else:
+            raise LLMError(
+                f"{self._provider} returned non-text message content: {type(content).__name__}"
+            )
         finish = choice.get("finish_reason")
         if not text and message.get("refusal"):
             raise LLMError(f"The model refused the request: {message['refusal']}")

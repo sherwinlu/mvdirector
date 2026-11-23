@@ -15,6 +15,7 @@ from PIL import Image
 
 from mvdirector import media
 from mvdirector.config import QCConfig, VideoConfig
+from mvdirector.errors import MediaToolError
 from mvdirector.models import (
     AssetKind,
     CheckResult,
@@ -165,13 +166,13 @@ class VideoQC:
         shot: Shot,
         expected_size: tuple[int, int] | None = None,
     ) -> list[CheckResult]:
-        if info.width is None or info.height is None:
+        if info.width is None or info.height is None or info.width <= 0 or info.height <= 0:
             return [
                 CheckResult(
                     name="dimensions",
                     status=CheckStatus.FAILED,
                     hard=True,
-                    detail="file has no video stream",
+                    detail="file has no valid video stream",
                 )
             ]
         needed = shot.audio_slice.head_handle + shot.duration
@@ -285,7 +286,12 @@ class VideoQC:
         if self._lipsync_scorer is None and self._mouth is None:
             return [skipped(n, "lip-sync scorer unavailable") for n in names]
 
-        samples, sample_rate = sf.read(str(audio_slice), always_2d=True)
+        try:
+            samples, sample_rate = sf.read(str(audio_slice), always_2d=True)
+        except (sf.LibsndfileError, OSError) as exc:
+            raise MediaToolError(f"Could not read audio slice {audio_slice}: {exc}") from exc
+        if samples.size == 0 or sample_rate <= 0:
+            return [skipped(n, "no vocal in this audio slice") for n in names]
         mono = samples.mean(axis=1)
         envelope = lipsync.envelope_at_fps(mono, sample_rate, fps, len(frames))
         if lipsync.is_silent(envelope):
@@ -467,5 +473,7 @@ class VideoQC:
 
     @staticmethod
     def _sample(frames: list[np.ndarray], count: int) -> list[Path | np.ndarray]:
+        if count <= 0 or not frames:
+            return []
         indices = np.linspace(0, len(frames) - 1, num=min(count, len(frames))).round().astype(int)
         return [frames[i] for i in indices]

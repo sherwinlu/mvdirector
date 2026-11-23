@@ -87,6 +87,8 @@ def audio_block(
                 "-y",
                 "-v",
                 "error",
+                "-protocol_whitelist",
+                "file",
                 "-i",
                 str(audio.resolve()),
                 "-t",
@@ -157,6 +159,10 @@ def complete_json_with_optional_audio(
 _THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
+def _reject_json_constant(token: str) -> Any:
+    raise ValueError(f"Non-standard JSON constant not allowed: {token!r}")
+
+
 def extract_json(text: str) -> str:
     """Pull the JSON object out of a reply that may include fences, prose or reasoning.
 
@@ -169,19 +175,28 @@ def extract_json(text: str) -> str:
     unfinished = cleaned.lower().find("<think>")  # reasoning that never ended: nothing follows
     if unfinished != -1:
         cleaned = cleaned[:unfinished]
-    start = cleaned.find("{")
-    if start == -1:
+    first_start = cleaned.find("{")
+    if first_start == -1:
         raise LLMError("The model reply contained no JSON object")
-    try:
-        value, end = json.JSONDecoder().raw_decode(cleaned, start)
-    except ValueError:
-        value = end = None
-    if isinstance(value, dict) and end is not None:
-        return cleaned[start:end]
+    for strict in (True, False):
+        decoder = json.JSONDecoder(strict=strict, parse_constant=_reject_json_constant)
+        pos = first_start
+        while pos != -1:
+            try:
+                value, end = decoder.raw_decode(cleaned, pos)
+            except ValueError:
+                value = end = None
+            except RecursionError:
+                # A reply nested thousands of levels deep exhausts the stack rather than
+                # raising ValueError; treat it as unusable JSON, not as a crash.
+                raise LLMError("The model reply nested JSON too deeply to parse") from None
+            if isinstance(value, dict) and end is not None:
+                return cleaned[pos:end]
+            pos = cleaned.find("{", pos + 1)
     last = cleaned.rfind("}")
-    if last <= start:
+    if last <= first_start:
         raise LLMError("The model reply contained no JSON object")
-    return cleaned[start : last + 1]
+    return cleaned[first_start : last + 1]
 
 
 def blocks_of(content: str | list[ContentBlock]) -> list[ContentBlock]:
@@ -232,6 +247,18 @@ class ChatBackend(ABC):
         self._context_tokens = context_tokens
         self._warned_context = False
 
+    def close(self) -> None:
+        http = getattr(self, "_http", None)
+        closer = getattr(http, "close", None)
+        if callable(closer):
+            closer()
+
+    def __enter__(self) -> ChatBackend:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
     def complete_json(self, *, system: str, content: list[ContentBlock], schema: type[T]) -> T:
         system_prompt = schema_prompt(system, schema)
         messages: list[Message] = [{"role": "user", "content": content}]
@@ -248,8 +275,10 @@ class ChatBackend(ABC):
                     # Open-weights models (e.g. Qwen2.5-Omni) sometimes emit literal newlines
                     # inside multiline JSON strings like lyrics; retry with strict=False.
                     try:
-                        parsed = json.loads(raw_json, strict=False)
-                    except json.JSONDecodeError:
+                        parsed = json.loads(
+                            raw_json, strict=False, parse_constant=_reject_json_constant
+                        )
+                    except (ValueError, RecursionError):
                         raise first_exc from None
                     return schema.model_validate(parsed)
             except (ValidationError, LLMError) as exc:
@@ -263,8 +292,9 @@ class ChatBackend(ABC):
                     ) from exc
                 log.warning("Model reply failed validation; asking for a correction")
                 detail = str(exc)[:_MAX_CORRECTION_CHARS]
+                assistant_reply = reply.text if reply.text.strip() else "(empty response)"
                 messages += [
-                    {"role": "assistant", "content": reply.text},
+                    {"role": "assistant", "content": assistant_reply},
                     {
                         "role": "user",
                         "content": f"That did not validate: {detail}\nSend corrected JSON.",

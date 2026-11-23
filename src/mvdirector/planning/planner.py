@@ -32,7 +32,7 @@ from mvdirector.audio.lyrics import (
 )
 from mvdirector.audio.stem_pack import active_stems_in_span
 from mvdirector.config import ProjectConfig
-from mvdirector.errors import LLMError
+from mvdirector.errors import LLMError, LLMUnavailableError
 from mvdirector.llm import LLMClient, complete_json_with_optional_audio, text_block
 from mvdirector.models import (
     BOTH_VOICES,
@@ -115,10 +115,24 @@ def _slug_id(value: object, label: str = "id", prefix: str = "id") -> str:
             folded = ascii_fold(cleaned).lower()
             slug = re.sub(r"[^a-z0-9_-]+", "_", folded).strip("_-")
             if slug and slug[0].isalnum():
-                return slug
+                if len(slug) <= 64:
+                    return slug
+                digest = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:6]
+                return f"{slug[:57].rstrip('_-') or prefix}_{digest}"
             digest = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:6]
             return f"{prefix}_{digest}"
     return validate_safe_id(str(value), label)
+
+
+def _unique_id(base: str, used: set[str]) -> str:
+    candidate = base
+    suffix = 2
+    while candidate in used:
+        tail = f"_{suffix}"
+        candidate = f"{base[: 64 - len(tail)].rstrip('_-') or 'id'}{tail}"
+        suffix += 1
+    used.add(candidate)
+    return candidate
 
 
 class WardrobeReply(_Reply):
@@ -435,22 +449,29 @@ def _write_bible(
         manifest.characters = {}
         manifest.character = Character()
     else:
+
+        def _dedup_wardrobe(items: list[WardrobeReply]) -> list[WardrobeState]:
+            seen_w: set[str] = set()
+            return [
+                WardrobeState(id=_unique_id(w.id, seen_w), description=w.description) for w in items
+            ]
+
         characters: dict[str, Character] = {}
+        seen_char_ids: set[str] = set()
         for item in bible.characters:
             if not item.appearance.strip():
                 continue
-            characters[item.id] = Character(
-                name=item.name or item.id,
+            char_id = _unique_id(item.id, seen_char_ids)
+            characters[char_id] = Character(
+                name=item.name or char_id,
                 appearance=item.appearance,
                 invariants=item.invariants,
-                wardrobe=[WardrobeState(id=w.id, description=w.description) for w in item.wardrobe],
+                wardrobe=_dedup_wardrobe(item.wardrobe),
             )
         if len(characters) > 1:
             primary = next(iter(characters.values()))
             if not primary.wardrobe and bible.wardrobe:
-                primary.wardrobe = [
-                    WardrobeState(id=w.id, description=w.description) for w in bible.wardrobe
-                ]
+                primary.wardrobe = _dedup_wardrobe(bible.wardrobe)
             if not primary.invariants and bible.invariants:
                 primary.invariants = bible.invariants
             manifest.characters = characters
@@ -458,9 +479,7 @@ def _write_bible(
         elif len(characters) == 1:
             single = next(iter(characters.values()))
             if not single.wardrobe and bible.wardrobe:
-                single.wardrobe = [
-                    WardrobeState(id=w.id, description=w.description) for w in bible.wardrobe
-                ]
+                single.wardrobe = _dedup_wardrobe(bible.wardrobe)
             if not single.invariants and bible.invariants:
                 single.invariants = bible.invariants
             manifest.character = single
@@ -468,10 +487,18 @@ def _write_bible(
             manifest.character = Character(
                 appearance=bible.appearance,
                 invariants=bible.invariants,
-                wardrobe=[
-                    WardrobeState(id=w.id, description=w.description) for w in bible.wardrobe
-                ],
+                wardrobe=_dedup_wardrobe(bible.wardrobe),
             )
+    seen_prop_ids: set[str] = set()
+    props = [
+        PropDesign(
+            id=_unique_id(p.id, seen_prop_ids),
+            name=p.name,
+            description=p.description,
+            sections=p.sections,
+        )
+        for p in bible.props
+    ]
     manifest.visual_bible = VisualBible(
         interpretation=_build_interpretation(bible.interpretation),
         concept=bible.concept,
@@ -479,8 +506,8 @@ def _write_bible(
         palette=bible.palette,
         lighting=bible.lighting,
         negative_prompt=bible.negative_prompt,
-        settings=[SetDesign(**s.model_dump()) for s in bible.settings],
-        props=[PropDesign(**p.model_dump()) for p in bible.props],
+        settings=[SetDesign(**s.model_dump()) for s in bible.settings if s.name.strip()],
+        props=props,
         rules=bible.rules,
     )
 
@@ -1172,6 +1199,15 @@ def _direct_shots(
                     style_text=style_text,
                     video_style=config.planning.video_style,
                 )
+            except LLMUnavailableError as exc:
+                log.warning(
+                    "The model became unavailable at shots %s to %s (%s); using rule-based "
+                    "direction for remaining batches.",
+                    batch[0].id,
+                    batch[-1].id,
+                    exc,
+                )
+                llm = None
             except LLMError as exc:
                 # One bad batch must not lose the whole plan: these shots get simple rule-based
                 # direction and can be edited in manifest.json.
@@ -1236,6 +1272,9 @@ def _direct_shots(
                 continue
             primary_id = resolved_primary
 
+            if shot.type is ShotType.LIPSYNC and len(enforced_singers) == 1:
+                _fix_mismatched_singer_prompt(shot, primary_id, manifest.characters)
+
             visible_ids = [primary_id]
             if is_together:
                 for cid in enforced_singers:
@@ -1290,8 +1329,6 @@ def _direct_shots(
                         )
                 else:
                     shot.singers = [primary_id]
-                    if len(enforced_singers) == 1:
-                        _fix_mismatched_singer_prompt(shot, primary_id, manifest.characters)
                     if shot.framing is Framing.CLOSE_UP:
                         visible_ids = [primary_id]
             else:
@@ -1590,8 +1627,8 @@ def _resolve_set(bible: VisualBible, name: str, shot_id: str) -> str:
         return exact.name
     wanted = unicodedata.normalize("NFKC", name).strip().casefold()
     for candidate in bible.settings:
-        cand_norm = unicodedata.normalize("NFKC", candidate.name).casefold()
-        if wanted and (wanted in cand_norm or cand_norm in wanted):
+        cand_norm = unicodedata.normalize("NFKC", candidate.name).strip().casefold()
+        if wanted and cand_norm and (wanted in cand_norm or cand_norm in wanted):
             return candidate.name
     log.warning(
         "%s: setting %r is not a set in the bible; using %r", shot_id, name, bible.settings[0].name

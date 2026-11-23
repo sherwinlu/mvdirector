@@ -42,6 +42,8 @@ class LipSyncScorer(Protocol):
 
 def envelope_at_fps(samples: np.ndarray, sample_rate: int, fps: float, n_frames: int) -> np.ndarray:
     """Vocal loudness (RMS) over each video frame's time window."""
+    if n_frames <= 0 or fps <= 0 or sample_rate <= 0:
+        return np.zeros(max(0, n_frames))
     edges = np.round(np.arange(n_frames + 1) * sample_rate / fps).astype(int)
     envelope = np.zeros(n_frames)
     for index in range(n_frames):
@@ -69,9 +71,10 @@ def smooth(series: np.ndarray, width: int = 3) -> np.ndarray:
 
 
 def _pearson(a: np.ndarray, b: np.ndarray) -> float:
-    if len(a) < 3 or a.std() < 1e-9 or b.std() < 1e-9:
+    if len(a) < 3 or len(a) != len(b) or a.std() < 1e-9 or b.std() < 1e-9:
         return 0.0
-    return float(np.corrcoef(a, b)[0, 1])
+    corr = float(np.corrcoef(a, b)[0, 1])
+    return corr if np.isfinite(corr) else 0.0
 
 
 def measure_sync(mouth: np.ndarray, envelope: np.ndarray, max_lag_frames: int) -> SyncMeasurement:
@@ -81,8 +84,9 @@ def measure_sync(mouth: np.ndarray, envelope: np.ndarray, max_lag_frames: int) -
     presence = float(np.mean(~np.isnan(mouth))) if length else 0.0
     mouth_series, envelope_series = smooth(fill_gaps(mouth)), smooth(envelope)
 
+    effective_lag = min(max(0, max_lag_frames), max(0, length - 3))
     best_correlation, best_lag = -1.0, 0
-    for lag in range(-max_lag_frames, max_lag_frames + 1):
+    for lag in range(-effective_lag, effective_lag + 1):
         if lag >= 0:
             a, b = mouth_series[lag:], envelope_series[: length - lag]
         else:

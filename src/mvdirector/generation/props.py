@@ -11,7 +11,11 @@ from pathlib import Path
 from mvdirector.comfy.client import ComfyClient
 from mvdirector.comfy.workflow import WorkflowTemplate
 from mvdirector.errors import ConfigError
-from mvdirector.generation.candidates import load_rgb_candidate, render_candidate_batch
+from mvdirector.generation.candidates import (
+    atomic_save_png,
+    load_rgb_candidate,
+    render_candidate_batch,
+)
 from mvdirector.models import Manifest, PropDesign
 from mvdirector.planning import prompts
 from mvdirector.project import Project, require_safe_id
@@ -70,6 +74,6 @@ def lock_prop(project: Project, manifest: Manifest, image: Path, prop_name: str)
     safe_id = require_safe_id(prop.id, "prop id")
     project.props_dir.mkdir(parents=True, exist_ok=True)
     locked = project.path(Path("assets") / "props" / f"{safe_id}.png")
-    loaded.save(locked)
+    atomic_save_png(loaded, locked)
     prop.plate = project.rel(locked)
     return locked

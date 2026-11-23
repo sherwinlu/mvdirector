@@ -4,7 +4,7 @@ Thank you for your interest in contributing to `mvdirector`! This document cover
 
 ## Development Setup
 
-Requires Python 3.10+ (Python 3.12 recommended) and `ffmpeg` / `ffprobe` on your `PATH`.
+Requires Python 3.11+ (Python 3.12 recommended) and `ffmpeg` / `ffprobe` on your `PATH`.
 
 ```bash
 brew install ffmpeg
@@ -36,7 +36,7 @@ mypy
 If you add or modify fields in `src/mvdirector/models.py`:
 
 1. Give new fields sensible defaults so existing manifests remain valid where possible.
-2. If you make a breaking change to `Manifest` after a release has shipped, bump `MANIFEST_SCHEMA_VERSION` and add a `mode="before"` migration validator so older manifests upgrade cleanly in memory. Before the first release there is nothing to migrate.
+2. If you make a breaking change to `Manifest`, bump `MANIFEST_SCHEMA_VERSION` and add a `mode="before"` migration validator so older manifests upgrade cleanly in memory.
 3. Regenerate the JSON Schemas and commit the result:
    ```bash
    mvd schema schemas

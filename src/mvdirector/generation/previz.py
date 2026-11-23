@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import logging
 import math
-import shutil
+import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +18,7 @@ from PIL import Image, ImageDraw
 from pydantic import ValidationError
 
 from mvdirector import media
+from mvdirector.audio.stems import atomic_copy
 from mvdirector.errors import ConfigError, MediaToolError
 from mvdirector.llm import LLMClient
 from mvdirector.models import Manifest, Shot
@@ -276,12 +278,19 @@ def render_blocking_video(
     depth_range_m: float = 16.0,
 ) -> Path:
     """Render ``plan`` across ``duration`` seconds and encode to MP4 via ffmpeg."""
+    if not math.isfinite(duration) or duration <= 0.0:
+        raise ConfigError(f"Previz duration must be positive and finite, got {duration!r}.")
+    if fps <= 0:
+        raise ConfigError(f"Previz fps must be positive, got {fps!r}.")
     media.require_tool("ffmpeg")
     # Ensure even dimensions for yuv420p H.264.
     even_w = max(64, width - (width % 2))
     even_h = max(64, height - (height % 2))
     total_frames = max(2, int(round(duration * fps)))
     dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{dst.stem}.", suffix=".mp4", dir=dst.parent)
+    os.close(fd)
+    tmp_path = Path(tmp_name)
 
     cmd = [
         "ffmpeg",
@@ -306,31 +315,40 @@ def render_blocking_video(
         "yuv420p",
         "-movflags",
         "+faststart",
-        str(dst.resolve()),
+        str(tmp_path.resolve()),
     ]
-    with subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE) as proc:
-        assert proc.stdin is not None
-        try:
-            for frame_idx in range(total_frames):
-                t = (frame_idx / max(1, total_frames - 1)) * duration
-                frame = render_blocking_frame(
-                    plan,
-                    t,
-                    even_w,
-                    even_h,
-                    depth_pass=depth_pass,
-                    depth_range_m=depth_range_m,
-                )
-                proc.stdin.write(frame.tobytes())
-            proc.stdin.close()
-            stderr = proc.stderr.read().decode("utf-8", errors="replace") if proc.stderr else ""
-            returncode = proc.wait()
-        except (OSError, ValueError) as exc:
-            proc.kill()
-            proc.wait()
-            raise MediaToolError(f"ffmpeg previz encode failed: {exc}") from exc
-    if returncode != 0:
-        raise MediaToolError(f"ffmpeg previz encode failed (exit {returncode}):\n{stderr}")
+    try:
+        with (
+            tempfile.TemporaryFile() as stderr_file,
+            subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=stderr_file) as proc,
+        ):
+            assert proc.stdin is not None
+            try:
+                for frame_idx in range(total_frames):
+                    t = (frame_idx / max(1, total_frames - 1)) * duration
+                    frame = render_blocking_frame(
+                        plan,
+                        t,
+                        even_w,
+                        even_h,
+                        depth_pass=depth_pass,
+                        depth_range_m=depth_range_m,
+                    )
+                    proc.stdin.write(frame.tobytes())
+                proc.stdin.close()
+                returncode = proc.wait()
+            except (OSError, ValueError) as exc:
+                proc.kill()
+                proc.wait()
+                raise MediaToolError(f"ffmpeg previz encode failed: {exc}") from exc
+            stderr_file.seek(0)
+            stderr = stderr_file.read().decode("utf-8", errors="replace")
+        if returncode != 0:
+            raise MediaToolError(f"ffmpeg previz encode failed (exit {returncode}):\n{stderr}")
+        os.replace(tmp_path, dst)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
     return dst
 
 
@@ -446,7 +464,7 @@ def lock_previz(
     dst = project.previz_path(shot.id, suffix=suffix)
     dst.parent.mkdir(parents=True, exist_ok=True)
     if video_path.resolve() != dst.resolve():
-        shutil.copyfile(video_path, dst)
+        atomic_copy(video_path, dst)
     shot.previz_video = project.rel(dst)
     # A depth pass rendered for earlier auto-previz shows a different camera move; sending both
     # would give the video model two conflicting guides.

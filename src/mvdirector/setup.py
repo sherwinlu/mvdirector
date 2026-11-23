@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import importlib.util
+import ipaddress
+import math
 import os
 import platform
 import re
@@ -30,8 +32,9 @@ from mvdirector.config import (
     ComfyConfig,
     ProjectConfig,
     is_allowed_env_var,
+    mask_unset_allowed_env_refs,
 )
-from mvdirector.errors import ComfyConnectionError, ConfigError
+from mvdirector.errors import ComfyConnectionError, ComfyJobError, ConfigError
 from mvdirector.models import ProjectMode
 from mvdirector.store import atomic_write
 from mvdirector.tuning import (
@@ -39,8 +42,6 @@ from mvdirector.tuning import (
     update_top_level_yaml_scalar,
     update_yaml_scalar,
 )
-
-_ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}")
 
 DEFAULT_COMFY_URL = "http://127.0.0.1:8188"
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
@@ -108,6 +109,14 @@ VIDEO_PRESETS: dict[str, VideoPreset] = {
         frame_offset=1,
         size_multiple=1,
         max_clip_seconds=5.0,
+    ),
+    "exact": VideoPreset(
+        key="exact",
+        label="Exact-duration / cloud API or any other model (1n+0 frames, any resolution)",
+        frame_multiple=1,
+        frame_offset=0,
+        size_multiple=1,
+        max_clip_seconds=10.0,
     ),
     "custom": VideoPreset(
         key="custom",
@@ -184,7 +193,12 @@ def is_loopback_url(url: str) -> bool:
     """Return True when ``url`` points to the local host (not a separate remote server)."""
     parsed = urllib.parse.urlparse(url.strip())
     host = (parsed.hostname or "").lower()
-    return host in _LOOPBACK_HOSTS
+    if host in _LOOPBACK_HOSTS:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def validate_comfy_token_env(name: str) -> str:
@@ -297,7 +311,7 @@ def probe_comfy(
     try:
         with ComfyClient(config, transport=transport) as client:
             stats = client.ping()
-    except (ComfyConnectionError, ValueError) as exc:
+    except (ComfyConnectionError, ComfyJobError, ValueError) as exc:
         return ComfyProbe(url=normalized, reachable=False, error=str(exc))
 
     devices: list[str] = []
@@ -318,11 +332,21 @@ def probe_comfy(
                 if isinstance(name, str) and name.strip():
                     devices.append(name.strip())
                 total = dev.get("vram_total")
-                if isinstance(total, (int, float)) and total > 0:
+                if (
+                    isinstance(total, (int, float))
+                    and not isinstance(total, bool)
+                    and math.isfinite(total)
+                    and total > 0
+                ):
                     total_gb = total / (1024.0**3)
                     max_total = total_gb if max_total is None else max(max_total, total_gb)
                 free = dev.get("vram_free")
-                if isinstance(free, (int, float)) and free >= 0:
+                if (
+                    isinstance(free, (int, float))
+                    and not isinstance(free, bool)
+                    and math.isfinite(free)
+                    and free >= 0
+                ):
                     free_gb = free / (1024.0**3)
                     max_free = free_gb if max_free is None else max(max_free, free_gb)
 
@@ -443,20 +467,7 @@ def _replace_section_field_block(
 
 def _mask_unset_allowed_env_refs(value: Any) -> Any:
     """Replace unset allowed ``${VAR}`` placeholders so validation works pre-export."""
-    if isinstance(value, str):
-
-        def _sub(match: re.Match[str]) -> str:
-            var_name = match.group(1)
-            if is_allowed_env_var(var_name) and os.environ.get(var_name) is None:
-                return "placeholder"
-            return match.group(0)
-
-        return _ENV_REF_RE.sub(_sub, value)
-    if isinstance(value, dict):
-        return {k: _mask_unset_allowed_env_refs(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_mask_unset_allowed_env_refs(item) for item in value]
-    return value
+    return mask_unset_allowed_env_refs(value)
 
 
 def apply_setup_config(project_dir: Path, options: SetupOptions) -> Path:
@@ -557,10 +568,10 @@ def apply_setup_config(project_dir: Path, options: SetupOptions) -> Path:
         ):
             raise ConfigError(f"Section '{section}' in {yaml_path} must be a mapping or null.")
         sec_empty_re = re.compile(
-            rf"^{re.escape(section)}:[ \t]*(?:null|~|\{{[ \t]*\}})([ \t]*#[^\r\n]*)?$",
+            rf"^{re.escape(section)}:[ \t]*(?:null|~|\{{[ \t]*\}})([ \t]*#[^\r\n]*)?(\r?)$",
             re.MULTILINE,
         )
-        updated_text = sec_empty_re.sub(rf"{section}:\1", updated_text)
+        updated_text = sec_empty_re.sub(rf"{section}:\1\2", updated_text)
         if replace_block:
             updated_text = _replace_section_field_block(
                 updated_text, section, field_name, formatted_val
@@ -628,13 +639,16 @@ def render_environment_report(report: EnvironmentReport) -> str:
         lines.append(f"  MISS Ollama at {report.ollama.url}: {report.ollama.error}")
         lines.append(
             "       -> Install Ollama (https://ollama.com), start `ollama serve`, "
-            f"then `ollama pull {DEFAULT_LLM_MODEL}`."
+            f"then `ollama pull {DEFAULT_LLM_MODEL}` — or point at a remote/cloud LLM "
+            "with `--ollama-url` or `--llm-provider`."
         )
 
     if report.comfy.reachable:
         details: list[str] = []
         if report.comfy.comfy_version:
-            details.append(f"v{report.comfy.comfy_version}")
+            cleaned_ver = report.comfy.comfy_version.strip().lstrip("v")
+            if cleaned_ver:
+                details.append(f"v{cleaned_ver}")
         if report.comfy.devices:
             details.append(report.comfy.devices[0])
         if report.comfy.vram_total_gb is not None:
@@ -649,8 +663,8 @@ def render_environment_report(report: EnvironmentReport) -> str:
     else:
         lines.append(f"  MISS ComfyUI at {report.comfy.url}: {report.comfy.error}")
         lines.append(
-            "       -> Start ComfyUI locally on port 8188, or point at a separate server with "
-            "`--comfy-url <url>` (and `--comfy-token-env COMFY_TOKEN` if authenticated)."
+            "       -> Start ComfyUI locally on port 8188, or point at a home-LAN/cloud server "
+            "with `--comfy-url <url>` (and `--comfy-token-env COMFY_TOKEN` if authenticated)."
         )
 
     return "\n".join(lines)

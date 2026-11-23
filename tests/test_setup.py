@@ -539,3 +539,77 @@ def test_setup_regression_multiline_headers_unset_env_and_atomic_init(
     cfg = load_config(cfg_path)
     assert cfg.title == "Updated Title"
     assert cfg.comfy.headers == {"Authorization": "Bearer tok-after"}
+
+
+def test_probe_comfy_handles_http_auth_error_and_prefixed_version() -> None:
+    unauth = httpx.MockTransport(lambda _req: httpx.Response(401, text="Unauthorized"))
+    probe = probe_comfy("https://gpu.example.com:8188", transport=unauth)
+    assert probe.reachable is False
+    assert "401" in (probe.error or "")
+
+    report = EnvironmentReport(
+        python_version="3.12.4",
+        platform_label="Darwin arm64",
+        ffmpeg_ok=True,
+        ffprobe_ok=True,
+        extras=[],
+        ollama=OllamaProbe("http://127.0.0.1:11434", True, ["gemma3:12b"]),
+        comfy=ComfyProbe(
+            "http://192.168.1.50:8188",
+            True,
+            devices=["cuda:0 RTX 4090"],
+            comfy_version="v0.3.26",
+        ),
+    )
+    rendered = render_environment_report(report)
+    assert "(v0.3.26, cuda:0 RTX 4090)" in rendered
+    assert "vv0.3.26" not in rendered
+
+
+def test_setup_exact_preset_and_check_only_non_ollama(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report_no_ollama = EnvironmentReport(
+        python_version="3.12.4",
+        platform_label="Darwin arm64",
+        ffmpeg_ok=True,
+        ffprobe_ok=True,
+        extras=[ExtraStatus("qc", True, "MediaPipe QC")],
+        ollama=OllamaProbe("http://127.0.0.1:11434", False, error="Unreachable"),
+        comfy=ComfyProbe("http://192.168.1.50:8188", True, devices=["cuda:0 RTX 4090"]),
+    )
+    monkeypatch.setattr(api, "inspect_environment", lambda **_kw: report_no_ollama)
+
+    # Default --check-only expects Ollama and fails when unreachable.
+    res_ollama = runner.invoke(app, ["setup", "--check-only"])
+    assert res_ollama.exit_code == 1
+
+    # Non-Ollama provider does not require local Ollama to pass --check-only.
+    res_cloud = runner.invoke(app, ["setup", "--check-only", "--llm-provider", "anthropic"])
+    assert res_cloud.exit_code == 0
+
+    # Model-neutral 'exact' preset configures 1n+0 frames and size_multiple=1.
+    target = tmp_path / "exact-model"
+    res_exact = runner.invoke(
+        app,
+        [
+            "setup",
+            str(target),
+            "--non-interactive",
+            "--comfy-url",
+            "http://192.168.1.50:8188",
+            "--llm-provider",
+            "anthropic",
+            "--llm-model",
+            "claude-sonnet-4-5",
+            "--video-preset",
+            "exact",
+        ],
+    )
+    assert res_exact.exit_code == 0, res_exact.output
+    cfg = load_config(target / CONFIG_FILENAME)
+    assert cfg.video.frame_multiple == 1
+    assert cfg.video.frame_offset == 0
+    assert cfg.video.size_multiple == 1
+    assert cfg.video.max_clip_seconds == 10.0
+    assert cfg.comfy.base_url == "http://192.168.1.50:8188"

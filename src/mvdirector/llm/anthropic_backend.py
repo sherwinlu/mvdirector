@@ -44,14 +44,33 @@ class AnthropicChat(ChatBackend):
             anthropic.PermissionDeniedError,
             anthropic.NotFoundError,
         )
+        self._owned_client = False
         if client is None:
             options: dict[str, Any] = {"timeout": timeout}
+            http_client = None
+            default_http_cls = getattr(anthropic, "DefaultHttpxClient", None)
+            if callable(default_http_cls):
+                http_client = default_http_cls(follow_redirects=False, timeout=timeout)
+                options["http_client"] = http_client
             if api_key:
                 options["api_key"] = api_key
             if base_url:
                 options["base_url"] = base_url
-            client = anthropic.Anthropic(**options)
+            try:
+                client = anthropic.Anthropic(**options)
+            except BaseException:
+                if http_client is not None:
+                    http_client.close()
+                raise
+            self._owned_client = True
         self._client = client
+
+    def close(self) -> None:
+        if self._owned_client:
+            closer = getattr(self._client, "close", None)
+            if callable(closer):
+                closer()
+            self._owned_client = False
 
     def _send(self, system: str, messages: list[Message], schema: type[BaseModel]) -> Reply:
         try:

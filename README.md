@@ -1,19 +1,20 @@
 # mvdirector
 
-Plan, generate, quality-check and assemble a lip-synced music video from a Suno song.
+Plan, generate, quality-check and assemble a lip-synced (or narrative / visual) music video from any song — a single audio track, DAW stems, or a Suno export.
 
-You supply the mix, the vocal stem, the lyrics and a style brief (or generate lyrics and a brief with `mvd brief`). The pipeline analyzes the audio, has an LLM direct a shot list (a local Ollama model by default, which needs no API key; Claude, OpenAI and Gemini work too), locks character sheets, turnaround videos, set plates, hero props and optional 3D camera-blocking previz, renders stills and video clips **through ComfyUI** (open-weight GPU models like Qwen, Z-Image, Krea, LTX, Wan, or MOSS, or paid cloud API nodes like Nano Banana, Seedream, Seedance, Grok, or P-H3 / MiniMax), rejects and regenerates anything that fails its quality checks, and cuts the result to the beat with the original mix on top.
+You supply the audio, lyrics and a style brief (or generate stems/lyrics from a single track with `mvd prepare`, or draft lyrics and a brief with `mvd brief`). The pipeline analyzes the audio, uses any configured LLM (local or remote Ollama by default with no API key required; Claude, OpenAI, Gemini, or any OpenAI-compatible server work too) to direct a shot list, locks character sheets, turnaround videos, set plates, hero props and optional 3D camera-blocking previz, renders stills and video clips **through ComfyUI** using **whatever image, video, and lip-sync models you prefer** (open-weight models like Qwen, Z-Image, Flux, Krea, LTX, Wan, HunyuanVideo, or MOSS, or paid cloud API nodes like Nano Banana, Seedream, Seedance, Grok, Kling, or P-H3 / MiniMax), rejects and regenerates anything that fails its quality checks, and cuts the result to the beat with the original mix on top.
 
-The orchestrator runs on your Mac (or Linux/Windows machine). ComfyUI is the single execution engine for all image and video generation and can run anywhere with an HTTP address: a remote cloud GPU instance, a local install, or a lightweight CPU-only ComfyUI instance when your workflows use paid cloud API nodes.
+The orchestrator runs on macOS, Linux, or Windows and is **setup-, model-, and ComfyUI-version-agnostic**. ComfyUI is the single execution engine for all image and video generation and can run wherever you want over HTTP(S): **locally on the same machine**, **on another computer in your home network (LAN / Tailscale)**, **on a remote cloud GPU server**, or as a lightweight CPU-only instance driving paid cloud API nodes.
 
 ## Status
 
-- **Alpha release — single-user local orchestrator:** `mvdirector` is designed for a single user running locally (talking to local or private ComfyUI/LLM endpoints). The Streamlit review UI, ComfyUI, and Ollama have no built-in authentication and bind to `127.0.0.1` by default.
-- **Orchestration verified on live ComfyUI + Ollama:** A three-character duet project has been taken end-to-end on a remote GPU ComfyUI instance with a local Ollama model (`gemma3:12b`) doing the vision checks: `mvd analyze`, `mvd plan`, `mvd reference generate` / `lock` (four-panel sheets), `mvd stills` (Qwen-Image and Qwen-Image-Edit 2.1), `mvd videos` (Wan 2.1 + InfiniteTalk singing clips; LTX-2.5 in an earlier run), shot-by-shot review, and `mvd assemble`. Not yet verified: a complete solo-singer song on a real GPU host (solo paths are covered by unit tests only). LTX-2.5's audio-conditioned workflow showed lip-sync drift on singing clips, so pair it with InfiniteTalk, LatentSync or Seedance for tight mouth sync.
-- **Automated test suite:** Extensive unit and pipeline tests cover audio analysis, shot timing, single- and multi-character direction, workflow templating and bindings, `ComfyClient`, LLM backends, QC scoring and lip-sync maths, retry/review policies, path containment, safe identifier and env-var validation, schema migration, stale-lock recovery, and FFmpeg assembly (against fakes for ComfyUI and cloud LLM endpoints).
-- **You must supply the workflows.** Export your own ComfyUI API workflows and map their inputs in `<name>.bindings.json` (see [Workflows & Model Bindings](docs/workflows.md)).
-- **QC thresholds are starting points.** Calibrate thresholds on 20 to 30 of your own clips with `mvd calibrate`, and inspect `mvd qc-report` before trusting the gates. The lip-sync check is advisory by default: on sung vocals it did not predict what a person judged in sync, so a weak score sends the clip to review instead of rejecting it, and a singing shot that runs out of attempts falls back to a performance shot. See [Pipeline, Assets, Quality Checks & Review](docs/pipeline-and-qc.md).
-- **Duets:** the lead gets all four reference panels and the second singer gets only the front panel, so the second singer drifts more. Pin hair and signature details in `characters.<id>.invariants` for every character; they are written into every still prompt.
+- **First Beta release (`v0.8.0b1`) — single-user orchestrator:** `mvdirector` is ready for beta testing as a single-user orchestrator talking to local, home-LAN, or private cloud ComfyUI and LLM endpoints. The Streamlit review UI, ComfyUI, and Ollama have no built-in authentication and bind to `127.0.0.1` by default.
+- **Tested end-to-end both locally and with remote ComfyUI:** The full pipeline (`mvd analyze` → `mvd plan` → reference sheets & plates → `mvd stills` → `mvd videos` → review → `mvd assemble`) has been verified end-to-end both **fully locally** (orchestrator, ComfyUI, and local LLM on one machine) and on a **remote ComfyUI setup** (orchestrator running locally against a separate ComfyUI server over HTTP/HTTPS — the same path used for a second computer on your home network or a cloud GPU host).
+- **Setup-, model-, and ComfyUI-version-agnostic:** Bring whichever image, video, lip-sync, and LLM models you want — running locally or remotely — without changing Python code. `mvdirector` talks to ComfyUI through your exported `.api.json` graphs and `.bindings.json` maps over ComfyUI's core HTTP endpoints (`/system_stats`, `/upload/image`, `/prompt`, `/history`, `/view`), degrading optional endpoints (`/free`, `/object_info`, `HEAD /view`) gracefully across ComfyUI versions.
+- **Automated test suite:** Extensive unit, integration, security, and pipeline tests cover audio analysis, shot timing, single- and multi-character direction, workflow templating and bindings, `ComfyClient` version compatibility, LLM backends, QC scoring and lip-sync maths, retry/review policies, MCP server hardening, path containment, safe identifier and env-var validation, schema migration, stale-lock recovery, and FFmpeg assembly.
+- **You must supply the workflows:** Export your own ComfyUI API workflows (`.api.json`) and map their inputs in `<name>.bindings.json` (see [Workflows & Model Bindings](docs/workflows.md)).
+- **QC thresholds are starting points:** Calibrate thresholds on 20 to 30 of your own clips with `mvd calibrate`, and inspect `mvd qc-report` before trusting the gates. The lip-sync check is advisory by default: on sung vocals it did not reliably separate in-sync clips from out-of-sync ones, so a weak score sends the clip to review instead of rejecting it, and a singing shot that runs out of attempts falls back to a performance shot (or optional Smart Cutaway rescue). See [Pipeline, Assets, Quality Checks & Review](docs/pipeline-and-qc.md).
+- **Duets:** the lead gets all four reference panels and the second singer gets only the front panel, so the second singer can drift more. Pin hair and signature details in `characters.<id>.invariants` for every character; they are written into every still prompt.
 
 ## How it works
 
@@ -48,20 +49,20 @@ Everything revolves around one file, `manifest.json`. Each stage reads it, does 
 
 ## Quick start
 
-> Running everything locally for the first time? Follow the step-by-step [Local Quickstart Guide](docs/local-quickstart.md) or run `mvd setup` to inspect your environment and configure a project interactively.
+> Getting started locally or with a remote ComfyUI server? Follow the step-by-step [Quickstart Guide](docs/local-quickstart.md) or run `mvd setup` to inspect your environment and configure a project interactively.
 
 ```bash
 brew install ffmpeg
 python -m venv .venv && source .venv/bin/activate
 pip install -c constraints.txt -e ".[qc,align,ui,dev]"      # add "anthropic" to use Claude
-ollama pull gemma3:12b                                      # default local LLM, see docs/setup.md for cloud providers
-export COMFY_URL=http://127.0.0.1:8188                      # or your remote ComfyUI HTTPS URL
+ollama pull gemma3:12b                                      # default local LLM; or use any Ollama/cloud/OpenAI-compatible model (docs/setup.md)
+export COMFY_URL=http://127.0.0.1:8188                      # local, home LAN/Tailscale (http://192.168.x.x:8188), or remote cloud HTTPS URL
 
 mvd setup projects/my-song                   # or `mvd init projects/my-song` (add `--mode mix` for 30-90+ min mixes)
 cd projects/my-song
 ```
 
-1. Put the Suno files in `inputs/`: `mix.wav`, `vocals.wav` (optionally a drum stem), `inputs/lyrics.txt` (`[Section]` tags and `(adlibs)`), and `inputs/style.md` — or run `mvd brief --idea "..."` before generating a song, or start from a single `.mp3`/`.wav` file with `mvd prepare /path/to/song.mp3` (requires the `stems` and `align` extras). For `mode: mix`, supply `inputs/mix.wav` and an optional `inputs/tracklist.json` (`.yaml`, `.cue`, or `.txt`).
+1. Put your song files in `inputs/`: `mix.wav`, `vocals.wav` (optionally a drum stem or DAW/Suno stem pack in `inputs/stems/`), `inputs/lyrics.txt` (`[Section]` tags and `(adlibs)`), and `inputs/style.md` — or start from a single `.mp3`/`.wav` file with `mvd prepare /path/to/song.mp3` (requires the `stems` and `align` extras), or draft lyrics and a brief first with `mvd brief --idea "..."`. For `mode: mix`, supply `inputs/mix.wav` and an optional `inputs/tracklist.json` (`.yaml`, `.cue`, `.csv`, or `.txt`).
 2. Edit `project.yaml` (title, mode, resolution, LLM provider/model, and `video:` / `mix:` settings matching your ComfyUI workflow). With `auto_tune: true` (default), `mvd prepare`, `mvd analyze`, and `mvd plan` automatically tune default transcription, pacing, and lip-sync parameters for your track (`mvd tune [--apply]` previews or writes them to `project.yaml`).
 3. Export and bind your ComfyUI workflows under `workflows/` (see `workflows/README.md` and [Workflows & Model Bindings](docs/workflows.md)).
 
@@ -91,9 +92,9 @@ mvd assemble                                              # output/<title>.mp4
 
 ## Documentation
 
-- [Local Quickstart Guide](docs/local-quickstart.md) — Step-by-step walkthrough for running everything locally (Apple Silicon Mac, Linux/Windows NVIDIA GPU, `mvd setup`, workflow exports, and your first 2-shot `--draft` render).
-- [Installation, Docker & Language Models](docs/setup.md) — Python extras, commercial licensing (`mediapipe` vs `insightface`), Docker Compose profiles & all-in-one GPU image, Apple Silicon setup, and configuring/testing LLM providers (`anthropic`, `openai`, `gemini`, `ollama`, `openai_compatible`).
-- [ComfyUI Workflows & Model Bindings](docs/workflows.md) — Mapping `.api.json` + `.bindings.json`, `reference_notation` (`prose` vs `tags`), `audio_video` black-screen wrapper, model-family `video:` settings table, paid cloud API nodes, and `${ENV}` allowlist.
+- [Quickstart Guide (Local & Remote ComfyUI)](docs/local-quickstart.md) — Step-by-step walkthrough for running everything locally (Apple Silicon Mac, Linux/Windows GPU) or with ComfyUI on a separate home-LAN or cloud server, including `mvd setup`, workflow exports, and your first 2-shot `--draft` render.
+- [Installation, Docker & Language Models](docs/setup.md) — Supported topologies (local, home LAN, cloud), Python extras, commercial licensing (`mediapipe` vs `insightface`), Docker Compose profiles & all-in-one GPU image, Apple Silicon setup, and configuring/testing LLM providers (`anthropic`, `openai`, `gemini`, `ollama`, `openai_compatible`).
+- [ComfyUI Workflows, Model Bindings & Version Compatibility](docs/workflows.md) — Mapping `.api.json` + `.bindings.json` for any open-weight or cloud API model, ComfyUI version-agnostic HTTP compatibility, `reference_notation` (`prose` vs `tags`), `audio_video` black-screen wrapper, model-family `video:` settings table, and `${ENV}` allowlist.
 - [Pipeline, Assets, Quality Checks & Review](docs/pipeline-and-qc.md) — Project layout, `mvd prepare`, `mvd brief`, track auto-tuning (`mvd tune`), visual bible & deterministic rules, reference sheets & turnaround videos, derived/embedded set plates & hero props, 3D blocking previz, `--draft` & `mvd upscale`, `allow_cuts` montage, QC gates, retry ladder, calibration, `light`/`strict` review, and Long-Form Mix Mode (`mode: mix`).
 - [Using mvdirector as a library](docs/library.md) — `mvdirector.api`, the public surface, and the `StateStore`, `AssetStorage` and `ComfyEndpointProvider` extension points.
 - [MCP Server & Agent Integration](docs/mcp.md) — Driving `mvdirector` from Claude Code, Cursor, Antigravity, or a remote GPU workstation via `mvd mcp` (`stdio` + Streamable HTTP, async jobs, and the bundled `mvdirector://skill` guide).

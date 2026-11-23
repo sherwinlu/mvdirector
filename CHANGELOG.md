@@ -6,7 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.8.0b1] - 2026-11-22
+
+First public **Beta** release, verified end-to-end both locally and with ComfyUI running on a remote host.
+
 ### Added
+- **Guided Setup & Local/Remote Onboarding (`mvd setup`, `docs/local-quickstart.md`):**
+  - Added interactive and `--non-interactive` `mvd setup` (plus `--check-only` diagnostics) probing `ffmpeg`/`ffprobe`, installed extras, Ollama (local or remote), and ComfyUI (local, home LAN/Tailscale computer, or authenticated cloud HTTPS server via `--comfy-token-env`), with model-family video presets (`ltx`, `wan`, `wan-i2v`, `exact`, `custom`).
+  - Added a step-by-step [Local Quickstart Guide](docs/local-quickstart.md) covering fully local, home-LAN, and cloud ComfyUI setups.
+- **MCP Server & Agent Integration (`mvdirector.mcp`, `mvd mcp`):**
+  - Zero-dependency Model Context Protocol server exposing pipeline stages and async background jobs over `stdio` and Streamable HTTP (`--http`) with bearer-token auth, loopback/Origin/Host guards, workspace containment, and the bundled `mvdirector://skill` workflow guide.
+- **Structural Cues & Mix-Mode Upgrades (`mvdirector.audio.cues`):**
+  - Added structural energy landmarks, WeaveShift tracklist/CSV ingestion, and DSP polish across analysis and Long-Form Mix Mode.
 - **Audio & Lip-Sync Precision:**
   - `video.audio_vae_offset_seconds` (default `0.0`) and `video.audio_mirror_pad` (default `false`) for rational VAE front-crop audio shift alignment (including lead-silence padding for negative offsets at `start == 0`) and periodic triangle-wave mirror tail padding without silence cliffs.
   - `video.sync_delay_compensation` (default `false`: opt-in, because the default MediaPipe lag estimate is noisy on sung vocals), `qc.video.lipsync_min_confidence`, `qc.video.desync_face_fraction_min`, and `Attempt.sync_delay_seconds` to apply measured per-take lip-sync lag compensation (clamped to audio handles) during assembly and compute viewer-visible `desync_risk`.
@@ -28,6 +39,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - RGB-space (`gbrp`) cinematic color grade presets (`video.color_grade`, `video.film_grain`), beat-preserving `xfade` transitions (`video.transition`, `video.transition_seconds`, capped to real tail handles, disabled across `CONTINUE` seams, and rendered one crossfade at a time so memory does not grow with the shot count), and metadata stripping (`video.strip_metadata`).
   - Smoothstep seamless loop cross-dissolve option (`mix.loop_blend`: `xfade` | `smoothstep`) for long-form mix chapters.
   - Opt-in content-addressed ComfyUI render cache (`comfy.cache_enabled`, default `false`, stored under `<project>/.comfy_cache`, purged by `mvd clean`), content-addressed upload deduplication (`comfy.dedup_uploads`), batch cache sorting (`comfy.sort_batch_for_cache`), VRAM floor probing (`comfy.min_free_vram_gb`, checked once per phase after `/free` has had time to release memory; when it cannot be met the run stops with `ComfyResourceError` instead of using up shot attempts), prompt length budgeting (`comfy.max_prompt_chars`), ComfyUI UI-to-API workflow conversion (`convert_ui_workflow`), and live `/object_info` pre-flight dependency checks in `mvd validate`.
+
+### Fixed
+- **QA, Security & ComfyUI Version-Agnostic Hardening:**
+  - Hardened `ComfyClient` and `convert_ui_workflow` across ComfyUI versions: sets a default `mvdirector/<version>` `User-Agent` (respecting user overrides), handles V1 and V3 `/object_info` combo schemas, safely parses varied `/history` status/output/error shapes, supports both list and dict `links` and `control_after_generate` metadata in UI exports, and catches HTTP/auth errors cleanly during `probe_comfy`.
+  - Comprehensive white/black-box QA and security hardening across path/symlink containment, env-var allowlists, MCP HTTP transport, atomic writes, FFmpeg subprocess boundaries, and numeric edge cases.
 
 ## [0.7.0] - 2026-11-22
 

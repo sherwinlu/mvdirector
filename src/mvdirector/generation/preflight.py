@@ -47,19 +47,16 @@ def check_assets(
     still = templates.get("still")
     needs_ref = still is None or still.accepts("reference_image")
     if len(manifest.characters) > 1:
-        active_chars = {
-            manifest.resolve_character_id(s.character) or manifest.primary_character_id()
-            for s in singer
-        }
+        used_by_char: dict[str, set[str]] = {}
+        for s in singer:
+            for cid, _char, state_id in manifest.visible_characters(s):
+                if cid:
+                    used_by_char.setdefault(cid, set())
+                    if state_id:
+                        used_by_char[cid].add(state_id)
         for char_id, char in manifest.characters.items():
-            if char_id not in active_chars:
+            if char_id not in used_by_char:
                 continue
-            char_shots = [
-                s
-                for s in singer
-                if (manifest.resolve_character_id(s.character) or manifest.primary_character_id())
-                == char_id
-            ]
             if needs_ref:
                 if char.default_reference is None:
                     result.problems.append(
@@ -67,8 +64,7 @@ def check_assets(
                         f"generate --character {char_id}`, then `mvd reference lock <image> "
                         f"--character {char_id}`."
                     )
-                used = {s.wardrobe for s in char_shots if s.wardrobe}
-                for state in char.states_without_reference(used):
+                for state in char.states_without_reference(used_by_char[char_id]):
                     result.problems.append(
                         f"No reference sheet for '{char_id}' wardrobe state '{state}'. Run "
                         f"`mvd reference generate --character {char_id} --state {state}`, then "

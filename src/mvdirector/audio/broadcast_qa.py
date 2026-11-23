@@ -14,6 +14,7 @@ Credits & Attribution:
 
 from __future__ import annotations
 
+import bisect
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -23,6 +24,21 @@ import numpy as np
 import soundfile as sf
 
 from mvdirector.errors import MediaToolError
+
+_CLICK_MIN_GAP_SECONDS = 0.05
+
+
+def _accept_click(clicks: list[float], t_sec: float) -> bool:
+    """True when ``t_sec`` is further than the de-dup gap from every click already accepted.
+
+    Scanning the whole accumulated list per candidate is O(clicks^2), and both callers run over
+    a complete mix with no boundary hints: a long set with thousands of accepted clicks turned a
+    seconds-long QA step into minutes. ``clicks`` is kept sorted so only the candidate's own
+    neighbourhood has to be probed, which is the same answer in O(log n).
+    """
+    lo = bisect.bisect_left(clicks, t_sec - _CLICK_MIN_GAP_SECONDS)
+    hi = bisect.bisect_right(clicks, t_sec + _CLICK_MIN_GAP_SECONDS)
+    return lo == hi
 
 
 @dataclass(frozen=True)
@@ -163,6 +179,8 @@ def integrated_lufs(samples: np.ndarray, sr: int) -> float:
         arr = arr[:, None]
     if arr.size == 0 or sr <= 0:
         return -70.0
+    if not np.all(np.isfinite(arr)):
+        raise MediaToolError("Audio samples contain NaN or infinite values.")
 
     ch_weights = _channel_weights(arr.shape[1])
     block_len = max(1, int(round(0.400 * sr)))
@@ -189,6 +207,8 @@ def true_peak_dbtp(samples: np.ndarray, *, oversample: int = 4) -> float:
         arr = arr[:, None]
     if arr.size == 0:
         return -120.0
+    if not np.all(np.isfinite(arr)):
+        raise MediaToolError("Audio samples contain NaN or infinite values.")
 
     kernels = _true_peak_kernels(oversample)
     peak = _max_oversampled_peak(arr, kernels)
@@ -216,6 +236,8 @@ def scan_splice_clicks(
         wav = wav.mean(axis=1)
     if wav.size < 64 or sr <= 0:
         return []
+    if not np.all(np.isfinite(wav)):
+        raise MediaToolError("Audio samples contain NaN or infinite values.")
 
     # High-frequency discontinuity detector (second difference strongly emphasizes sample steps).
     hpf = np.abs(np.diff(wav, n=2, prepend=wav[:2]))
@@ -223,13 +245,13 @@ def scan_splice_clicks(
     clicks: list[float] = []
 
     if boundary_times is not None:
+        ordered_bounds = sorted(t for t in boundary_times if math.isfinite(t) and t > 0.0)
         search_windows = [
             (
                 max(win_ms, int(round((t - 0.025) * sr))),
                 min(wav.size - win_ms, int(round((t + 0.025) * sr))),
             )
-            for t in boundary_times
-            if t > 0.0
+            for t in ordered_bounds
         ]
     else:
         step = max(win_ms, int(round(0.020 * sr)))
@@ -256,12 +278,8 @@ def scan_splice_clicks(
         floor = max(1e-5, float(np.median(np.concatenate([pre, post]))))
         tail_rms = float(np.sqrt(np.mean(post * post)))
         # True splice clicks are impulse-like (high peak-to-floor and low sustained tail).
-        if (
-            peak / floor >= spike_ratio
-            and tail_rms < 0.35 * peak
-            and (not clicks or t_sec - clicks[-1] > 0.05)
-        ):
-            clicks.append(round(t_sec, 4))
+        if peak / floor >= spike_ratio and tail_rms < 0.35 * peak and _accept_click(clicks, t_sec):
+            bisect.insort(clicks, round(t_sec, 4))
     return clicks
 
 
@@ -323,6 +341,8 @@ def analyze_broadcast_audio(
     boundaries for exact BS.1770-4 results. Raises ``MediaToolError`` when the audio contains
     NaN or infinite samples, which would otherwise read as silence.
     """
+    if not audio_path.is_file():
+        raise MediaToolError(f"Audio file not found: {audio_path}")
     try:
         return _analyze_broadcast_soundfile(
             audio_path,
@@ -343,6 +363,8 @@ def analyze_broadcast_audio(
                 drum_onset_times=drum_onset_times,
                 chunk_seconds=chunk_seconds,
             )
+    except OSError as exc:
+        raise MediaToolError(f"Could not read audio file {audio_path}: {exc}") from exc
 
 
 def _analyze_broadcast_soundfile(
@@ -361,7 +383,10 @@ def _analyze_broadcast_soundfile(
         ch_weights = _channel_weights(n_channels)
         block_len = max(1, int(round(0.400 * sr)))
         hop_len = max(1, int(round(0.100 * sr)))
-        chunk_frames = max(block_len * 4, int(round(max(1.0, chunk_seconds) * sr)))
+        safe_chunk_s = (
+            chunk_seconds if (math.isfinite(chunk_seconds) and chunk_seconds > 0.0) else 10.0
+        )
+        chunk_frames = max(block_len * 4, int(round(max(1.0, safe_chunk_s) * sr)))
         kernels = _true_peak_kernels(4)
         tp_overlap = 6
         win_ms = max(8, int(round(0.010 * sr)))
@@ -390,6 +415,11 @@ def _analyze_broadcast_soundfile(
         max_peak = 0.0
         clicks: list[float] = []
 
+        sorted_boundaries = (
+            sorted(t for t in boundary_times if math.isfinite(t) and t > 0.0)
+            if boundary_times is not None
+            else None
+        )
         while True:
             chunk = handle.read(chunk_frames, dtype="float64", always_2d=True)
             if chunk.size == 0:
@@ -443,9 +473,9 @@ def _analyze_broadcast_soundfile(
             c_buf = np.concatenate([click_carry, mono]) if overlap_len else mono
             buf_start_sec = (chunk_start_sample - overlap_len) / sr
             buf_end_sec = (chunk_start_sample + chunk.shape[0]) / sr
-            if boundary_times is not None:
+            if sorted_boundaries is not None:
                 local_bounds: list[float] | None = [
-                    t - buf_start_sec for t in boundary_times if buf_start_sec < t <= buf_end_sec
+                    t - buf_start_sec for t in sorted_boundaries if buf_start_sec < t <= buf_end_sec
                 ]
             else:
                 local_bounds = None
@@ -463,8 +493,8 @@ def _analyze_broadcast_soundfile(
                 )
                 for rel_t in local_clicks:
                     abs_t = round(buf_start_sec + rel_t, 4)
-                    if abs_t > 0.0 and (not clicks or abs_t - clicks[-1] > 0.05):
-                        clicks.append(abs_t)
+                    if abs_t > 0.0 and _accept_click(clicks, abs_t):
+                        bisect.insort(clicks, abs_t)
             click_carry = (
                 mono[-click_overlap:] if mono.size >= click_overlap else c_buf[-click_overlap:]
             )

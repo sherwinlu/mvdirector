@@ -17,8 +17,8 @@ import shutil
 import sys
 import unicodedata
 from collections import Counter
-from collections.abc import Callable, Sequence
-from contextlib import AbstractContextManager
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from importlib import resources
@@ -50,6 +50,7 @@ from mvdirector.generation.preflight import check_assets
 from mvdirector.generation.runner import RunBudget, RunEvent, ShotRunner, load_templates
 from mvdirector.llm import LLMClient, build_llm
 from mvdirector.llm.check import LLMCheckResult, ping_llm, run_llm_check
+from mvdirector.llm.http import redact_url
 from mvdirector.models import (
     Analysis,
     AssetKind,
@@ -67,6 +68,7 @@ from mvdirector.project import Project
 from mvdirector.qc.factory import build_quality_gates
 from mvdirector.retry import RetryPolicy
 from mvdirector.review import policy as review_policy
+from mvdirector.store import path_is_file
 
 __all__ = [
     # types
@@ -132,6 +134,16 @@ def _lease(
     return (provider or StaticComfyProvider()).lease(project)
 
 
+@contextmanager
+def _close_llm(llm: LLMClient | None) -> Iterator[LLMClient | None]:
+    try:
+        yield llm
+    finally:
+        closer = getattr(llm, "close", None)
+        if callable(closer):
+            closer()
+
+
 def open_project(
     project_dir: ProjectRef, review_mode: ReviewMode | None = None, *, pull: bool = True
 ) -> Project:
@@ -163,7 +175,7 @@ def _with_mode(project: Project, mode: ProjectMode | None) -> Project:
 def _resolve_tracklist_arg(project: Project, tracklist: Path | None) -> Path | None:
     if tracklist is None:
         return None
-    if tracklist.is_file():
+    if path_is_file(tracklist):
         return tracklist
     if not tracklist.is_absolute():
         return project.path(tracklist)
@@ -201,13 +213,35 @@ _STARTER_MIX_TRACKLIST = {
 }
 
 
+#: Platform and tooling debris that must never be copied into a user's new project. An editable
+#: install serves `templates/` straight from the source checkout, so whatever Finder, Windows
+#: Explorer or Python left lying there would otherwise land in every `mvd init`.
+_JUNK_TEMPLATE_NAMES = (
+    ".DS_Store",
+    "Thumbs.db",
+    "desktop.ini",
+    "__pycache__",
+    ".ipynb_checkpoints",
+)
+
+
+def _ignore_junk_files(_directory: str, names: list[str]) -> set[str]:
+    return {
+        name
+        for name in names
+        if name in _JUNK_TEMPLATE_NAMES or name.startswith("._") or name.endswith(".pyc")
+    }
+
+
 def init_project(directory: Path, *, mode: ProjectMode = ProjectMode.STANDARD) -> Path:
     """Create a project folder with a starter config and workflow binding examples."""
+    if directory.exists() and not directory.is_dir():
+        raise MVDError(f"{directory} already exists and is not a directory")
     if (directory / CONFIG_FILENAME).exists():
         raise MVDError(f"{directory} already contains {CONFIG_FILENAME}")
     template_root = resources.files("mvdirector") / "templates"
     with resources.as_file(template_root) as source:
-        shutil.copytree(source, directory, dirs_exist_ok=True)
+        shutil.copytree(source, directory, dirs_exist_ok=True, ignore=_ignore_junk_files)
     for folder in ("inputs", "assets", "output"):
         (directory / folder).mkdir(exist_ok=True)
     if mode is ProjectMode.MIX:
@@ -330,13 +364,18 @@ def validate_project(
                                 )
                             )
 
-    attempt(f"ComfyUI at {project.config.comfy.base_url}", ping_and_probe)
+    attempt(f"ComfyUI at {redact_url(project.config.comfy.base_url)}", ping_and_probe)
     checks.extend(live_wf_checks)
     llm_config = project.config.llm
     if llm_config.enabled:
+
+        def _check_llm_config() -> None:
+            with _close_llm(build_llm(llm_config)):
+                pass
+
         attempt(
             f"LLM settings ({llm_config.provider}, {llm_config.model}); `mvd llm-check` tests them",
-            lambda: build_llm(llm_config),
+            _check_llm_config,
         )
     return checks
 
@@ -369,13 +408,13 @@ def check_llm(project_dir: ProjectRef, skip_image: bool = False) -> LLMCheckOutc
     outcome = LLMCheckOutcome(config.provider, config.model, config.enabled)
     if not config.enabled:
         return outcome
-    client = build_llm(config)
-    if client is None:  # build_llm returns None only for a disabled model, handled above
-        raise MVDError("No language model is configured.")
-    # The image test only matters when vision checks are switched on.
-    outcome.vision_needed = project.config.qc.vision_enabled
-    outcome.tested_images = outcome.vision_needed and not skip_image
-    outcome.result = run_llm_check(client, check_vision=outcome.tested_images)
+    with _close_llm(build_llm(config)) as client:
+        if client is None:  # build_llm returns None only for a disabled model, handled above
+            raise MVDError("No language model is configured.")
+        # The image test only matters when vision checks are switched on.
+        outcome.vision_needed = project.config.qc.vision_enabled
+        outcome.tested_images = outcome.vision_needed and not skip_image
+        outcome.result = run_llm_check(client, check_vision=outcome.tested_images)
     return outcome
 
 
@@ -395,16 +434,23 @@ def prepare(
 ) -> PrepareResult:
     """Prepare a project from audio files or Suno/DAW stem packs (.zip, folders, or loose stems)."""
     project = open_project(project_dir)
-    resolved_llm: LLMClient | None = (
-        build_llm(project.config.llm) if llm is _UNSET else llm  # type: ignore[assignment]
-    )
+    if llm is _UNSET:
+        with _close_llm(build_llm(project.config.llm)) as owned_llm:
+            return prepare_project(
+                project,
+                audio=audio,
+                overwrite=overwrite,
+                separator=separator,
+                transcriber=transcriber,
+                llm=owned_llm,
+            )
     return prepare_project(
         project,
         audio=audio,
         overwrite=overwrite,
         separator=separator,
         transcriber=transcriber,
-        llm=resolved_llm,
+        llm=llm,  # type: ignore[arg-type]
     )
 
 
@@ -507,13 +553,20 @@ def brief(
     """Draft Suno-ready lyrics.txt and style.md from a concept."""
     project = open_project(project_dir)
     ensure_writable(project, overwrite=overwrite)
-    llm = build_llm(project.config.llm)
-    generated = generate_brief(idea, llm=llm, duration_seconds=duration, vibe=vibe)
+    with _close_llm(build_llm(project.config.llm)) as llm:
+        generated = generate_brief(idea, llm=llm, duration_seconds=duration, vibe=vibe)
     with project.run_lock():
         ensure_writable(project, overwrite=overwrite)  # re-check: another job may have written
         lyrics_path, style_path = write_brief(project, generated, overwrite=overwrite)
         project.storage.push()
     return BriefResult(lyrics_path, style_path, generated.suno_style)
+
+
+def _read_text_input(path: Path, label: str) -> str:
+    try:
+        return path.read_text("utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ConfigError(f"Could not read {label} file {path}: {exc}") from exc
 
 
 def plan(
@@ -543,13 +596,14 @@ def plan(
             if inputs.style:
                 style_path = project.path(inputs.style)
                 if style_path.is_file():
-                    style_text = style_path.read_text("utf-8-sig")
-            manifest = build_mix_manifest(
-                project.config,
-                analysis,
-                style_text,
-                build_llm(project.config.llm),
-            )
+                    style_text = _read_text_input(style_path, "style")
+            with _close_llm(build_llm(project.config.llm)) as llm:
+                manifest = build_mix_manifest(
+                    project.config,
+                    analysis,
+                    style_text,
+                    llm,
+                )
         else:
             if tracklist is not None:
                 raise ConfigError(
@@ -562,22 +616,25 @@ def plan(
             mix_candidate = project.path(inputs.mix) if inputs.mix else None
             mix_path = mix_candidate if (mix_candidate and mix_candidate.is_file()) else None
             if plan_config.planning.video_style is VideoStyle.LIPSYNC:
-                lyrics_text = project.input_path(inputs.lyrics, "lyrics").read_text("utf-8-sig")
+                lyrics_text = _read_text_input(
+                    project.input_path(inputs.lyrics, "lyrics"), "lyrics"
+                )
             else:
                 lyrics_candidate = project.path(inputs.lyrics) if inputs.lyrics else None
                 lyrics_text = (
-                    lyrics_candidate.read_text("utf-8-sig")
+                    _read_text_input(lyrics_candidate, "lyrics")
                     if lyrics_candidate is not None and lyrics_candidate.is_file()
                     else ""
                 )
-            manifest = build_manifest(
-                plan_config,
-                project.load_analysis(),
-                lyrics_text,
-                project.input_path(inputs.style, "style").read_text("utf-8-sig"),
-                build_llm(plan_config.llm),
-                mix_path=mix_path,
-            )
+            with _close_llm(build_llm(plan_config.llm)) as llm:
+                manifest = build_manifest(
+                    plan_config,
+                    project.load_analysis(),
+                    lyrics_text,
+                    _read_text_input(project.input_path(inputs.style, "style"), "style"),
+                    llm,
+                    mix_path=mix_path,
+                )
         project.save_manifest(manifest)
     return project, manifest
 
@@ -607,7 +664,7 @@ def generate_reference_candidates(
             comfy,
             templates,
             state,
-            count or project.config.reference.candidates,
+            project.config.reference.candidates if count is None else count,
             character_id=character,
             from_character=from_character,
         )
@@ -649,7 +706,7 @@ def generate_reference_videos(
             comfy,
             templates,
             state,
-            count or project.config.reference.video_candidates,
+            project.config.reference.video_candidates if count is None else count,
             character_id=character,
         )
     project.storage.push()  # candidates are not in the manifest yet; publish them now
@@ -682,14 +739,15 @@ def generate_plates(
     """Generate candidate images of the empty sets."""
     project = open_project(project_dir)
     manifest = project.load_manifest()
+    target_scene = manifest.visual_bible.find_set(set_name) if set_name is not None else None
     needs_still = (
         style_ref is not None
         or embed_set is not None
         or from_set is not None
-        or any(
-            s.parent_set
-            for s in manifest.visual_bible.settings
-            if set_name is None or s.name.strip().lower() == set_name.strip().lower()
+        or (
+            bool(target_scene and target_scene.parent_set)
+            if set_name is not None
+            else any(s.parent_set for s in manifest.visual_bible.settings)
         )
     )
     templates = load_templates(project, ["t2i", "still"] if needs_still else ["t2i"])
@@ -700,7 +758,7 @@ def generate_plates(
             comfy,
             templates if needs_still else templates["t2i"],
             set_name,
-            count or project.config.plates.candidates,
+            project.config.plates.candidates if count is None else count,
             style_ref=style_ref,
             embed_set=embed_set,
             from_set=from_set,
@@ -728,7 +786,12 @@ def generate_props(
     template = load_templates(project, ["t2i"])["t2i"]
     with _lease(project, comfy_provider) as comfy:
         result = props_mod.generate_candidates(
-            project, manifest, comfy, template, prop, count or project.config.props.candidates
+            project,
+            manifest,
+            comfy,
+            template,
+            prop,
+            project.config.props.candidates if count is None else count,
         )
     project.storage.push()  # candidates are not in the manifest yet; publish them now
     return result
@@ -746,8 +809,7 @@ def generate_previz(
 ) -> list[Path]:
     """Plan and render flat-shaded 3D blocking previz MP4s for selected shots."""
     project = open_project(project_dir)
-    llm = build_llm(project.config.llm)
-    with project.edit_manifest() as manifest:
+    with _close_llm(build_llm(project.config.llm)) as llm, project.edit_manifest() as manifest:
         return previz_mod.generate_previz(
             project, manifest, llm, shot_ids=shot_ids, overwrite=overwrite
         )
@@ -765,8 +827,7 @@ def lock_previz(
 def refine_previz(project_dir: ProjectRef, shot_id: str, feedback: str) -> Path:
     """Refine a shot's 3D blocking plan with LLM feedback and re-render its previz MP4."""
     project = open_project(project_dir)
-    llm = build_llm(project.config.llm)
-    with project.edit_manifest() as manifest:
+    with _close_llm(build_llm(project.config.llm)) as llm, project.edit_manifest() as manifest:
         return previz_mod.refine_previz_shot(project, manifest, llm, shot_id, feedback)
 
 
@@ -842,80 +903,97 @@ def generate(
             )
         effective_kinds = [k for k in effective_kinds if k is not AssetKind.VIDEO]
 
-    llm = build_llm(project.config.llm)
-    if manifest.mode is ProjectMode.MIX:
-        names = ["t2i"] if AssetKind.STILL in effective_kinds else []
-        names += ["i2v"] if AssetKind.VIDEO in effective_kinds else []
-    else:
-        active_shots = [
-            s for s in manifest.shots if selected_shots is None or s.id in selected_shots
-        ]
-        names = []
-        if AssetKind.STILL in effective_kinds:
-            if not active_shots or any(s.type.shows_singer for s in active_shots):
-                names.append("still")
-            if not active_shots or any(not s.type.shows_singer for s in active_shots):
-                names.append("t2i")
-        if AssetKind.VIDEO in effective_kinds:
-            if any(s.type is ShotType.LIPSYNC for s in active_shots):
-                names.append("lipsync")
-            names.append("i2v")
-    templates = load_templates(project, names)
-    if AssetKind.STILL in effective_kinds and manifest.mode is not ProjectMode.MIX:
-        ready = check_assets(project, manifest, templates, selected_shots)
-        for warning in ready.warnings:
-            emit(RunEvent("warning", message=f"Warning: {warning}"))
-        if skip_preflight:
-            for problem in ready.problems:
-                emit(RunEvent("warning", message=f"Skipping check: {problem}"))
+    with _close_llm(build_llm(project.config.llm)) as llm:
+        if manifest.mode is ProjectMode.MIX:
+            names = ["t2i"] if AssetKind.STILL in effective_kinds else []
+            names += ["i2v"] if AssetKind.VIDEO in effective_kinds else []
         else:
-            ready.raise_if_blocked()
-    if llm is not None:
-        # Fail before any GPU time is spent, not as a stream of skipped checks afterwards.
-        try:
-            ping_llm(llm)
-        except LLMError as exc:
-            raise LLMError(
-                f"The language model is not usable: {exc}\nFix it (`mvd llm-check` tests the "
-                "settings), or set llm.enabled: false to run without a model."
-            ) from exc
-    result = GenerateResult(project, manifest)
-    gates = build_quality_gates(project.config, llm)
-    try:
-        result.active_checks, result.skipped_checks = gates.check_summary()
-        emit(
-            RunEvent(
-                "qc_summary",
-                active_checks=result.active_checks,
-                skipped_checks=result.skipped_checks,
-            )
-        )
-        policy = RetryPolicy(project.config.retry, project.config.seed, llm)
-        budget = RunBudget(project.config.retry.max_generations_per_run)
-        with project.run_lock(), _lease(project, comfy_provider) as comfy:
-            manifest = result.manifest = project.load_manifest()
-            locked_shots = _resolve_target_shots(manifest, shots, chapters)
-            comfy.ping()
-            runner = ShotRunner(
-                project,
-                manifest,
-                comfy,
-                gates,
-                policy,
-                templates,
-                budget,
-                observer=observer,
-                draft=draft,
-            )
+            active_shots = [
+                s for s in manifest.shots if selected_shots is None or s.id in selected_shots
+            ]
+            names = []
+            if AssetKind.STILL in effective_kinds:
+                if not active_shots or any(s.type.shows_singer for s in active_shots):
+                    names.append("still")
+                if not active_shots or any(not s.type.shows_singer for s in active_shots):
+                    names.append("t2i")
+            if AssetKind.VIDEO in effective_kinds:
+                has_lipsync = any(s.type is ShotType.LIPSYNC for s in active_shots)
+                if has_lipsync:
+                    names.append("lipsync")
+                names.append("i2v")
+                retry_cfg = project.config.retry
+                wants_broll_rescue = has_lipsync and (
+                    retry_cfg.smart_cutaway_rescue
+                    or (retry_cfg.lipsync_fallback and retry_cfg.lipsync_fallback_mode == "broll")
+                )
+                if (
+                    wants_broll_rescue
+                    and "t2i" not in names
+                    and "t2i" in project.config.comfy.workflows
+                ):
+                    t2i_bindings = project.path(
+                        Path(project.config.comfy.workflows_dir)
+                        / project.config.comfy.workflows["t2i"]
+                    )
+                    if t2i_bindings.is_file():
+                        names.append("t2i")
+        templates = load_templates(project, names)
+        if AssetKind.STILL in effective_kinds and manifest.mode is not ProjectMode.MIX:
+            ready = check_assets(project, manifest, templates, selected_shots)
+            for warning in ready.warnings:
+                emit(RunEvent("warning", message=f"Warning: {warning}"))
+            if skip_preflight:
+                for problem in ready.problems:
+                    emit(RunEvent("warning", message=f"Skipping check: {problem}"))
+            else:
+                ready.raise_if_blocked()
+        if llm is not None:
+            # Fail before any GPU time is spent, not as a stream of skipped checks afterwards.
             try:
-                runner.run(effective_kinds, locked_shots)
-            except BudgetExceeded as exc:
-                result.budget_message = str(exc)
-            finally:
-                _save_after_run(project, manifest)
-    finally:
-        gates.close()
-    return result
+                ping_llm(llm)
+            except LLMError as exc:
+                raise LLMError(
+                    f"The language model is not usable: {exc}\nFix it (`mvd llm-check` tests the "
+                    "settings), or set llm.enabled: false to run without a model."
+                ) from exc
+        result = GenerateResult(project, manifest)
+        gates = build_quality_gates(project.config, llm)
+        try:
+            result.active_checks, result.skipped_checks = gates.check_summary()
+            emit(
+                RunEvent(
+                    "qc_summary",
+                    active_checks=result.active_checks,
+                    skipped_checks=result.skipped_checks,
+                )
+            )
+            policy = RetryPolicy(project.config.retry, project.config.seed, llm)
+            budget = RunBudget(project.config.retry.max_generations_per_run)
+            with project.run_lock(), _lease(project, comfy_provider) as comfy:
+                manifest = result.manifest = project.load_manifest()
+                locked_shots = _resolve_target_shots(manifest, shots, chapters)
+                comfy.ping()
+                runner = ShotRunner(
+                    project,
+                    manifest,
+                    comfy,
+                    gates,
+                    policy,
+                    templates,
+                    budget,
+                    observer=observer,
+                    draft=draft,
+                )
+                try:
+                    runner.run(effective_kinds, locked_shots)
+                except BudgetExceeded as exc:
+                    result.budget_message = str(exc)
+                finally:
+                    _save_after_run(project, manifest)
+        finally:
+            gates.close()
+        return result
 
 
 def _save_after_run(project: Project, manifest: Manifest) -> None:
@@ -1053,7 +1131,7 @@ def _safe_title(title: str) -> str:
             chars.append(ch)
         else:
             chars.append("_")
-    return "".join(chars).strip("_") or "video"
+    return "".join(chars).strip("_")[:120].strip("_") or "video"
 
 
 def assemble(

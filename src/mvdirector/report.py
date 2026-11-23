@@ -108,6 +108,12 @@ def _ordered(checks: dict[str, CheckTally]) -> list[tuple[str, CheckTally]]:
     return known + extra
 
 
+def _escape_md_cell(value: str) -> str:
+    """Escape text for a Markdown table cell so untrusted strings cannot break or inject markup."""
+    cleaned = value.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+    return cleaned.replace("|", "\\|").replace("`", "\\`").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def render(summary: QCReportSummary, markdown: bool = False) -> str:
     """A text or Markdown report. Markdown is meant to be pasted into a README or an issue."""
     lines: list[str] = []
@@ -135,9 +141,11 @@ def render(summary: QCReportSummary, markdown: bool = False) -> str:
                 f"{reason} ({count})" for reason, count in entry.skip_reasons.most_common(3)
             )
             if markdown:
+                cell_name = _escape_md_cell(name)
+                cell_reasons = _escape_md_cell(reasons)
                 lines.append(
-                    f"| `{name}` | {entry.ran} | {entry.passed} | {entry.failed} | "
-                    f"{entry.skipped} | {reasons} |"
+                    f"| `{cell_name}` | {entry.ran} | {entry.passed} | {entry.failed} | "
+                    f"{entry.skipped} | {cell_reasons} |"
                 )
             else:
                 lines.append(

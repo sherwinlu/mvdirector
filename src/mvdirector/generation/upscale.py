@@ -14,6 +14,7 @@ from typing import Any
 from mvdirector.comfy.client import ComfyClient
 from mvdirector.comfy.workflow import WorkflowTemplate
 from mvdirector.errors import ConfigError
+from mvdirector.generation.candidates import ensure_upload_audio_track
 from mvdirector.models import AssetStatus, Manifest
 from mvdirector.project import Project
 from mvdirector.review import policy as review_policy
@@ -84,7 +85,7 @@ def upscale_videos(
             raise ConfigError(f"Selected video file for {shot.id} is missing: {source_path}")
         destination = project.upscaled_video_path(shot.id, selected.number)
         params: dict[str, Any] = {
-            "video": comfy.upload(source_path),
+            "video": comfy.upload(ensure_upload_audio_track(project, source_path)),
             "width": target_w,
             "height": target_h,
             "fps": video.fps,

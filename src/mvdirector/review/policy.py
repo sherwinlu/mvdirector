@@ -46,7 +46,9 @@ def review_reasons(shot: Shot, manifest: Manifest, config: ProjectConfig) -> lis
     """Why a finished shot needs a person; empty if it does not (or is not finished)."""
     stills_only = uses_stills_only(manifest, config)
     if stills_only:
-        if shot.still.status is AssetStatus.EXHAUSTED and not shot.still.accepted_by_reviewer:
+        if shot.still.accepted_by_reviewer:
+            return []
+        if shot.still.status is AssetStatus.EXHAUSTED:
             return [ReviewReason.EXHAUSTED]
         if shot.still.status is not AssetStatus.PASSED or config.review.mode is ReviewMode.STRICT:
             return []

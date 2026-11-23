@@ -11,6 +11,7 @@ and lip-sync budgets using measured audio dynamics, vocal turns, and syllable ra
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import re
@@ -24,7 +25,12 @@ import yaml
 from pydantic import ValidationError
 
 from mvdirector.audio import lyrics as lyrics_mod
-from mvdirector.config import CONFIG_FILENAME, PrepareConfig, ProjectConfig
+from mvdirector.config import (
+    CONFIG_FILENAME,
+    PrepareConfig,
+    ProjectConfig,
+    mask_unset_allowed_env_refs,
+)
 from mvdirector.errors import ConfigError
 from mvdirector.models import BOTH_VOICES, Analysis, TrackProfile, VideoStyle, VocalMode
 from mvdirector.project import Project
@@ -850,6 +856,38 @@ def tune_config_for_planning(
     return updated, applied
 
 
+_YAML_RESERVED_WORDS = frozenset({"true", "false", "null", "yes", "no", "on", "off", "y", "n", "~"})
+
+
+def _split_yaml_inline_comment(rest: str) -> tuple[str, str]:
+    """Split ``rest`` (a single YAML line after ``key:``) into ``(value_part, comment_part)``."""
+    in_single = False
+    in_double = False
+    escaped = False
+    for idx, ch in enumerate(rest):
+        if in_double:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_double = False
+        elif in_single:
+            if ch == "'":
+                in_single = False
+        else:
+            if ch == '"':
+                in_double = True
+            elif ch == "'":
+                in_single = True
+            elif ch == "#" and (idx == 0 or rest[idx - 1] in (" ", "\t")):
+                gap_start = idx
+                while gap_start > 0 and rest[gap_start - 1] in (" ", "\t"):
+                    gap_start -= 1
+                return rest[:gap_start], rest[gap_start:]
+    return rest, ""
+
+
 def format_yaml_scalar(value: Any) -> str:
     if value is None:
         return "null"
@@ -860,20 +898,26 @@ def format_yaml_scalar(value: Any) -> str:
     if isinstance(value, float):
         if not math.isfinite(value):
             raise ConfigError(f"Cannot write non-finite float to {CONFIG_FILENAME}: {value!r}")
-        return f"{value:.2f}".rstrip("0").rstrip(".") if value != 0.0 else "0.0"
+        if value == 0.0:
+            return "0.0"
+        rendered = f"{value:.6f}".rstrip("0").rstrip(".")
+        return rendered if "." in rendered else f"{rendered}.0"
     if isinstance(value, str):
-        if re.fullmatch(r"[A-Za-z0-9._-]+", value) and value.lower() not in (
-            "true",
-            "false",
-            "null",
-            "yes",
-            "no",
-            "on",
-            "off",
+        if (
+            len(value) <= 64
+            and re.fullmatch(r"[A-Za-z][A-Za-z0-9._-]*", value)
+            and value.lower() not in _YAML_RESERVED_WORDS
         ):
-            return value
-        dumped = yaml.safe_dump(value, default_style='"').splitlines()[0]
-        return dumped
+            parsed = yaml.safe_load(value)
+            if isinstance(parsed, str) and parsed == value:
+                return value
+        # JSON double-quoted strings are valid single-line YAML scalars that never wrap at 80 cols.
+        quoted = json.dumps(value, ensure_ascii=False)
+        return (
+            quoted.replace("\u0085", "\\u0085")
+            .replace("\u2028", "\\u2028")
+            .replace("\u2029", "\\u2029")
+        )
     raise ConfigError(
         f"Unsupported scalar type for {CONFIG_FILENAME} update: {type(value).__name__}"
     )
@@ -883,27 +927,75 @@ _TOP_SECTION_HEADER_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*):[ \t]*(?:#.*)?$"
 _TOP_LEVEL_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*):")
 
 
+def _split_line_ending(raw: str) -> tuple[str, str]:
+    if raw.endswith("\r\n"):
+        return raw[:-2], "\r\n"
+    if raw.endswith("\n"):
+        return raw[:-1], "\n"
+    if raw.endswith("\r"):
+        return raw[:-1], "\r"
+    return raw, "\n"
+
+
+def _format_comment_suffix(comment: str) -> str:
+    if not comment:
+        return ""
+    stripped = comment.lstrip(" \t")
+    gap = comment[: len(comment) - len(stripped)] or "  "
+    return f"{gap}{stripped}"
+
+
 def update_top_level_yaml_scalar(text: str, field: str, formatted_val: str) -> str:
     """Update or append a top-level scalar key in YAML text while preserving comments."""
     lines = text.splitlines(keepends=True)
-    field_re = re.compile(rf"^{re.escape(field)}:[ \t]*([^#\r\n]*?)([ \t]*#[^\r\n]*)?(\r?\n?)$")
+    prefix_re = re.compile(rf"^{re.escape(field)}:(?:[ \t]+|$)")
     for idx, raw in enumerate(lines):
-        m = field_re.match(raw)
-        if m:
-            _old_val, comment, newline = m.groups()
-            newline = newline or "\n"
-            comment_part = ""
-            if comment:
-                gap = comment[: len(comment) - len(comment.lstrip())] or "  "
-                comment_part = f"{gap}{comment.lstrip()}"
-            lines[idx] = f"{field}: {formatted_val}{comment_part}{newline}"
+        body, newline = _split_line_ending(raw)
+        if prefix_re.match(body):
+            rest = body[len(field) + 1 :]
+            _, comment = _split_yaml_inline_comment(rest)
+            lines[idx] = f"{field}: {formatted_val}{_format_comment_suffix(comment)}{newline}"
             return "".join(lines)
     sep = "" if (not text or text.endswith("\n")) else "\n"
     return f"{text}{sep}{field}: {formatted_val}\n"
 
 
+def _expand_inline_section_if_needed(lines: list[str], section: str) -> list[str]:
+    """Expand a single-line flow section (e.g. ``video: {fps: 30}``) to block YAML in place."""
+    prefix_re = re.compile(rf"^{re.escape(section)}:[ \t]*(.*)$")
+    for idx, raw in enumerate(lines):
+        body, newline = _split_line_ending(raw)
+        header_match = _TOP_SECTION_HEADER_RE.match(body)
+        if header_match and header_match.group(1) == section:
+            return lines
+        match = prefix_re.match(body)
+        if not match:
+            continue
+        val_part, comment = _split_yaml_inline_comment(match.group(1))
+        val_stripped = val_part.strip()
+        if not val_stripped or val_stripped in ("null", "~", "{}"):
+            lines[idx] = f"{section}:{_format_comment_suffix(comment)}{newline}"
+            return lines
+        try:
+            loaded = yaml.safe_load(val_stripped)
+        except yaml.YAMLError:
+            return lines
+        if isinstance(loaded, dict):
+            dumped = yaml.safe_dump(
+                {section: loaded}, sort_keys=False, width=1_000_000, allow_unicode=True
+            )
+            block_lines = [f"{ln}{newline}" for ln in dumped.splitlines()]
+            if comment and block_lines:
+                first_body, first_nl = _split_line_ending(block_lines[0])
+                block_lines[0] = f"{first_body}{_format_comment_suffix(comment)}{first_nl}"
+            lines[idx : idx + 1] = block_lines
+            return lines
+        return lines
+    return lines
+
+
 def update_yaml_scalar(text: str, section: str, field: str, formatted_val: str) -> str:
-    lines = text.splitlines(keepends=True)
+    lines = _expand_inline_section_if_needed(text.splitlines(keepends=True), section)
     sec_start: int | None = None
     sec_end = len(lines)
     for idx, raw in enumerate(lines):
@@ -931,19 +1023,17 @@ def update_yaml_scalar(text: str, section: str, field: str, formatted_val: str) 
                 child_indent = leading
 
     indent = child_indent or "  "
-    field_re = re.compile(
-        rf"^{re.escape(indent)}{re.escape(field)}:[ \t]*([^#\r\n]*?)([ \t]*#[^\r\n]*)?(\r?\n?)$"
-    )
+    field_prefix = f"{indent}{field}:"
     for idx in range(sec_start + 1, sec_end):
-        m = field_re.match(lines[idx])
-        if m:
-            _old_val, comment, newline = m.groups()
-            newline = newline or "\n"
-            comment_part = ""
-            if comment:
-                gap = comment[: len(comment) - len(comment.lstrip())] or "  "
-                comment_part = f"{gap}{comment.lstrip()}"
-            lines[idx] = f"{indent}{field}: {formatted_val}{comment_part}{newline}"
+        body, newline = _split_line_ending(lines[idx])
+        if body.startswith(field_prefix) and (
+            len(body) == len(field_prefix) or body[len(field_prefix)] in (" ", "\t")
+        ):
+            rest = body[len(field_prefix) :]
+            _, comment = _split_yaml_inline_comment(rest)
+            lines[idx] = (
+                f"{indent}{field}: {formatted_val}{_format_comment_suffix(comment)}{newline}"
+            )
             return "".join(lines)
 
     # Field is absent from an existing section: insert right after its last direct-child line
@@ -1019,12 +1109,6 @@ def apply_adjustments_to_yaml(yaml_path: Path, adjustments: list[Adjustment]) ->
             and parsed_before.get(section) is not None
         ):
             raise ConfigError(f"Section '{section}' in {yaml_path} must be a mapping or null.")
-        # If the section was `section: null`, `~`, or `{}`, normalize to `section:` header first.
-        sec_empty_re = re.compile(
-            rf"^{re.escape(section)}:[ \t]*(?:null|~|\{{[ \t]*\}})([ \t]*#[^\r\n]*)?$",
-            re.MULTILINE,
-        )
-        updated_text = sec_empty_re.sub(rf"{section}:\1", updated_text)
         updated_text = update_yaml_scalar(
             updated_text, section, field, format_yaml_scalar(adj.recommended)
         )
@@ -1046,7 +1130,7 @@ def apply_adjustments_to_yaml(yaml_path: Path, adjustments: list[Adjustment]) ->
             )
 
     try:
-        ProjectConfig.model_validate(parsed_after)
+        ProjectConfig.model_validate(mask_unset_allowed_env_refs(parsed_after))
     except ValidationError as exc:
         raise ConfigError(f"Invalid configuration after tuning {yaml_path}:\n{exc}") from exc
 

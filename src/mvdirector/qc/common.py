@@ -28,6 +28,8 @@ from mvdirector.qc.vision import VisionJudge
 
 log = logging.getLogger(__name__)
 
+_MAX_MODEL_DOWNLOAD_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB safety cap on model downloads
+
 
 def download_cached_model(
     filename: str,
@@ -79,7 +81,19 @@ def download_cached_model(
                 expected = (
                     response.headers.get("content-length") if encoding in ("", "identity") else None
                 )
+                if expected and expected.isdigit() and int(expected) > _MAX_MODEL_DOWNLOAD_BYTES:
+                    raise DependencyMissing(
+                        f"Refusing to download {label} '{filename}': reported size {expected} "
+                        f"bytes exceeds the {_MAX_MODEL_DOWNLOAD_BYTES}-byte safety limit."
+                    )
+                written = 0
                 for chunk in response.iter_bytes():
+                    written += len(chunk)
+                    if written > _MAX_MODEL_DOWNLOAD_BYTES:
+                        raise DependencyMissing(
+                            f"Aborted download of {label} '{filename}': exceeded "
+                            f"{_MAX_MODEL_DOWNLOAD_BYTES}-byte safety limit."
+                        )
                     handle.write(chunk)
         size = tmp_path.stat().st_size
         if expected and expected.isdigit() and size != int(expected):
@@ -120,6 +134,17 @@ def dimensions_check(
     min_scale: float,
 ) -> CheckResult:
     """Hard check: right aspect ratio and not far below the target resolution."""
+    if width <= 0 or height <= 0 or expected_width <= 0 or expected_height <= 0:
+        return CheckResult(
+            name="dimensions",
+            status=CheckStatus.FAILED,
+            hard=True,
+            detail=(
+                f"invalid dimensions {width}x{height}, expected about "
+                f"{expected_width}x{expected_height}"
+            ),
+            metrics={"width": width, "height": height},
+        )
     expected_aspect = expected_width / expected_height
     aspect_error = abs(width / height - expected_aspect) / expected_aspect
     scale = height / expected_height

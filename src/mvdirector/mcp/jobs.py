@@ -213,7 +213,14 @@ class JobManager:
             self._threads[job_id] = thread
             self._prune_locked()
             initial = record.snapshot(event_limit=0)
-        thread.start()
+        try:
+            thread.start()
+        except Exception:
+            with self._lock:
+                self._jobs.pop(job_id, None)
+                self._threads.pop(job_id, None)
+                self._order = deque(jid for jid in self._order if jid != job_id)
+            raise
         return initial
 
     def get(self, job_id: str, *, event_limit: int = 20) -> dict[str, Any]:

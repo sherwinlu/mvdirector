@@ -6,11 +6,12 @@
 
 from __future__ import annotations
 
+import urllib.parse
 from typing import Any
 
 from pydantic import BaseModel
 
-from mvdirector.errors import LLMError
+from mvdirector.errors import ConfigError, LLMError
 from mvdirector.llm.base import ChatBackend, Message, Reply, blocks_of, has_images
 from mvdirector.llm.http import IMAGE_WORDS, HttpJSON, check_response, json_body
 
@@ -32,8 +33,19 @@ class GeminiChat(ChatBackend):
         context_tokens: int | None = None,
     ) -> None:
         super().__init__(model=model, max_tokens=max_tokens, context_tokens=context_tokens)
-        name = model.removeprefix("models/")
-        self._url = f"{base_url}/models/{name}:generateContent"
+        name = model.strip().removeprefix("models/")
+        if (
+            not name
+            or "/" in name
+            or "\\" in name
+            or ".." in name
+            or "?" in name
+            or "#" in name
+            or any(ord(ch) < 32 or ord(ch) == 127 or ch.isspace() for ch in name)
+        ):
+            raise ConfigError(f"Invalid Gemini model name: {model!r}")
+        encoded = urllib.parse.quote(name, safe="")
+        self._url = f"{base_url}/models/{encoded}:generateContent"
         self._http = http
         self._json_mode = json_mode  # "off" or anything else for JSON output
         self._key_hint = key_hint
@@ -82,14 +94,31 @@ class GeminiChat(ChatBackend):
 
     @staticmethod
     def _parse(data: dict[str, Any]) -> Reply:
-        candidates = data.get("candidates") or []
-        if not candidates:
-            reason = (data.get("promptFeedback") or {}).get("blockReason", "no reason given")
+        candidates = data.get("candidates")
+        if not isinstance(candidates, list) or not candidates:
+            feedback = data.get("promptFeedback")
+            reason = (
+                feedback.get("blockReason", "no reason given")
+                if isinstance(feedback, dict)
+                else "no reason given"
+            )
             raise LLMError(f"Gemini returned no answer ({reason}).")
         candidate = candidates[0]
-        parts = (candidate.get("content") or {}).get("parts") or []
+        if not isinstance(candidate, dict):
+            raise LLMError(f"Gemini returned an unexpected candidate shape: {candidate!r}")
+        content = candidate.get("content")
+        parts = content.get("parts") if isinstance(content, dict) else None
+        if parts is not None and not isinstance(parts, list):
+            raise LLMError(f"Gemini returned an unexpected parts field: {parts!r}")
         # Parts flagged as thoughts are the model's reasoning, not its answer.
-        text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+        text_chunks: list[str] = []
+        for part in parts or []:
+            if not isinstance(part, dict) or part.get("thought"):
+                continue
+            chunk = part.get("text")
+            if isinstance(chunk, str):
+                text_chunks.append(chunk)
+        text = "".join(text_chunks)
         finish = candidate.get("finishReason")
         if not text and finish in _BLOCKED:
             raise LLMError(f"Gemini blocked the reply ({finish}).")

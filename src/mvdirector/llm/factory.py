@@ -10,6 +10,7 @@ import logging
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -18,7 +19,7 @@ from mvdirector.errors import ConfigError
 from mvdirector.llm.anthropic_backend import AnthropicChat
 from mvdirector.llm.base import LLMClient
 from mvdirector.llm.gemini_backend import GeminiChat
-from mvdirector.llm.http import HttpJSON
+from mvdirector.llm.http import HttpJSON, redact_url
 from mvdirector.llm.ollama_backend import OllamaChat
 from mvdirector.llm.openai_backend import OpenAIChat
 
@@ -64,13 +65,31 @@ def _api_key(
     return (value or None), hint
 
 
+def _validate_base_url(url: str) -> str:
+    if any(ord(ch) < 32 or ord(ch) == 127 or ch.isspace() for ch in url):
+        raise ConfigError("llm.base_url must not contain whitespace or control characters.")
+    try:
+        parts = urlsplit(url)
+        _ = parts.port
+    except ValueError as exc:
+        raise ConfigError(f"Invalid llm.base_url: {exc}") from exc
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ConfigError(
+            "llm.base_url must be an http:// or https:// URL with a valid host "
+            f"(got {redact_url(url)!r})."
+        )
+    if parts.query or parts.fragment:
+        raise ConfigError("llm.base_url must not include query parameters or fragments.")
+    return url
+
+
 def _normalize_base_url(
     config: LLMConfig, info: ProviderInfo, environ: Mapping[str, str]
 ) -> str | None:
-    raw = config.base_url or environ.get("MVD_LLM_URL", "").strip() or info.base_url or ""
-    url = raw.rstrip("/") or None
-    if url is None:
+    raw = (config.base_url or environ.get("MVD_LLM_URL", "").strip() or info.base_url or "").strip()
+    if not raw:
         return None
+    url = raw.rstrip("/")
     if config.provider == "openai_compatible" and url.endswith("/chat/completions"):
         url = url.removesuffix("/chat/completions")
     if config.provider == "ollama":
@@ -81,7 +100,9 @@ def _normalize_base_url(
                 "to provider 'openai_compatible'."
             )
         url = url.removesuffix("/api")
-    return url
+    if not url:
+        raise ConfigError("llm.base_url must be an http:// or https:// URL with a valid host.")
+    return _validate_base_url(url)
 
 
 def build_llm(
@@ -103,7 +124,7 @@ def build_llm(
         "LLM: provider=%s model=%s base_url=%s json_mode=%s",
         config.provider,
         config.model,
-        base_url,
+        redact_url(base_url) if base_url else None,
         json_mode,
     )
 
@@ -122,7 +143,8 @@ def build_llm(
             context_tokens=config.context_tokens,
         )
 
-    assert base_url is not None  # every other provider has a default or a required base_url
+    if base_url is None:
+        raise ConfigError(f"llm.base_url is required for provider '{config.provider}'.")
     headers = {"Content-Type": "application/json"}
     if config.provider == "gemini" and key:
         headers["x-goog-api-key"] = key

@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import librosa
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ValidationError
 
 from mvdirector.errors import ConfigError, MediaToolError
 from mvdirector.models import BOTH_VOICES, LyricLine, TimeSpan, VocalTurn
@@ -53,8 +53,8 @@ WHISPER_SAMPLE_RATE = 16000
 
 class Word(BaseModel):
     word: str
-    start: float
-    end: float
+    start: float = Field(ge=0.0, allow_inf_nan=False)
+    end: float = Field(ge=0.0, allow_inf_nan=False)
 
 
 class TranscriptSegment(BaseModel):
@@ -1108,10 +1108,23 @@ def load_or_transcribe_words(project: Project) -> list[Word]:
     """Word timestamps from the configured JSON file, else faster-whisper, else none."""
     inputs = project.config.inputs
     if inputs.word_timestamps:
-        raw = json.loads(
-            project.input_path(inputs.word_timestamps, "word_timestamps").read_text("utf-8-sig")
-        )
-        return [Word.model_validate(item) for item in raw]
+        ts_path = project.input_path(inputs.word_timestamps, "word_timestamps")
+        try:
+            raw = json.loads(ts_path.read_text("utf-8-sig"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ConfigError(f"Could not parse word timestamps file {ts_path}: {exc}") from exc
+        except RecursionError:
+            raise ConfigError(
+                f"Word timestamps file {ts_path} nests JSON too deeply to parse."
+            ) from None
+        if not isinstance(raw, list):
+            raise ConfigError(
+                f"Invalid word timestamps file {ts_path}: expected a JSON list of word objects."
+            )
+        try:
+            return [Word.model_validate(item) for item in raw]
+        except ValidationError as exc:
+            raise ConfigError(f"Invalid word timestamps in {ts_path}:\n{exc}") from exc
     prepare_cfg = project.config.prepare
     if project.config.auto_tune:
         from mvdirector import tuning as tuning_mod

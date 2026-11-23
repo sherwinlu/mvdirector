@@ -17,12 +17,14 @@ import re
 import unicodedata
 from pathlib import Path
 
-from PIL import UnidentifiedImageError
-
 from mvdirector.comfy.client import ComfyClient
 from mvdirector.comfy.workflow import WorkflowTemplate
 from mvdirector.errors import ConfigError
-from mvdirector.generation.candidates import load_rgb_candidate, render_candidate_batch
+from mvdirector.generation.candidates import (
+    atomic_save_png,
+    load_rgb_candidate,
+    render_candidate_batch,
+)
 from mvdirector.models import Manifest, SetDesign, ascii_fold
 from mvdirector.planning import prompts
 from mvdirector.project import Project
@@ -31,13 +33,13 @@ log = logging.getLogger(__name__)
 
 
 def plate_slug(name: str) -> str:
-    """A collision-safe ASCII filename stem for a set name across any script."""
+    """A collision-safe ASCII filename stem (<= 64 chars) for a set name across any script."""
     cleaned = unicodedata.normalize("NFKC", name).strip()
     stem = re.sub(r"[^a-z0-9]+", "_", ascii_fold(cleaned).lower()).strip("_") or "set"
-    if all(ord(ch) < 128 for ch in cleaned):
+    if all(ord(ch) < 128 for ch in cleaned) and len(stem) <= 64:
         return stem
     digest = hashlib.sha256(cleaned.casefold().encode("utf-8")).hexdigest()[:6]
-    return f"{stem}_{digest}"
+    return f"{stem[:57].rstrip('_') or 'set'}_{digest}"
 
 
 def _find_set(manifest: Manifest, name: str) -> SetDesign:
@@ -111,19 +113,16 @@ def generate_candidates(
     style_template: WorkflowTemplate | None = None
     style_param: str | None = None
     if style_ref is not None:
-        try:
-            load_rgb_candidate(style_ref, "Style reference")
-        except (OSError, ValueError, UnidentifiedImageError) as exc:
-            raise ConfigError(f"Style reference image could not be opened: {style_ref}") from exc
+        load_rgb_candidate(style_ref, "Style reference")
         style_template, style_param = _resolve_ref_workflow(templates, "use --style-ref")
         uploaded_style_ref = comfy.upload(style_ref)
 
     results: dict[str, list[Path]] = {}
     for scene_index, scene in enumerate(scenes):
         if embed_set is not None:
-            if embed_set.strip().lower() == scene.name.strip().lower():
-                raise ConfigError(f"Set '{scene.name}' cannot embed itself.")
             embedded = _find_set(manifest, embed_set)
+            if embedded is scene:
+                raise ConfigError(f"Set '{scene.name}' cannot embed itself.")
             if not embedded.plate:
                 raise ConfigError(
                     f"Lock a plate for '{embedded.name}' before embedding it in '{scene.name}': "
@@ -152,9 +151,9 @@ def generate_candidates(
                 style_param: uploaded_style_ref,
             }
         elif source_name := (from_set or scene.parent_set):
-            if source_name.strip().lower() == scene.name.strip().lower():
-                raise ConfigError(f"Set '{scene.name}' cannot derive from itself.")
             parent = _find_set(manifest, source_name)
+            if parent is scene:
+                raise ConfigError(f"Set '{scene.name}' cannot derive from itself.")
             if not parent.plate:
                 raise ConfigError(
                     f"Lock a plate for '{parent.name}' before deriving '{scene.name}': "
@@ -200,6 +199,6 @@ def lock_plate(project: Project, manifest: Manifest, image: Path, set_name: str)
     scene = _find_set(manifest, set_name)
     project.plates_dir.mkdir(parents=True, exist_ok=True)
     locked = project.path(Path("assets") / "plates" / f"{plate_slug(scene.name)}.png")
-    plate.save(locked)
+    atomic_save_png(plate, locked)
     scene.plate = project.rel(locked)
     return locked

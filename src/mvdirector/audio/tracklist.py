@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from mvdirector.errors import ConfigError
 from mvdirector.models import AnalyzedChapter, AudioCues, MixChapter
+from mvdirector.store import path_is_file
 
 SUPPORTED_TRACKLIST_SUFFIXES = {".json", ".yaml", ".yml", ".cue", ".txt", ".csv"}
 
@@ -41,6 +42,10 @@ _TXT_BPM_RE = re.compile(r"[\[(]\s*(\d{2,3}(?:\.\d+)?)\s*bpm\s*[\])]", flags=re.
 _TXT_TAG_RE = re.compile(r"(?:^|\s)#([A-Za-z0-9][A-Za-z0-9_-]{0,31})\b")
 
 _MIN_AUTO_LEAD_IN_SECONDS = 10.0
+
+#: Ceiling on fixed-interval chapters. At the 30s floor for `mix.default_segment_seconds` this
+#: still allows an 83-hour mix, far past the 30-90+ minute sets the mix mode is built for.
+MAX_FALLBACK_CHAPTERS = 10_000
 
 
 def _clean_line(text: str) -> str:
@@ -677,7 +682,7 @@ def _parse_csv_tracklist(text: str) -> TracklistSpec:
 
 def load_tracklist(path: Path) -> TracklistSpec:
     """Load and validate a tracklist (``.json``, ``.yaml``, ``.cue``, ``.txt``, or ``.csv``)."""
-    if not path.is_file():
+    if not path_is_file(path):
         raise ConfigError(f"Tracklist file not found: {path}")
     suffix = path.suffix.lower()
     if suffix not in SUPPORTED_TRACKLIST_SUFFIXES:
@@ -685,7 +690,10 @@ def load_tracklist(path: Path) -> TracklistSpec:
         raise ConfigError(
             f"Unsupported tracklist format {path.suffix!r} for {path}. Supported: {supported}."
         )
-    text = path.read_text(encoding="utf-8-sig")
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ConfigError(f"Could not read tracklist {path}: {exc}") from exc
     if suffix == ".cue":
         return _parse_cue_sheet(text)
     if suffix == ".txt":
@@ -697,6 +705,8 @@ def load_tracklist(path: Path) -> TracklistSpec:
         raw = json.loads(text) if suffix == ".json" else yaml.safe_load(text)
     except (json.JSONDecodeError, yaml.YAMLError) as exc:
         raise ConfigError(f"Could not parse tracklist {path}: {exc}") from exc
+    except RecursionError:
+        raise ConfigError(f"Tracklist {path} nests collections too deeply to parse.") from None
     try:
         return TracklistSpec.model_validate(raw)
     except ValidationError as exc:
@@ -721,6 +731,16 @@ def resolve_chapters(
 
     if spec is None:
         count = max(1, round(duration / default_segment_seconds))
+        if count > MAX_FALLBACK_CHAPTERS:
+            # The loop below walks every chapter and the planner then directs each one, so an
+            # absurd duration (a mistyped `analysis.json`, say) would otherwise grind through
+            # millions of iterations and exhaust memory instead of reporting anything.
+            raise ConfigError(
+                f"A {duration / 3600.0:.3g} hour mix split every "
+                f"{default_segment_seconds:.0f}s needs {count:.3g} chapters, over the "
+                f"{MAX_FALLBACK_CHAPTERS} limit. Check the mix duration, raise "
+                "mix.default_segment_seconds, or supply inputs.tracklist."
+            )
         span = duration / count
         tolerance = min(20.0, span * 0.2)
         min_gap = min(15.0, span * 0.5)

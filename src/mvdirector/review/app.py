@@ -19,6 +19,7 @@ import streamlit as st
 from mvdirector import mix_assemble
 from mvdirector.audio.tracklist import format_chapter_label, format_youtube_chapters
 from mvdirector.config import ReviewMode
+from mvdirector.errors import ConfigError, MVDError, ProjectLocked
 from mvdirector.models import (
     AssetKind,
     AssetStatus,
@@ -53,9 +54,26 @@ def _save_decision(project: Project, action) -> None:  # noqa: ANN001
     if project.is_locked:
         st.error("A generation run is in progress. Decisions can be saved once it finishes.")
         return
-    with project.edit_manifest() as manifest:
-        action(manifest)
+    try:
+        with project.edit_manifest() as manifest:
+            action(manifest)
+    except ProjectLocked:
+        st.error("A generation run is in progress. Decisions can be saved once it finishes.")
+        return
+    except (MVDError, KeyError, ValueError) as exc:
+        st.error(str(exc))
+        return
     st.rerun()
+
+
+def _safe_asset_path(project: Project, rel: str | None) -> Path | None:
+    if not rel:
+        return None
+    try:
+        resolved = project.path(rel)
+    except ConfigError:
+        return None
+    return resolved if resolved.is_file() else None
 
 
 def _render_shot(project: Project, shot: Shot, *, stills_only: bool = False) -> None:
@@ -67,21 +85,23 @@ def _render_shot(project: Project, shot: Shot, *, stills_only: bool = False) -> 
 
     video = shot.video.selected or shot.video.best_attempt()
     still = shot.still.selected or shot.still.best_attempt()
+    video_file = _safe_asset_path(project, video.path if video else None)
+    still_file = _safe_asset_path(project, still.path if still else None)
     if stills_only:
-        if still and still.path:
-            st.image(str(project.path(still.path)), caption="Hero still")
+        if still_file is not None:
+            st.image(str(still_file), caption="Hero still")
         else:
             st.warning("No usable hero still yet.")
     else:
         left, right = st.columns(2)
         with left:
-            if video and video.path:
-                st.video(str(project.path(video.path)))
+            if video_file is not None:
+                st.video(str(video_file))
             else:
                 st.warning("No video yet: the still did not pass QC. Accept it or redo it.")
         with right:
-            if still and still.path:
-                st.image(str(project.path(still.path)), caption="Still (first frame)")
+            if still_file is not None:
+                st.image(str(still_file), caption="Still (first frame)")
 
     report = (None if stills_only else (video.qc if video else None)) or (
         still.qc if still else None
@@ -107,8 +127,8 @@ def _render_shot(project: Project, shot: Shot, *, stills_only: bool = False) -> 
         key=f"note_{shot.id}",
         placeholder="e.g. calmer drift, warmer lighting",
     )
-    has_video = bool(video and video.path)
-    has_still = bool(still and still.path)
+    can_approve_video = shot.video.selected is not None and video_file is not None
+    can_approve_still = shot.still.selected is not None and still_file is not None
     still_blocked = (
         shot.still.status is AssetStatus.EXHAUSTED and not shot.still.accepted_by_reviewer
     )
@@ -118,14 +138,14 @@ def _render_shot(project: Project, shot: Shot, *, stills_only: bool = False) -> 
             "Use this still",
             key=f"accept_{shot.id}",
             type="primary",
-            disabled=not has_still,
+            disabled=not can_approve_still,
         ):
             _save_decision(project, lambda m: policy.accept_still(m, shot.id))
     elif approve_col.button(
         "Approve",
         key=f"approve_{shot.id}",
         type="primary",
-        disabled=not (has_still if stills_only else has_video),
+        disabled=not (can_approve_still if stills_only else can_approve_video),
     ):
         _save_decision(
             project,
@@ -165,12 +185,17 @@ def _render_mix_queue(
         key = shot.chapter_id or ""
         queued_by_chapter.setdefault(key, []).append(shot)
 
+    known_ids = {ch.id for ch in manifest.chapters}
+    orphan_shots = [s for s in queue if (s.chapter_id or "") not in known_ids]
+
     options = ["All queued chapters"] + [
         f"{ch.id} — {format_chapter_label(ch.title, ch.artist)} "
         f"({len(queued_by_chapter.get(ch.id, []))} queued)"
         for ch in manifest.chapters
         if ch.id in queued_by_chapter
     ]
+    if orphan_shots:
+        options.append(f"__unassigned__ — Unassigned ({len(orphan_shots)} queued)")
     selected_opt = st.selectbox("Chapter filter", options)
     chosen_id = None if selected_opt == options[0] else selected_opt.split(" — ", 1)[0]
 
@@ -182,6 +207,11 @@ def _render_mix_queue(
             continue
         _render_mix_chapter_header(ch)
         for shot in ch_shots:
+            _render_shot(project, shot, stills_only=stills_only)
+
+    if orphan_shots and chosen_id in (None, "__unassigned__"):
+        st.markdown("### Unassigned shots")
+        for shot in orphan_shots:
             _render_shot(project, shot, stills_only=stills_only)
 
 

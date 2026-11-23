@@ -11,6 +11,7 @@ Polling ``/history`` is used instead of the websocket because it survives proxie
 from __future__ import annotations
 
 import logging
+import math
 import time
 import urllib.parse
 import uuid
@@ -20,19 +21,71 @@ from typing import Any
 
 import httpx
 
+from mvdirector import __version__
 from mvdirector.comfy.cache import file_sha256
 from mvdirector.comfy.workflow import OutputSpec
 from mvdirector.config import ComfyConfig
 from mvdirector.errors import ComfyConnectionError, ComfyJobError, ComfyResourceError
-from mvdirector.llm.http import retry_delay
+from mvdirector.llm.http import redact_url, retry_delay
 
 log = logging.getLogger(__name__)
 
 _TRANSIENT_RETRIES = 3
 _MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024  # 512 MiB cap per generated asset
+#: How many consecutive polls to allow a history entry that reports neither a status nor any
+#: outputs before handing it back, so the caller raises the accurate "produced no output" error.
+_STATUSLESS_GRACE_POLLS = 3
 # /free only flags ComfyUI's worker thread to unload; give it this long to release VRAM.
 _VRAM_SETTLE_POLLS = 30
 _VRAM_POLL_SECONDS = 1.0
+_ALLOWED_OUTPUT_TYPES = frozenset({"output", "temp", "input"})
+
+
+def _has_control_chars(value: str) -> bool:
+    return any(ord(ch) < 32 or ord(ch) == 127 for ch in value)
+
+
+def _validate_prompt_id(prompt_id: object, *, label: str) -> str:
+    if (
+        not isinstance(prompt_id, str)
+        or not prompt_id
+        or "/" in prompt_id
+        or "\\" in prompt_id
+        or ".." in prompt_id
+        or "?" in prompt_id
+        or "#" in prompt_id
+        or _has_control_chars(prompt_id)
+    ):
+        raise ComfyJobError(f"{label}: {prompt_id!r}")
+    return prompt_id
+
+
+def _is_safe_comfy_path(filename: object, subfolder: object) -> bool:
+    return (
+        isinstance(filename, str)
+        and bool(filename)
+        and "/" not in filename
+        and "\\" not in filename
+        and ".." not in filename
+        and not _has_control_chars(filename)
+        and isinstance(subfolder, str)
+        and not subfolder.startswith("/")
+        and "\\" not in subfolder
+        and ".." not in subfolder.split("/")
+        and not _has_control_chars(subfolder)
+    )
+
+
+def _json_dict(response: httpx.Response, label: str) -> dict[str, Any]:
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise ComfyJobError(
+            f"ComfyUI {label} returned non-JSON response: {response.text[:200]!r}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise ComfyJobError(f"ComfyUI {label} returned unexpected JSON type: {type(data).__name__}")
+    return data
 
 
 class ComfyClient:
@@ -50,9 +103,12 @@ class ComfyClient:
         # The VRAM floor is checked once per phase (the first job after a /free), not per job:
         # within a phase ComfyUI keeps the phase's model loaded on purpose.
         self._vram_floor_checked = False
+        headers = dict(config.headers)
+        if not any(key.lower() == "user-agent" for key in headers):
+            headers["User-Agent"] = f"mvdirector/{__version__}"
         self._http = httpx.Client(
             base_url=config.base_url.rstrip("/"),
-            headers=config.headers,
+            headers=headers,
             timeout=config.request_timeout,
             transport=transport,
         )
@@ -70,7 +126,7 @@ class ComfyClient:
 
     def ping(self) -> dict[str, Any]:
         """Return ComfyUI's system stats; raises ComfyConnectionError if unreachable."""
-        return self._request("GET", "/system_stats").json()
+        return _json_dict(self._request("GET", "/system_stats"), "GET /system_stats")
 
     def free_vram_gb(self) -> float | None:
         """Probe current free GPU VRAM (GiB) from ComfyUI ``/system_stats``, or None if absent.
@@ -88,7 +144,12 @@ class ComfyClient:
             if not isinstance(dev, dict):
                 continue
             vram = dev.get("vram_free")
-            if isinstance(vram, (int, float)) and vram >= 0:
+            if (
+                isinstance(vram, (int, float))
+                and not isinstance(vram, bool)
+                and math.isfinite(vram)
+                and vram >= 0
+            ):
                 free_bytes.append(int(vram))
         if not free_bytes:
             return None
@@ -140,14 +201,13 @@ class ComfyClient:
                 or "/" in class_type
                 or "\\" in class_type
                 or ".." in class_type
-                or any(ord(ch) < 32 or ord(ch) == 127 for ch in class_type)
+                or _has_control_chars(class_type)
             ):
                 raise ComfyJobError(f"Invalid ComfyUI node class_type: {class_type!r}")
             endpoint = f"/object_info/{urllib.parse.quote(class_type, safe='')}"
         else:
             endpoint = "/object_info"
-        data = self._request("GET", endpoint).json()
-        return data if isinstance(data, dict) else {}
+        return _json_dict(self._request("GET", endpoint), f"GET {endpoint}")
 
     def validate_graph_live(
         self,
@@ -185,7 +245,10 @@ class ComfyClient:
             for grp in ("required", "optional"):
                 if isinstance(spec_groups.get(grp), dict):
                     all_specs.update(spec_groups[grp])
-            for field, val in (node.get("inputs") or {}).items():
+            raw_inputs = node.get("inputs")
+            if not isinstance(raw_inputs, dict):
+                continue
+            for field, val in raw_inputs.items():
                 if (str(node_id), field) in skip:
                     continue
                 if isinstance(val, list) or not isinstance(val, str) or not val:
@@ -195,13 +258,12 @@ class ComfyClient:
                 if isinstance(spec, list) and spec:
                     if isinstance(spec[0], list):
                         allowed = spec[0]
-                    elif (
-                        spec[0] == "COMBO"
-                        and len(spec) > 1
-                        and isinstance(spec[1], dict)
-                        and isinstance(spec[1].get("options"), list)
-                    ):
-                        allowed = spec[1]["options"]
+                    elif spec[0] == "COMBO" and len(spec) > 1 and isinstance(spec[1], dict):
+                        opts = spec[1].get("options")
+                        if not isinstance(opts, list):
+                            opts = spec[1].get("values")
+                        if isinstance(opts, list):
+                            allowed = opts
                 if allowed and val not in allowed and field.endswith(("_name", "model", "ckpt")):
                     problems.append(
                         f"node {node_id} ({ctype}).{field}: '{val}' not installed on ComfyUI"
@@ -262,9 +324,14 @@ class ComfyClient:
                 files={"image": (upload_name, handle, "application/octet-stream")},
                 data={"subfolder": target_subfolder, "overwrite": "true"},
             )
-        body = response.json()
-        name = body["name"]
-        return f"{body['subfolder']}/{name}" if body.get("subfolder") else name
+        body = _json_dict(response, "POST /upload/image")
+        name = body.get("name")
+        raw_sub = body.get("subfolder")
+        subfolder_str = "" if raw_sub is None else raw_sub
+        if not _is_safe_comfy_path(name, subfolder_str):
+            raise ComfyJobError(f"ComfyUI /upload/image returned an unsafe name: {body!r}")
+        assert isinstance(name, str) and isinstance(subfolder_str, str)
+        return f"{subfolder_str}/{name}" if subfolder_str else name
 
     def run(
         self,
@@ -301,46 +368,74 @@ class ComfyClient:
             # Never re-POST /prompt on a read timeout or 500; ComfyUI may already have queued it.
             retry_on_read_error=False,
         )
-        body = response.json()
+        body = _json_dict(response, "POST /prompt")
         if response.status_code == 400 or body.get("node_errors"):
             raise ComfyJobError(f"ComfyUI rejected the workflow: {_summarize_rejection(body)}")
-        log.debug("Queued prompt %s", body["prompt_id"])
-        return body["prompt_id"]
+        prompt_id = _validate_prompt_id(
+            body.get("prompt_id"), label="ComfyUI returned an invalid prompt_id"
+        )
+        log.debug("Queued prompt %s", prompt_id)
+        return prompt_id
 
     def wait(self, prompt_id: str) -> dict[str, Any]:
         """Block until the prompt finishes; return its history entry."""
+        _validate_prompt_id(prompt_id, label="Invalid ComfyUI prompt_id")
+        encoded_id = urllib.parse.quote(prompt_id, safe="")
+        started = time.monotonic()
         waited = 0.0
+        min_step = (
+            self._config.poll_interval
+            if self._config.poll_interval > 0.0
+            else max(0.05, self._config.job_timeout / 1000.0)
+        )
+        statusless_polls = 0
         while waited <= self._config.job_timeout:
-            history = self._request("GET", f"/history/{prompt_id}").json()
+            history = _json_dict(self._request("GET", f"/history/{encoded_id}"), "GET /history")
             entry = history.get(prompt_id)
-            if entry is not None:
-                status = entry.get("status", {})
-                if status.get("status_str") == "error":
-                    raise ComfyJobError(f"ComfyUI job failed: {_summarize_failure(status)}")
-                if status.get("completed", True):
-                    return entry
+            if isinstance(entry, dict):
+                status = entry.get("status")
+                if isinstance(status, dict):
+                    if status.get("status_str") == "error":
+                        raise ComfyJobError(f"ComfyUI job failed: {_summarize_failure(status)}")
+                    if status.get("completed", True):
+                        return entry
+                elif status is None:
+                    # Older ComfyUI builds report no status at all. Outputs mean it is done;
+                    # otherwise allow a few more polls in case this build fills them a beat
+                    # later, then hand the entry back so download_output can say "produced no
+                    # output". Waiting out the full job_timeout here (30 minutes by default)
+                    # only to raise a misleading timeout stalls the run and hides the real
+                    # problem. The budget counts polls, not seconds, so it holds whatever
+                    # poll_interval is set to — including 0.0, where the loop never sleeps.
+                    if isinstance(entry.get("outputs"), dict) and entry["outputs"]:
+                        return entry
+                    statusless_polls += 1
+                    if statusless_polls >= _STATUSLESS_GRACE_POLLS:
+                        return entry
             self._sleep(self._config.poll_interval)
-            waited += self._config.poll_interval
+            waited = max(waited + min_step, time.monotonic() - started)
         raise ComfyJobError(f"ComfyUI job {prompt_id} timed out after {self._config.job_timeout}s")
 
     def download_output(self, entry: dict[str, Any], output: OutputSpec, destination: Path) -> Path:
-        file_info = _pick_output(entry.get("outputs", {}), output)
-        filename = str(file_info.get("filename", ""))
-        subfolder = str(file_info.get("subfolder", ""))
+        raw_outputs = entry.get("outputs")
+        file_info = _pick_output(raw_outputs if isinstance(raw_outputs, dict) else {}, output)
+        raw_filename = file_info.get("filename")
+        raw_subfolder = file_info.get("subfolder")
+        subfolder = "" if raw_subfolder is None else raw_subfolder
+        raw_type = file_info.get("type")
+        file_type = "output" if raw_type is None else raw_type
         if (
-            not filename
-            or "/" in filename
-            or "\\" in filename
-            or ".." in filename
-            or subfolder.startswith("/")
-            or "\\" in subfolder
-            or ".." in subfolder.split("/")
+            not _is_safe_comfy_path(raw_filename, subfolder)
+            or not isinstance(file_type, str)
+            or file_type not in _ALLOWED_OUTPUT_TYPES
         ):
             raise ComfyJobError(f"ComfyUI returned an unsafe output path: {file_info!r}")
+        assert isinstance(raw_filename, str) and isinstance(subfolder, str)
+        filename = raw_filename
         params = {
             "filename": filename,
             "subfolder": subfolder,
-            "type": file_info.get("type", "output"),
+            "type": file_type,
         }
         destination.parent.mkdir(parents=True, exist_ok=True)
         temp_path = destination.with_name(f"{destination.name}.{uuid.uuid4().hex[:8]}.part")
@@ -387,11 +482,12 @@ class ComfyClient:
             except httpx.TransportError as exc:
                 last_error = exc
                 temp_path.unlink(missing_ok=True)
-            self._sleep(retry_delay(response, attempt))
+            if attempt < _TRANSIENT_RETRIES - 1:
+                self._sleep(retry_delay(response, attempt))
         temp_path.unlink(missing_ok=True)
         raise ComfyConnectionError(
-            f"Could not reach ComfyUI at {self._config.base_url} ({last_error}). "
-            "Check that the pod is running and COMFY_URL is correct."
+            f"Could not reach ComfyUI at {redact_url(self._config.base_url)} ({last_error}). "
+            "Check that ComfyUI is running and COMFY_URL is correct."
         )
 
     # --------------------------------------------------------------- private
@@ -431,10 +527,11 @@ class ComfyClient:
                         f"{method} {url} returned {response.status_code}: {response.text[:300]}"
                     )
                 last_error = ComfyJobError(f"{method} {url} returned {response.status_code}")
-            self._sleep(retry_delay(response, attempt))
+            if attempt < _TRANSIENT_RETRIES - 1:
+                self._sleep(retry_delay(response, attempt))
         raise ComfyConnectionError(
-            f"Could not reach ComfyUI at {self._config.base_url} ({last_error}). "
-            "Check that the pod is running and COMFY_URL is correct."
+            f"Could not reach ComfyUI at {redact_url(self._config.base_url)} ({last_error}). "
+            "Check that ComfyUI is running and COMFY_URL is correct."
         )
 
 
@@ -443,8 +540,12 @@ def _pick_output(outputs: dict[str, Any], spec: OutputSpec) -> dict[str, Any]:
     nodes = [spec.node] if spec.node is not None else sorted(outputs)
     extensions = tuple(ext.lower() for ext in spec.extensions)
     for node in nodes:
-        # Different nodes report files under different keys (images, gifs, videos, audio).
-        for files in outputs.get(node, {}).values():
+        # Different nodes and ComfyUI versions report files under different keys
+        # (images, gifs, videos, audio).
+        node_outputs = outputs.get(node)
+        if not isinstance(node_outputs, dict):
+            continue
+        for files in node_outputs.values():
             if not isinstance(files, list):
                 continue
             for item in files:
@@ -465,20 +566,34 @@ def _summarize_rejection(body: dict[str, Any]) -> str:
         parts.append(str(error.get("message", error)))
     elif error:
         parts.append(str(error))
-    for node_id, info in (body.get("node_errors") or {}).items():
-        messages = "; ".join(
-            f"{e.get('message', '')} {e.get('details', '')}".strip() for e in info.get("errors", [])
-        )
-        parts.append(f"node {node_id} ({info.get('class_type', '?')}): {messages}")
+    raw_node_errors = body.get("node_errors")
+    if isinstance(raw_node_errors, dict):
+        for node_id, info in raw_node_errors.items():
+            if not isinstance(info, dict):
+                parts.append(f"node {node_id}: {info}")
+                continue
+            raw_errors = info.get("errors")
+            error_list = raw_errors if isinstance(raw_errors, list) else []
+            messages = "; ".join(
+                (
+                    f"{e.get('message', '')} {e.get('details', '')}".strip()
+                    if isinstance(e, dict)
+                    else str(e).strip()
+                )
+                for e in error_list
+            )
+            parts.append(f"node {node_id} ({info.get('class_type', '?')}): {messages}")
     return " | ".join(parts) or str(body)[:300]
 
 
 def _summarize_failure(status: dict[str, Any]) -> str:
-    for message in status.get("messages", []):
+    raw_messages = status.get("messages")
+    messages = raw_messages if isinstance(raw_messages, list) else []
+    for message in messages:
         if isinstance(message, list) and len(message) == 2 and message[0] == "execution_error":
             detail = message[1]
-            return (
-                f"node {detail.get('node_id')} ({detail.get('node_type')}): "
-                f"{detail.get('exception_message', '').strip()}"
-            )
+            if isinstance(detail, dict):
+                exc_msg = str(detail.get("exception_message") or "").strip()
+                return f"node {detail.get('node_id')} ({detail.get('node_type')}): {exc_msg}"
+            return str(detail).strip() or "execution_error"
     return "unknown error (see the ComfyUI log)"

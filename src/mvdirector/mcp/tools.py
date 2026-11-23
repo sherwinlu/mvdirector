@@ -139,7 +139,13 @@ def _opt_bool(args: dict[str, Any], key: str, default: bool = False) -> bool:
     return val
 
 
-def _opt_int(args: dict[str, Any], key: str, *, minimum: int | None = None) -> int | None:
+def _opt_int(
+    args: dict[str, Any],
+    key: str,
+    *,
+    minimum: int | None = None,
+    maximum: int | None = None,
+) -> int | None:
     val = args.get(key)
     if val is None:
         return None
@@ -147,6 +153,8 @@ def _opt_int(args: dict[str, Any], key: str, *, minimum: int | None = None) -> i
         raise ConfigError(f"'{key}' must be an integer.")
     if minimum is not None and val < minimum:
         raise ConfigError(f"'{key}' must be >= {minimum}.")
+    if maximum is not None and val > maximum:
+        raise ConfigError(f"'{key}' must be <= {maximum}.")
     return val
 
 
@@ -378,7 +386,7 @@ def build_tool_registry(
     # --- project & diagnostics ------------------------------------------------
 
     def h_init_project(args: dict[str, Any]) -> dict[str, Any]:
-        directory = guard.resolve_project(args.get("directory"))
+        directory = guard.resolve_project(_req_str(args, "directory"))
         mode = _opt_enum(args, "mode", ProjectMode) or ProjectMode.STANDARD
         created = api.init_project(directory, mode=mode)
         return {"project_dir": str(created), "mode": mode.value}
@@ -418,6 +426,16 @@ def build_tool_registry(
         shot_ids = _opt_str_list(args, "shot_ids")
         chapter_ids = _opt_str_list(args, "chapters")
         review_filter = _opt_str(args, "review_status")
+        if review_filter is not None and review_filter not in (
+            "approved",
+            "rejected",
+            "pending",
+            "none",
+        ):
+            raise ConfigError(
+                f"Invalid 'review_status': {review_filter!r}. "
+                "Expected one of: approved, rejected, pending, none."
+            )
         project, manifest = api.load_status(project_dir, review_mode=review_mode, refresh=refresh)
         return {
             "project_dir": str(project.root),
@@ -641,7 +659,7 @@ def build_tool_registry(
         state = _opt_str(args, "state")
         character = _opt_str(args, "character")
         from_character = _opt_str(args, "from_character")
-        count = _opt_int(args, "count", minimum=1)
+        count = _opt_int(args, "count", minimum=1, maximum=32)
         background = _opt_bool(args, "background", True)
 
         def _work(_ctx: JobContext | None) -> dict[str, Any]:
@@ -672,7 +690,7 @@ def build_tool_registry(
         project_dir = guard.resolve_project(args.get("project_dir"))
         state = _opt_str(args, "state")
         character = _opt_str(args, "character")
-        count = _opt_int(args, "count", minimum=1)
+        count = _opt_int(args, "count", minimum=1, maximum=32)
         background = _opt_bool(args, "background", True)
 
         def _work(_ctx: JobContext | None) -> dict[str, Any]:
@@ -703,7 +721,7 @@ def build_tool_registry(
         )
         embed_set = _opt_str(args, "embed_set")
         from_set = _opt_str(args, "from_set")
-        count = _opt_int(args, "count", minimum=1)
+        count = _opt_int(args, "count", minimum=1, maximum=32)
         background = _opt_bool(args, "background", True)
 
         def _work(_ctx: JobContext | None) -> dict[str, Any]:
@@ -730,7 +748,7 @@ def build_tool_registry(
     def h_generate_props(args: dict[str, Any]) -> dict[str, Any]:
         project_dir = guard.resolve_project(args.get("project_dir"))
         prop = _opt_str(args, "prop")
-        count = _opt_int(args, "count", minimum=1)
+        count = _opt_int(args, "count", minimum=1, maximum=32)
         background = _opt_bool(args, "background", True)
 
         def _work(_ctx: JobContext | None) -> dict[str, Any]:
@@ -899,6 +917,7 @@ def build_tool_registry(
             "deleted": delete,
             "superseded": [str(p) for p in plan.superseded],
             "orphaned": [str(p) for p in plan.orphaned],
+            "cache_files": [str(p) for p in plan.cache_files],
             "total_files": len(plan.files),
             "size_bytes": plan.size_bytes,
         }
@@ -909,6 +928,17 @@ def build_tool_registry(
         job_id = _opt_str(args, "job_id")
         if job_id is None:
             status_filter = _opt_str(args, "status")
+            if status_filter is not None and status_filter not in (
+                "queued",
+                "running",
+                "succeeded",
+                "failed",
+                "cancelled",
+            ):
+                raise ConfigError(
+                    f"Invalid 'status': {status_filter!r}. "
+                    "Expected one of: queued, running, succeeded, failed, cancelled."
+                )
             return {"jobs": jobs.list_jobs(status=status_filter)}
         event_limit = _opt_int(args, "event_limit", minimum=0)
         try:

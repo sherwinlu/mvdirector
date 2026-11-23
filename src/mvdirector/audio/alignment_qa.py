@@ -35,6 +35,15 @@ _SILENCE_GATE_DB = -15.0  # relative to median active RMS (prevents silent-tail 
 _MIN_RMS_FLOOR = 1e-4
 
 
+def _mono_finite(samples: np.ndarray) -> np.ndarray:
+    wav = np.asarray(samples, dtype=np.float64)
+    if wav.ndim > 1:
+        wav = wav.mean(axis=1)
+    if wav.size and not np.all(np.isfinite(wav)):
+        wav = np.nan_to_num(wav, nan=0.0, posinf=0.0, neginf=0.0)
+    return wav
+
+
 def voicing_ratio(
     samples: np.ndarray,
     sr: int,
@@ -47,9 +56,7 @@ def voicing_ratio(
 
     Returns a value in ``[0.0, 1.0]`` (0.0 for silence or unvoiced noise/percussion).
     """
-    wav = np.asarray(samples, dtype=np.float64)
-    if wav.ndim > 1:
-        wav = wav.mean(axis=1)
+    wav = _mono_finite(samples)
     if wav.size == 0 or sr <= 0:
         return 0.0
 
@@ -120,9 +127,7 @@ def consonant_band_ratio(
 
     Gated by an absolute + relative RMS floor so silent tails do not inflate the ratio.
     """
-    wav = np.asarray(samples, dtype=np.float64)
-    if wav.ndim > 1:
-        wav = wav.mean(axis=1)
+    wav = _mono_finite(samples)
     if wav.size == 0 or sr <= 0:
         return 0.0
 
@@ -180,9 +185,7 @@ def audit_lyric_alignment(
     - ``high_consonant_bleed``: lyric span is dominated by >3.4 kHz unvoiced sibilance/cymbal bleed.
     - ``unaligned_vocal_window``: substantial vocal activity window (>= 1.5s) has no lyric lines.
     """
-    wav = np.asarray(vocal_samples, dtype=np.float64)
-    if wav.ndim > 1:
-        wav = wav.mean(axis=1)
+    wav = _mono_finite(vocal_samples)
     if wav.size == 0 or sr <= 0:
         return []
 
@@ -190,10 +193,18 @@ def audit_lyric_alignment(
     warnings: list[AlignmentWarning] = []
 
     for idx, line in enumerate(lyric_lines):
-        if line.start is None or line.end is None or line.end <= line.start:
+        if (
+            line.start is None
+            or line.end is None
+            or not (math.isfinite(line.start) and math.isfinite(line.end))
+            or line.end <= line.start
+            or line.end <= 0.0
+        ):
             continue
-        s = max(0, min(wav.size, int(round(line.start * sr))))
-        e = max(s, min(wav.size, int(round(line.end * sr))))
+        line_start = max(0.0, line.start)
+        line_end = max(line_start, line.end)
+        s = max(0, min(wav.size, int(round(line_start * sr))))
+        e = max(s, min(wav.size, int(round(line_end * sr))))
         if e - s < max(32, int(0.08 * sr)):
             continue
         seg = wav[s:e]
@@ -203,8 +214,8 @@ def audit_lyric_alignment(
             warnings.append(
                 AlignmentWarning(
                     kind="unvoiced_lyric",
-                    start=round(line.start, 3),
-                    end=round(line.end, 3),
+                    start=round(line_start, 3),
+                    end=round(line_end, 3),
                     detail=(
                         f"Line {idx + 1} ({line.text[:40]!r}) has low vocal periodicity "
                         f"(voicing={vr:.2f} < {min_voicing_ratio:.2f})."
@@ -215,8 +226,8 @@ def audit_lyric_alignment(
             warnings.append(
                 AlignmentWarning(
                     kind="high_consonant_bleed",
-                    start=round(line.start, 3),
-                    end=round(line.end, 3),
+                    start=round(line_start, 3),
+                    end=round(line_end, 3),
                     detail=(
                         f"Line {idx + 1} ({line.text[:40]!r}) is dominated by >3.4 kHz energy "
                         f"(ratio={cr:.2f} > {max_consonant_ratio:.2f}); possible cymbal/bleed."
@@ -225,28 +236,37 @@ def audit_lyric_alignment(
             )
 
     timed_spans = [
-        (ln.start, ln.end)
+        (max(0.0, ln.start), max(0.0, ln.end))
         for ln in lyric_lines
-        if ln.start is not None and ln.end is not None and ln.end > ln.start
+        if ln.start is not None
+        and ln.end is not None
+        and math.isfinite(ln.start)
+        and math.isfinite(ln.end)
+        and ln.end > ln.start
     ]
     for win in vocal_windows:
-        if win.duration < 1.5 or win.start >= duration:
+        if not (math.isfinite(win.start) and math.isfinite(win.end)):
+            continue
+        win_start = max(0.0, win.start)
+        win_end = max(win_start, win.end)
+        win_dur = win_end - win_start
+        if win_dur < 1.5 or win_start >= duration:
             continue
         covered = sum(
             (
-                max(0.0, min(win.end, ln_end) - max(win.start, ln_start))
+                max(0.0, min(win_end, ln_end) - max(win_start, ln_start))
                 for ln_start, ln_end in timed_spans
             ),
             0.0,
         )
-        if covered < 0.15 * win.duration:
+        if covered < 0.15 * win_dur:
             warnings.append(
                 AlignmentWarning(
                     kind="unaligned_vocal_window",
-                    start=round(win.start, 3),
-                    end=round(win.end, 3),
+                    start=round(win_start, 3),
+                    end=round(win_end, 3),
                     detail=(
-                        f"Vocal window {win.start:.2f}s-{win.end:.2f}s has active singing "
+                        f"Vocal window {win_start:.2f}s-{win_end:.2f}s has active singing "
                         "without aligned lyrics (possible omitted verse or adlib)."
                     ),
                 )
@@ -266,17 +286,19 @@ def detect_boundary_word_cuts(
     """
     warnings: list[AlignmentWarning] = []
     for cut in cut_times:
-        if cut <= 0.0:
+        if not math.isfinite(cut) or cut <= 0.0:
             continue
         for word, w_start, w_end in word_spans:
+            if not (math.isfinite(w_start) and math.isfinite(w_end)) or w_end <= 0.0:
+                continue
             if w_end - w_start < 2.0 * margin_seconds:
                 continue
             if (w_start + margin_seconds) < cut < (w_end - margin_seconds):
                 warnings.append(
                     AlignmentWarning(
                         kind="boundary_word_cut",
-                        start=round(w_start, 3),
-                        end=round(w_end, 3),
+                        start=round(max(0.0, w_start), 3),
+                        end=round(max(0.0, w_end), 3),
                         detail=(
                             f"Cut at {cut:.3f}s splits word {word!r} ({w_start:.3f}s-{w_end:.3f}s)."
                         ),

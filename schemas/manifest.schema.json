@@ -209,6 +209,7 @@
         },
         "head_handle": {
           "description": "Seconds between slice start and shot start.",
+          "minimum": 0.0,
           "title": "Head Handle",
           "type": "number"
         },
@@ -1045,6 +1046,7 @@
           "$ref": "#/$defs/AudioSlice"
         },
         "num_frames": {
+          "minimum": 0,
           "title": "Num Frames",
           "type": "integer"
         },
@@ -1290,10 +1292,13 @@
       "type": "string"
     },
     "duration": {
+      "minimum": 0.0,
       "title": "Duration",
       "type": "number"
     },
     "fps": {
+      "maximum": 1000,
+      "minimum": 1,
       "title": "Fps",
       "type": "integer"
     },

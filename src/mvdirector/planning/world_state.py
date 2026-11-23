@@ -162,7 +162,8 @@ def _contradicted_terms(active_states: Mapping[str, str]) -> list[tuple[str, tup
     pairs: list[tuple[str, tuple[str, ...]]] = []
     for key, raw_val in active_states.items():
         val_tokens = set(re.findall(r"[a-z0-9_]+", raw_val.lower()))
-        entity_token = key.split(".", 1)[0].strip().lower().replace("_", " ")
+        entity_part = key.rsplit(".", 1)[0] if "." in key else key
+        entity_token = entity_part.rsplit(".", 1)[-1].strip().lower().replace("_", " ")
         for triggers, forbidden in _INACTIVE_STATE_CONTRADICTIONS.items():
             if val_tokens & triggers:
                 pairs.append((entity_token, forbidden))
@@ -172,9 +173,9 @@ def _contradicted_terms(active_states: Mapping[str, str]) -> list[tuple[str, tup
 def filter_look_for_state(look_text: str, active_states: Mapping[str, str]) -> str:
     """Strip clauses from ``look_text`` that contradict any active world state.
 
-    For example, if ``active_states`` contains ``{'lantern.illumination': 'unlit'}``, a comma- or
-    semicolon-delimited clause like ``'warm glowing lantern light'`` is removed while unrelated
-    global style/color clauses remain intact.
+    For example, if ``active_states`` contains ``{'lantern.illumination': 'unlit'}``, a comma-,
+    semicolon-, or period-delimited clause like ``'warm glowing lantern light'`` is removed while
+    unrelated global style/color clauses remain intact.
     """
     if not look_text.strip() or not active_states:
         return look_text
@@ -182,7 +183,7 @@ def filter_look_for_state(look_text: str, active_states: Mapping[str, str]) -> s
     if not contradictions:
         return look_text
 
-    clauses = re.split(r"([,;])", look_text)
+    clauses = re.split(r"([,;]|(?<!\d)\.(?=\s|$))", look_text)
     kept: list[str] = []
     i = 0
     while i < len(clauses):

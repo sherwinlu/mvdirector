@@ -15,6 +15,7 @@ Labels come from a CSV or JSON file, or from review decisions already in the man
 from __future__ import annotations
 
 import csv
+import io
 import json
 import math
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ import numpy as np
 
 from mvdirector.errors import ConfigError
 from mvdirector.models import AssetKind, Manifest, ReviewDecision
+from mvdirector.store import path_is_file
 
 # Metric name -> (config key, True when a higher value is better).
 METRIC_CONFIG: dict[str, tuple[str, bool]] = {
@@ -89,30 +91,55 @@ def load_labels(path: Path) -> list[Label]:
     ``kind`` is ``still`` or ``video``. ``attempt`` may be empty for the selected attempt.
     ``label`` is ``good`` or ``bad`` (``1``/``0`` and ``pass``/``fail`` are accepted).
     """
-    if not path.is_file():
+    if not path_is_file(path):
         raise ConfigError(f"Labels file not found: {path}")
-    text = path.read_text(encoding="utf-8")
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ConfigError(f"Could not read labels file {path}: {exc}") from exc
     rows: list[dict[str, object]]
     if path.suffix.lower() == ".json":
         try:
             data = json.loads(text)
         except json.JSONDecodeError as exc:
             raise ConfigError(f"{path}: invalid JSON ({exc})") from exc
+        except RecursionError:
+            raise ConfigError(f"{path}: JSON nests too deeply to parse.") from None
         if not isinstance(data, list) or not all(isinstance(item, dict) for item in data):
             raise ConfigError(f"{path} must hold a JSON list of label objects")
         rows = [dict(item) for item in data]
     else:
-        rows = [dict(row) for row in csv.DictReader(text.splitlines())]
+        try:
+            rows = [dict(row) for row in csv.DictReader(io.StringIO(text))]
+        except csv.Error as exc:
+            raise ConfigError(f"{path}: invalid CSV ({exc})") from exc
     labels = []
     for index, row in enumerate(rows, start=1):
         try:
-            shot_id = str(row["shot"]).strip()
+            raw_shot = row["shot"]
+            if raw_shot is None:
+                raise ValueError("shot must not be null")
+            shot_id = str(raw_shot).strip()
             if not shot_id:
                 raise ValueError("shot must not be empty")
-            kind = AssetKind(str(row.get("kind", "video")).strip().lower())
+            raw_kind = row.get("kind")
+            kind_str = (
+                "video"
+                if raw_kind is None or not str(raw_kind).strip()
+                else str(raw_kind).strip().lower()
+            )
+            kind = AssetKind(kind_str)
             raw_attempt = row.get("attempt")
-            attempt = int(str(raw_attempt)) if raw_attempt not in (None, "") else None
-            good = _parse_label(str(row["label"]))
+            if isinstance(raw_attempt, bool):
+                raise ValueError("attempt must be an integer")
+            attempt_str = "" if raw_attempt is None else str(raw_attempt).strip()
+            attempt = int(attempt_str) if attempt_str else None
+            if attempt is not None and attempt <= 0:
+                raise ValueError("attempt must be a positive integer")
+            raw_label = row["label"]
+            if raw_label is None:
+                raise ValueError("label must not be null")
+            good = _parse_label(str(raw_label))
         except (KeyError, ValueError, TypeError) as exc:
             raise ConfigError(f"{path} row {index}: {exc}") from exc
         labels.append(Label(shot_id, kind, attempt, good))
@@ -131,17 +158,31 @@ def _parse_label(value: str) -> bool:
 
 
 def labels_from_reviews(manifest: Manifest) -> list[Label]:
-    """Approved shots count as good videos; rejected shots count as bad."""
+    """Approved shots count as good assets; rejected shots count as bad."""
     labels = []
     for shot in manifest.shots:
         decision = shot.review.decision
-        if decision is None or shot.video.selected_attempt is None:
+        if decision is None:
+            continue
+        if shot.video.attempts:
+            kind, state = AssetKind.VIDEO, shot.video
+        elif shot.still.attempts:
+            kind, state = AssetKind.STILL, shot.still
+        else:
+            continue
+        attempt_num = state.selected_attempt
+        if attempt_num is None and decision is ReviewDecision.REJECTED:
+            candidate = state.best_attempt() or next(
+                (a for a in reversed(state.attempts) if a.qc is not None), None
+            )
+            attempt_num = candidate.number if candidate is not None else None
+        if attempt_num is None:
             continue
         labels.append(
             Label(
                 shot.id,
-                AssetKind.VIDEO,
-                shot.video.selected_attempt,
+                kind,
+                attempt_num,
                 decision is ReviewDecision.APPROVED,
             )
         )

@@ -569,3 +569,56 @@ def test_active_stems_in_span_filters_lead_vocals_and_orders_by_energy() -> None
     )
     assert stem_pack.active_stems_in_span(arrangement, 0.0, 4.0) == ["Drums"]
     assert stem_pack.active_stems_in_span(arrangement, 5.0, 9.0) == ["Drums", "Brass"]
+
+
+class _RecordingSeparator:
+    """Stands in for Demucs, recording whether a drum stem was requested of it."""
+
+    def __init__(self) -> None:
+        self.drums_requested: list[Path | None] = []
+
+    def separate(self, mix_path: Path, vocals_out: Path, *, drums_out: Path | None = None):
+        from mvdirector.audio.stems import StemResult
+
+        self.drums_requested.append(drums_out)
+        _write_tone_wav(vocals_out, freq=440.0, active_span=(1.0, 5.0), amplitude=0.5)
+        if drums_out is not None:
+            _write_kick_wav(drums_out, bpm=120.0, active_span=(0.0, 8.0))
+        return StemResult(vocals=vocals_out, drums=drums_out)
+
+
+def test_prepare_overwrite_keeps_the_stem_packs_own_drum_stem(
+    fresh_project: Project, tmp_path: Path
+) -> None:
+    """`--overwrite` made Demucs clobber a drum stem the stem pack had just supplied.
+
+    `need_drums_out` was set whenever `overwrite` was true, and `overwrite` short-circuited the
+    `not drums_target.is_file()` guard — so with an external master mix plus a drums-but-no-vocals
+    pack, Demucs overwrote the user's own drum stem written ten lines earlier and redid the work.
+    """
+    # A drum stem only exists when inputs.drums names one.
+    fresh_project.config.inputs.drums = "inputs/drums.wav"
+    stems_dir = fresh_project.path(fresh_project.config.inputs.stems_dir)
+    stems_dir.mkdir(parents=True, exist_ok=True)
+    _make_suno_zip(stems_dir / "pack.zip", tmp_path, include_vocals=False)
+    master = _write_tone_wav(
+        tmp_path / "master.wav", freq=220.0, active_span=(0.0, 8.0), amplitude=0.4
+    )
+
+    separator = _RecordingSeparator()
+    result = prepare_project(
+        fresh_project,
+        audio=master,
+        overwrite=True,
+        separator=separator,  # type: ignore[arg-type]
+        transcriber=_FakeTranscriber(),  # type: ignore[arg-type]
+        llm=None,
+    )
+
+    # Demucs is still needed for the vocals the pack lacks, but must not be asked for drums.
+    assert separator.drums_requested == [None], separator.drums_requested
+    assert result.drums_path is not None and result.drums_path.is_file()
+
+    # The surviving drum stem is the pack's kick, not a Demucs rewrite of the master tone.
+    pack_drums, _ = sf.read(str(result.drums_path))
+    assert float(np.abs(pack_drums).max()) > 0.0

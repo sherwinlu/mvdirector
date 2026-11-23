@@ -13,6 +13,7 @@ attempts keeps everything, since a person may need to choose between its takes.
 from __future__ import annotations
 
 import contextlib
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,54 +39,88 @@ class CleanupPlan:
         return [*self.superseded, *self.orphaned, *self.cache_files]
 
 
+def _has_symlink_component(root: Path, relative: str | Path) -> bool:
+    """Return True if any path component under ``root`` for ``relative`` is a symlink."""
+    current = root
+    for part in Path(relative).parts:
+        if part in ("", "."):
+            continue
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
+
+
 def plan_cleanup(project: Project, manifest: Manifest) -> CleanupPlan:
     """What would be deleted; nothing is changed."""
-    plan, referenced = CleanupPlan(), set[Path]()
+    plan = CleanupPlan()
+    kept: set[Path] = set()
+    superseded_candidates: list[Path] = []
     for shot in manifest.shots:
         for kind in AssetKind:
             state = shot.asset(kind)
-            referenced |= {project.path(a.path) for a in state.attempts if a.path}
             if state.upscaled_path:
-                referenced.add(project.path(state.upscaled_path))
-            if not _is_settled(state):
-                continue
+                kept.add(project.path(state.upscaled_path))
+            settled = _is_settled(state)
             for attempt in state.attempts:
-                path = project.path(attempt.path) if attempt.path else None
-                if path and attempt.number != state.selected_attempt and path.is_file():
-                    plan.superseded.append(path)
-    kept = referenced - set(plan.superseded)
+                if not attempt.path:
+                    continue
+                is_symlinked = _has_symlink_component(project.root, attempt.path)
+                path = project.path(attempt.path)
+                if not settled or attempt.number == state.selected_attempt:
+                    kept.add(path)
+                elif not is_symlinked and path.is_file():
+                    superseded_candidates.append(path)
+    seen_superseded: set[Path] = set()
+    for path in superseded_candidates:
+        if path not in kept and path not in seen_superseded:
+            seen_superseded.add(path)
+            plan.superseded.append(path)
     for folder in _GENERATION_FOLDERS:
+        if _has_symlink_component(project.root, folder):
+            continue
         root = project.path(folder)
         if root.is_dir():
             plan.orphaned += sorted(
                 p
                 for p in root.iterdir()
-                if p.is_file()
+                if not p.is_symlink()
+                and p.is_file()
                 and _GENERATION_NAME.fullmatch(p.name)
                 and p not in kept
-                and p not in plan.superseded
+                and p not in seen_superseded
             )
-    seg_root = project.segments_dir
-    if seg_root.is_dir():
-        active_segments = {
-            path
-            for ch in manifest.chapters
-            for draft in (False, True)
-            for path in (
-                project.segment_video_path(ch.id, draft=draft),
-                project.segment_stamp_path(ch.id, draft=draft),
+    if not _has_symlink_component(project.root, "assets/segments"):
+        seg_root = project.path("assets/segments")
+        if seg_root.is_dir():
+            active_segments = {
+                path
+                for ch in manifest.chapters
+                for draft in (False, True)
+                for path in (
+                    project.segment_video_path(ch.id, draft=draft),
+                    project.segment_stamp_path(ch.id, draft=draft),
+                )
+            }
+            plan.orphaned += sorted(
+                p
+                for p in seg_root.iterdir()
+                if not p.is_symlink()
+                and p.is_file()
+                and _SEGMENT_CACHE_NAME.fullmatch(p.name)
+                and p not in active_segments
             )
-        }
-        plan.orphaned += sorted(
-            p
-            for p in seg_root.iterdir()
-            if p.is_file() and _SEGMENT_CACHE_NAME.fullmatch(p.name) and p not in active_segments
-        )
     cache_root = project.root / ".comfy_cache"
     if cache_root.is_dir() and not cache_root.is_symlink():
-        plan.cache_files = sorted(
-            p for p in cache_root.rglob("*") if p.is_file() and not p.is_symlink()
-        )
+        cache_files: list[Path] = []
+        for dirpath, dirnames, filenames in os.walk(cache_root, followlinks=False):
+            current = Path(dirpath)
+            dirnames[:] = [d for d in dirnames if not (current / d).is_symlink()]
+            for filename in filenames:
+                candidate = current / filename
+                if not candidate.is_symlink() and candidate.is_file():
+                    cache_files.append(candidate)
+        plan.cache_files = sorted(cache_files)
     plan.size_bytes = sum(path.stat().st_size for path in plan.files)
     return plan
 
@@ -96,16 +131,24 @@ def apply_cleanup(project: Project, manifest: Manifest, plan: CleanupPlan) -> No
     for shot in manifest.shots:
         for kind in AssetKind:
             for attempt in shot.asset(kind).attempts:
-                if attempt.path and project.path(attempt.path) in gone:
+                if (
+                    attempt.path
+                    and not _has_symlink_component(project.root, attempt.path)
+                    and project.path(attempt.path) in gone
+                ):
                     attempt.path = None
     for path in plan.files:
-        path.unlink(missing_ok=True)
+        if not path.is_symlink():
+            path.unlink(missing_ok=True)
     cache_root = project.root / ".comfy_cache"
     if plan.cache_files and cache_root.is_dir() and not cache_root.is_symlink():
-        for subdir in sorted(cache_root.rglob("*"), reverse=True):
-            if subdir.is_dir() and not subdir.is_symlink():
-                with contextlib.suppress(OSError):
-                    subdir.rmdir()
+        for dirpath, dirnames, _ in os.walk(cache_root, topdown=False, followlinks=False):
+            current = Path(dirpath)
+            for d in dirnames:
+                subdir = current / d
+                if subdir.is_dir() and not subdir.is_symlink():
+                    with contextlib.suppress(OSError):
+                        subdir.rmdir()
         with contextlib.suppress(OSError):
             cache_root.rmdir()
 

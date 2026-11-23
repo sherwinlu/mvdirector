@@ -91,18 +91,31 @@ def load_mono_window(
             "f32le",
             "pipe:1",
         ]
-        proc = subprocess.run(cmd, capture_output=True, check=False)
+        try:
+            proc = subprocess.run(cmd, capture_output=True, check=False, timeout=300.0)
+        except subprocess.TimeoutExpired as exc:
+            raise MediaToolError(f"ffmpeg audio decode timed out for {path.name}") from exc
         if proc.returncode != 0:
             tail = "\n".join(
                 proc.stderr.decode("utf-8", errors="replace").strip().splitlines()[-8:]
             )
             raise MediaToolError(f"ffmpeg audio decode failed (exit {proc.returncode}):\n{tail}")
-        return np.frombuffer(proc.stdout, dtype=np.float32).copy()
+        arr = np.frombuffer(proc.stdout, dtype=np.float32).copy()
+        if arr.size and not np.all(np.isfinite(arr)):
+            raise MediaToolError(
+                f"{path.name} contains NaN or infinite samples; re-export it as PCM WAV."
+            )
+        return arr
 
     import librosa
 
     samples, _ = librosa.load(str(path), sr=sr, mono=True, offset=safe_start, duration=duration)
-    return np.asarray(samples, dtype=np.float32)
+    arr = np.asarray(samples, dtype=np.float32)
+    if arr.size and not np.all(np.isfinite(arr)):
+        raise MediaToolError(
+            f"{path.name} contains NaN or infinite samples; re-export it as PCM WAV."
+        )
+    return arr
 
 
 def _stream_mix_rms(
@@ -176,10 +189,14 @@ def _chapter_beats_and_cues(
 
     if track.bpm is not None:
         bpm = round(track.bpm, 2)
+        if not math.isfinite(bpm) or bpm <= 0.0:
+            bpm = _DEFAULT_BPM
         beat_sec = 60.0 / bpm
         phase = _align_beat_phase(rel_beats, beat_sec)
     else:
         bpm = round(detected_bpm, 2)
+        if not math.isfinite(bpm) or bpm <= 0.0:
+            bpm = _DEFAULT_BPM
         beat_sec = 60.0 / bpm
         phase = (rel_beats[0] % beat_sec) if rel_beats else 0.0
 

@@ -190,7 +190,7 @@ def setup(
     video_preset: str | None = typer.Option(
         None,
         "--video-preset",
-        help="Video model family preset: ltx, wan, wan-i2v, or custom.",
+        help="Video model family preset: ltx, wan, wan-i2v, exact, or custom.",
     ),
     non_interactive: bool = typer.Option(
         False,
@@ -215,7 +215,20 @@ def setup(
     typer.echo(setup_mod.render_environment_report(report))
 
     if check_only:
-        if not report.tools_ok or not report.comfy.reachable or not report.ollama.reachable:
+        chosen_check_provider = (llm_provider or setup_mod.DEFAULT_LLM_PROVIDER).strip().lower()
+        if chosen_check_provider not in _VALID_SETUP_PROVIDERS:
+            valid = ", ".join(_VALID_SETUP_PROVIDERS)
+            raise _fail(
+                MVDError(
+                    f"Unsupported --llm-provider {chosen_check_provider!r}. Choose from: {valid}"
+                )
+            )
+        needs_ollama = chosen_check_provider == "ollama"
+        if (
+            not report.tools_ok
+            or not report.comfy.reachable
+            or (needs_ollama and not report.ollama.reachable)
+        ):
             raise typer.Exit(code=1)
         return
 
@@ -248,7 +261,7 @@ def setup(
         chosen_title = typer.prompt("Project title", default=chosen_title).strip()
         while True:
             raw_comfy = typer.prompt(
-                "ComfyUI URL (local or separate server)", default=chosen_comfy
+                "ComfyUI URL (local, LAN, or cloud server)", default=chosen_comfy
             ).strip()
             try:
                 chosen_comfy = setup_mod.validate_http_url(raw_comfy, "ComfyUI URL")
@@ -665,7 +678,9 @@ def reference_generate(
         "--from-character",
         help="Derive this character's base sheet by editing another character's locked sheet.",
     ),
-    count: int = typer.Option(None, help="Number of candidates. Defaults to reference.candidates."),
+    count: int | None = typer.Option(
+        None, min=1, help="Number of candidates. Defaults to reference.candidates."
+    ),
 ) -> None:
     """Generate candidate reference sheets (front, profile, 3/4 and face panels)."""
     try:
@@ -703,8 +718,8 @@ def reference_video(
     project_dir: Path = ProjectDir,
     state: str = StateOption,
     character: str = CharacterOption,
-    count: int = typer.Option(
-        None, help="Number of candidates. Defaults to reference.video_candidates."
+    count: int | None = typer.Option(
+        None, min=1, help="Number of candidates. Defaults to reference.video_candidates."
     ),
 ) -> None:
     """Generate candidate silent turnaround reference videos from a locked reference sheet."""
@@ -748,7 +763,9 @@ def plates_generate(
     from_set: str = typer.Option(
         None, "--from-set", help="Derive this set's plate by editing another locked set plate."
     ),
-    count: int = typer.Option(None, help="Candidates per set. Defaults to plates.candidates."),
+    count: int | None = typer.Option(
+        None, min=1, help="Candidates per set. Defaults to plates.candidates."
+    ),
 ) -> None:
     """Generate candidate images of the empty sets."""
     try:
@@ -793,7 +810,9 @@ def _reference_status(char: Character, key: str, index: int) -> str:
 def props_generate(
     project_dir: Path = ProjectDir,
     prop: str = typer.Option(None, "--prop", help="Prop id or name. Defaults to every prop."),
-    count: int = typer.Option(None, help="Candidates per prop. Defaults to props.candidates."),
+    count: int | None = typer.Option(
+        None, min=1, help="Candidates per prop. Defaults to props.candidates."
+    ),
 ) -> None:
     """Generate candidate two-angle reference sheets for recurring hero props."""
     try:
@@ -1187,7 +1206,7 @@ def reject(
 def review(project_dir: Path = ProjectDir, review_mode: ReviewMode = ModeOption) -> None:
     """Open the review UI in your browser."""
     app_path = Path(__file__).parent / "review" / "app.py"
-    bind_address = os.environ.get("STREAMLIT_SERVER_ADDRESS", "127.0.0.1")
+    bind_address = os.environ.get("STREAMLIT_SERVER_ADDRESS", "127.0.0.1").strip() or "127.0.0.1"
     command = [
         sys.executable,
         "-m",

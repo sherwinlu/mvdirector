@@ -1,6 +1,18 @@
 # Installation, Docker & Language Models
 
-> Looking for an end-to-end walkthrough for running everything on one machine? See the [Local Quickstart Guide](local-quickstart.md) and the interactive `mvd setup` command.
+> Looking for a step-by-step walkthrough (fully local, home-LAN ComfyUI, or remote cloud GPU)? See the [Quickstart Guide](local-quickstart.md) and the interactive `mvd setup` command.
+
+## Supported Topologies (Setup- & Model-Neutral)
+
+`mvdirector` (`v0.8.0b1` Beta) has been tested end-to-end **both fully locally and with ComfyUI running on a remote host**. Both ComfyUI and the LLM can run wherever works best for your hardware, using whichever models you choose:
+
+| Topology | Where ComfyUI runs | Where `mvd` & LLM run | Example `COMFY_URL` |
+|---|---|---|---|
+| **Fully local** | Same machine (Apple Silicon Mac, Linux/Windows GPU, or CPU ComfyUI with paid API nodes) | Same machine (local Ollama/LM Studio, or cloud LLM API) | `http://127.0.0.1:8188` |
+| **Home LAN / second computer** | Another PC or workstation on your home LAN or Tailscale network | Your laptop/desktop (local or remote LLM) | `http://192.168.1.50:8188` |
+| **Remote cloud server** | Cloud GPU VM or container behind HTTPS / reverse proxy (or SSH tunnel) | Your laptop/desktop (local or cloud LLM) | `https://gpu.example.com:8188` *(with `comfy.headers` Bearer auth)* |
+
+Because `mvdirector` uploads reference images and audio slices over HTTP (`POST /upload/image`) and polls `GET /history/{id}`, **no shared filesystem or NFS mount is required** between `mvd` and ComfyUI.
 
 ## Install
 
@@ -10,8 +22,8 @@ Requires Python 3.11+ and `ffmpeg`. Installing the `mvdirector` package provides
 brew install ffmpeg
 python -m venv .venv && source .venv/bin/activate
 pip install -c constraints.txt -e ".[qc,align,ui,dev]"      # add "anthropic" to use llm.provider: anthropic
-ollama pull gemma3:12b                                      # the default local model; or set the key for a cloud provider
-export COMFY_URL=http://127.0.0.1:8188                      # or your remote ComfyUI HTTPS URL
+ollama pull gemma3:12b                                      # default local LLM; or use any Ollama/OpenAI-compatible/cloud model
+export COMFY_URL=http://127.0.0.1:8188                      # local, home LAN/Tailscale, or remote cloud HTTPS URL
 ```
 
 The extras let you install only what you use; by default `qc.on_missing_dependency` is `fail` so missing `qc` packages never downgrade checks silently (set `qc.on_missing_dependency: skip` in `project.yaml` to opt out):
@@ -58,11 +70,11 @@ COMFY_URL=http://comfy-cpu:8188 \
 docker compose run --rm mvd validate -p /workspace/projects/my-song
 ```
 
-**Pinning & loopback binding:** Dockerfiles pin tested upstream tags (`COMFYUI_REF=v0.45.4`, `OLLAMA_VERSION=0.40.16`, `CURL_IMAGE_TAG=8.23.0`) and `Dockerfile.mvd` uses `constraints.txt`. `docker-compose.yml` binds all published ports (`8188`, `11434`, `8501`) to `127.0.0.1` by default; override `MVD_BIND_ADDR` (for example on a trusted private network) only if you intentionally want LAN access.
+**Pinning, ComfyUI version-agnosticism & loopback binding:** The optional Dockerfiles pin tested upstream tags (`COMFYUI_REF=v0.45.4`, `OLLAMA_VERSION=0.40.16`, `CURL_IMAGE_TAG=8.23.0`) for reproducible container builds (override at build time with `--build-arg COMFYUI_REF=<tag>`), and `Dockerfile.mvd` uses `constraints.txt`. `mvdirector` itself is **ComfyUI version-agnostic** and works against any local, home-LAN, or cloud ComfyUI installation using standard API-format workflow exports (see [ComfyUI Version Compatibility](workflows.md#comfyui-version-compatibility)). `docker-compose.yml` binds all published ports (`8188`, `11434`, `8501`) to `127.0.0.1` by default; override `MVD_BIND_ADDR` (for example on a trusted private network) only if you intentionally want LAN access.
 
 **Apple Silicon (M1–M4) MacBooks:** Docker Desktop on macOS runs containers inside a Linux VM without Apple Metal/MPS GPU passthrough. To use your Mac's GPU for local open-weight models (`qwen2.5vl:7b`, `gemma3:12b`), run Ollama and ComfyUI natively on macOS and point the `mvd` container at `COMFY_URL=http://host.docker.internal:8188` and `MVD_LLM_URL=http://host.docker.internal:11434`.
 
-**Remote GPU proxy notes.** Some hosted HTTP proxies reject Python's default `User-Agent` with 403 (`mvd` sets a compatible user agent automatically, but if you probe the server manually with `urllib` or `requests`, pass a `curl/...` user agent). Fresh cloud container disks also start without your model files or symlinks, so run `mvd validate` before a long job.
+**Remote ComfyUI & proxy notes.** Some hosted HTTP proxies reject Python's default HTTP library `User-Agent` (`python-httpx/...` / `Python-urllib/...`) with 403. `ComfyClient` automatically sends `User-Agent: mvdirector/<version>` by default and respects any custom `User-Agent` header configured in `comfy.headers` (if a specific proxy requires a custom string, set it there). Fresh cloud container disks also start without your model files or symlinks, so run `mvd validate` before a long job.
 
 ---
 
@@ -89,7 +101,7 @@ llm:
 | `anthropic` | Claude models | `ANTHROPIC_API_KEY` | the SDK default |
 | `openai` | OpenAI models | `OPENAI_API_KEY` | `https://api.openai.com/v1` |
 | `gemini` | Gemini models | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) | Google's Generative Language API |
-| `ollama` | Local models served by Ollama (e.g. `qwen2.5vl:7b`, `gemma3:12b`) | none | `${MVD_LLM_URL:-http://localhost:11434}` |
+| `ollama` | Local or remote models served by Ollama (e.g. `qwen2.5vl:7b`, `gemma3:12b`, or any vision model) | none | `${MVD_LLM_URL:-http://localhost:11434}` |
 | `openai_compatible` | LM Studio, llama.cpp server, vLLM, OpenRouter and similar | optional (`api_key_env`) | **`base_url` or `MVD_LLM_URL` is required** |
 
 The default is a local Ollama model (`gemma3:12b`), so nothing leaves your machine and no API key is needed. Install [Ollama](https://ollama.com), then run `ollama pull gemma3:12b` and `mvd llm-check`. Model names change often, so use the name your provider or local server lists. `llm.model` has a default only for `ollama`. For any other provider the config is rejected until you name a model, so a forgotten model never reaches the server as an Ollama name. Examples:

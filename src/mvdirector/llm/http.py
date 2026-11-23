@@ -12,6 +12,7 @@ pointing the app at a server of their own.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from collections.abc import Callable
 from typing import Any
@@ -19,7 +20,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from mvdirector.errors import ImagesNotSupportedError, LLMError, LLMUnavailableError
+from mvdirector.errors import ConfigError, ImagesNotSupportedError, LLMError, LLMUnavailableError
 
 log = logging.getLogger("mvdirector.llm")
 
@@ -29,9 +30,31 @@ _KEY_WORDS = ("api key", "api_key", "apikey", "authentication", "unauthorized")
 _MAX_RETRY_AFTER = 30.0
 
 
+def _host_port(parts: Any) -> str:
+    host = parts.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    return f"{host}:{port}" if port is not None else host
+
+
 def origin(url: str) -> str:
+    """Return ``scheme://host[:port]`` with any embedded credentials stripped."""
     parts = urlsplit(url)
-    return f"{parts.scheme}://{parts.netloc}"
+    host_port = _host_port(parts)
+    return f"{parts.scheme}://{host_port}" if host_port else f"{parts.scheme}://"
+
+
+def redact_url(url: str) -> str:
+    """Return ``url`` without embedded userinfo, query string, or fragment."""
+    parts = urlsplit(url)
+    host_port = _host_port(parts)
+    if not parts.scheme or not host_port:
+        return origin(url)
+    return f"{parts.scheme}://{host_port}{parts.path}"
 
 
 class HttpJSON:
@@ -77,6 +100,8 @@ class HttpJSON:
             final = attempt == self._retries - 1
             try:
                 response = self._client.post(url, json=payload)
+            except httpx.InvalidURL as exc:
+                raise ConfigError(f"Invalid LLM URL: {exc}") from exc
             except httpx.ConnectTimeout:
                 last = "the connection timed out"
             except httpx.TimeoutException as exc:
@@ -117,9 +142,11 @@ def retry_delay(response: httpx.Response | None, attempt: int) -> float:
     if response is not None:
         header = response.headers.get("retry-after", "")
         try:
-            return min(float(header), _MAX_RETRY_AFTER)
+            parsed = float(header)
         except ValueError:
-            pass
+            parsed = math.nan
+        if math.isfinite(parsed) and parsed >= 0.0:
+            return min(parsed, _MAX_RETRY_AFTER)
     return 2.0 * (attempt + 1)
 
 

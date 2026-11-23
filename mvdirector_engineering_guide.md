@@ -2,11 +2,11 @@
 
 How the lip-synced music video pipeline works, how its code is organized, and how to change it.
 
-Version 0.1.0 (Manifest Schema v1). Updated November 2026\.
+Version 0.8.0b1 (First Beta Release, Manifest Schema v1). Updated November 2026\.
 
 # **Summary**
 
-mvdirector (CLI command `mvd`) is a command-line application that turns a Suno song (full mix, vocal stem, lyrics and a style brief) into a lip-synced performance music video. It runs on a developer's machine and coordinates three outside systems. ComfyUI—on a remote cloud GPU, a local GPU, or a lightweight local instance driving paid cloud API nodes—executes all image and video workflows (such as Qwen, Z-Image, Krea, Nano Banana, or Grok for stills, and LTX, Wan, MOSS, Seedance, or P-H3 / MiniMax for video). A configured language model (Claude, OpenAI, Gemini, Ollama, or any OpenAI-compatible server) plans the shots, judges visual quality, and rewrites failed prompts. ffmpeg slices audio and assembles the final cut.
+mvdirector (CLI command `mvd`) is a command-line application and Python library that turns any song (a single audio track, DAW stems, or a Suno export, plus lyrics and a style brief) into a lip-synced, narrative, or visual music video (or a long-form continuous mix). It runs on macOS, Linux, or Windows and coordinates three outside systems in a setup-, model-, and ComfyUI-version-agnostic way. ComfyUI—running locally on the same machine, on another computer in your home network (LAN / Tailscale), on a remote cloud GPU server, or as a lightweight CPU instance driving paid cloud API nodes—executes all image and video workflows (any open-weight or cloud API model you wire via `.api.json` + `.bindings.json`, such as Qwen, Z-Image, Flux, Krea, Nano Banana, Seedream, or Grok for stills, and LTX, Wan, HunyuanVideo, MOSS, Seedance, Kling, or P-H3 / MiniMax for video). Any configured language model (local or remote Ollama, any OpenAI-compatible server, Claude, OpenAI, or Gemini) plans the shots, judges visual quality, and rewrites failed prompts. ffmpeg slices audio and assembles the final cut.
 
 Four design decisions shape the rest of the system:
 
@@ -20,9 +20,9 @@ Four design decisions shape the rest of the system:
 
 ## **Verification status**
 
-The code has over 350 automated tests across 14 test modules, including full-pipeline tests against a fake ComfyUI server with real ffmpeg and socket-level tests against a fake multi-protocol LLM server (OpenAI, Ollama, Gemini). In addition, a 29-shot duet project has been executed end-to-end against live remote GPU ComfyUI workflows (Qwen-Image T2I, Qwen-Image-Edit 2.1, LTX-2.5) and a live Ollama (`qwen2.5:14b`) server, producing a complete assembled `.mp4` via `mvd assemble --force`.
+`mvdirector` `v0.8.0b1` is the **first Beta release**. Everything in the pipeline has been tested end-to-end **both locally** (orchestrator, ComfyUI, and local LLM on one machine) **and on a remote ComfyUI setup** (orchestrator running locally against a remote ComfyUI server over HTTP/HTTPS—the same path used for another computer on your home LAN/Tailscale or a cloud GPU host), covering analysis, planning, reference sheet and plate locking, still and video generation, automated QC, review, and final `mvd assemble`.
 
-That live run proved the orchestration against real servers, using text-only `qwen2.5:14b` without `mediapipe`, `insightface`, or `faster-whisper` installed locally and without hitting live cloud LLM APIs. Because multimodal vision QC and MediaPipe were absent, only `dimensions`, `sharpness`, `duration`, and `temporal` ran (`face_*`, `lipsync`, `identity`, and `vision_*` checks were skipped), so the QC gates themselves remain uncalibrated on live clips. In that test, LTX-2.5's audio-conditioned A2V drifted on tight singing lip-sync, so dedicated singing lip-sync workflows (such as InfiniteTalk or LatentSync) are recommended for `lipsync` shots alongside threshold calibration on your own labelled clips.
+In addition, the repository includes an extensive automated test suite (`pytest`, `ruff`, `mypy`, JSON Schema checks, and security/QA regressions) covering full-pipeline execution against a fake ComfyUI server with real `ffmpeg`, socket-level tests against a fake multi-protocol LLM server (OpenAI, Ollama, Gemini), MCP server transport and security boundaries, and ComfyUI version-agnostic HTTP/workflow parsing. Default QC thresholds remain starting points that should be calibrated on your own labelled clips (`mvd calibrate`), and singing lip-sync quality depends on the ComfyUI video/lip-sync model you choose (for tight singing mouth sync, pair your workflow with a dedicated lip-sync model such as InfiniteTalk, LatentSync, or Seedance).
 
 ## **Where to start reading**
 
@@ -34,8 +34,8 @@ Read `models.py` for the persisted data, `cli.py` for the commands, `generation/
 | :---- | :---- |
 | Shot | One contiguous time range of the song, cut on bar lines. Each shot has one still and one video. |
 | Shot type | `lipsync`: enough of the shot is sung that the singer sings on camera. `performance`: the singer is on camera but not singing. `broll`: no singer. |
-| Still | The first frame of a shot's clip. Qwen generates it from a text prompt (b-roll) or by editing the front panel of the shot's wardrobe reference sheet (singer shots). |
-| Video or clip | The animated shot, generated by LTX from the still, plus the vocal slice for lip-sync shots. |
+| Still | The first frame of a shot's clip. Your bound `t2i` workflow generates it from a text prompt (b-roll) or your bound `still` workflow edits the front panel of the shot's wardrobe reference sheet (singer shots). |
+| Video or clip | The animated shot, generated by your bound `i2v` or `lipsync` workflow from the still, plus the vocal slice (or `audio_video`) for lip-sync shots. |
 | Asset | A still or a video. Each has an `AssetState` in the manifest. |
 | Attempt | One generation of an asset, with its seed, prompt, parameters, file and QC report. Attempts are never deleted. |
 | Handle | Extra audio and video (default 0.25 s) generated on each side of a shot and trimmed at assembly. |
@@ -62,9 +62,9 @@ flowchart LR
         FS[("Project Folder\n(analysis.json, manifest.json, assets/)")]
         UI["Streamlit Review UI"]
     end
-    subgraph Remote["GPU / Cloud / Local Services"]
-        Comfy["ComfyUI Server\n(Qwen-Image & LTX)"]
-        LLM["LLM Provider\n(Claude / OpenAI / Gemini / Ollama)"]
+    subgraph Remote["Local, Home-LAN, or Cloud Services"]
+        Comfy["ComfyUI Server\n(Any image/video models)"]
+        LLM["LLM Provider\n(Ollama / OpenAI-compatible / Claude / OpenAI / Gemini)"]
     end
     CLI <--> FS
     CLI --> FF
@@ -81,7 +81,7 @@ flowchart LR
 | :---- | :---- | :---- | :---- |
 | `mvd` CLI and library | Developer machine | Orchestration, state, planning, quality gates, assembly. | Required. |
 | `ffmpeg` and `ffprobe` | Developer machine | Audio slicing, frame extraction, clip conforming, final mux. | Required. `mvd validate` reports it. |
-| ComfyUI | Remote cloud GPU or local | Runs the Qwen (`t2i`, `still`) and LTX (`lipsync`, `i2v`) workflows. | Required for generation. An unreachable server stops the run without using attempts. |
+| ComfyUI | Local, home LAN / second computer, or remote cloud | Runs your bound `t2i`, `still`, `lipsync`, `i2v` (and optional `upscale`) workflows with any model family. | Required for generation. An unreachable server stops the run without using attempts. |
 | LLM Provider (`anthropic`, `openai`, `gemini`, `ollama`, `openai_compatible`) | Cloud API or local server | Visual bible, shot direction, vision checks, prompt rewrites. | Optional. With `llm.enabled: false`, planning is rule-based and vision checks and prompt rewrites are off. |
 | MediaPipe | Developer machine (CPU) | Commercially permissive (Apache-2.0) face detection, face framing, face presence, and mouth opening for the lip-sync check (`qc` extra, default `qc.face_backend: mediapipe`). | Optional (`qc` extra). Checks are recorded as `skipped`, or the run stops if `qc.on_missing_dependency` is `fail`. |
 | InsightFace | Developer machine (CPU) | Optional multi-angle face-embedding identity checks (`insightface` extra, `qc.face_backend: insightface`; non-commercial research weights). | Optional (`insightface` extra). Off by default so runs are commercially permissive out of the box (`vision_character` checks identity instead). |
@@ -247,7 +247,7 @@ The manifest holds the creative brief (`character` for solo projects, or `charac
 | `character`, `characters`, `character_wardrobes` | Optional focal singer id, ordered list of visible character ids (two-shots/groups), and per-character wardrobe states for the shot. |
 | `lyrics`, `intensity` | Lyric lines in the shot and mean bar intensity (0 to 1). |
 | `still_prompt`, `motion_prompt` | The model's creative prompts. Set, plate notes, camera placement, character and style text are added at generation time. |
-| `audio_slice`, `num_frames` | Slice path and time range with `head_handle`, and the frame count requested from LTX. |
+| `audio_slice`, `num_frames` | Slice path and time range with `head_handle`, and the frame count quantized to your workflow's `frame_multiple * n + frame_offset` grid. |
 | `still`, `video` | An `AssetState` each (see below). |
 | `review` | Whether a person must look at the shot, why, and the decision. |
 
@@ -554,7 +554,7 @@ Retry overrides from `retry.adjust_params` (such as `steps`) are sent on later a
 | Wait | `GET /history/<id>` | Polled every `comfy.poll_interval` (3 s) until the job completes or errors, with a timeout of `comfy.job_timeout` (1,800 s). |
 | Download | `GET /view` | Takes the first output on the bound node whose extension matches the binding. Streams chunks into a `.part` temp file, rejects unsafe paths, and caps downloads at 512 MiB before atomic rename. |
 
-Transport errors, 429 rate-limit responses and 5xx responses are retried three times with a 2 s, 4 s and 6 s pause (or the server's `Retry-After` header via `retry_delay()`), then raise `ComfyConnectionError`. Other 4xx responses raise `ComfyJobError`. Polling is used instead of a websocket because it works through hosted HTTP proxies and needs no reconnection logic. `comfy.headers` can carry an authorization header, and the base URL comes from `COMFY_URL`.
+Transport errors, 429 rate-limit responses and 5xx responses are retried three times with a 2 s, 4 s and 6 s pause (or the server's `Retry-After` header via `retry_delay()`), then raise `ComfyConnectionError`. Other 4xx responses raise `ComfyJobError`. Polling is used instead of a websocket because it works across local, home-LAN, and hosted HTTP proxies without reconnection state. `ComfyClient` sends `User-Agent: mvdirector/<version>` by default (respecting any override in `comfy.headers`), supports optional `Authorization` headers, reads the server address from `COMFY_URL` / `comfy.base_url`, and degrades optional endpoints (`/free`, `/object_info`, `HEAD /view`) gracefully across ComfyUI versions.
 
 # **Quality control**
 
@@ -863,17 +863,15 @@ mvd schema schemas            # after any change to models.py
 
 # **Known limitations and risks**
 
-* **Not yet run with live services.** ComfyUI with real workflows, live LLM APIs, InsightFace, MediaPipe and `faster-whisper` were not exercised end to end.
-
-* **Quality thresholds are uncalibrated.** Defaults are starting values. The lip-sync measure is a filter for obvious failures and is weaker on fast, mumbled or heavily processed vocals.
+* **Beta release — calibrate QC thresholds per model.** While the full pipeline has been tested end-to-end both locally and with remote ComfyUI, default QC thresholds are starting values and vary across image/video models and vision LLMs. Calibrate on 20–30 labelled clips with `mvd calibrate`, and note that the default advisory MediaPipe lip-sync measure is a filter for obvious failures and is weaker on fast, mumbled, or heavily processed vocals.
 
 * **Bar phase and shot length.** Bars assume the first beat is a downbeat. With `video.dynamic_pacing: false`, shots are a fixed number of bars; with `video.dynamic_pacing: true`, shot length scales with bar intensity and snaps to section labels, but cuts still land on bar lines rather than mid-bar lyric phrases. If cuts feel a beat off, edit `bars` in `analysis.json` and run `mvd plan --overwrite`.
 
 * **Sheet panels are cut by position.** The image model is asked for four equal panels and `split_sheet` cuts the image into equal parts. Inspect `assets/reference/<state>/` after locking.
 
-* **Multi-image editing depends on the workflow.** Supplying both `reference_image` and `set_image` to Qwen-Image-Edit requires a workflow that binds both inputs and follows the two-image `PLATE_NOTE` instruction.
+* **Multi-image editing depends on the workflow.** Supplying both `reference_image` and `set_image` to your `still` workflow requires an image-edit workflow that binds both inputs and follows the configured `comfy.reference_notation` (`prose` or `tags`).
 
-* **Stem bleed.** Suno stems are AI-separated. Bleed in the vocal stem can mark an instrumental passage as sung. Check `vocal_windows` if shot types look wrong.
+* **Stem bleed.** AI-separated vocal stems (e.g. from Suno or Demucs) can contain bleed that marks an instrumental passage as sung. Check `vocal_windows` if shot types look wrong.
 
 * **Cost scales with retries.** Each vision call sends up to six images, and every retry adds GPU time and API usage. `retry.max_generations_per_run` caps one run.
 

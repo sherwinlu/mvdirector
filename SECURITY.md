@@ -4,7 +4,8 @@
 
 | Version | Supported |
 | ------- | --------- |
-| `0.1.x` | Yes |
+| `0.8.x` (Beta) | Yes |
+| `< 0.8.0b1` | No |
 
 ## Reporting a Vulnerability
 
@@ -41,7 +42,7 @@ You can expect an acknowledgment within 72 hours and a coordinated fix before pu
 
 ## Operational Security Guidelines for Users
 
-- **Never expose unauthenticated ComfyUI (`:8188`), Ollama (`:11434`), or the Streamlit Review UI (`:8501`) to untrusted networks or the public internet.** Neither ComfyUI, Ollama, nor the review UI includes built-in user authentication. `docker-compose.yml` binds host ports to `127.0.0.1` by default and `mvd review` binds Streamlit to `127.0.0.1` locally; when running on a remote cloud GPU, use an authenticated proxy, SSH port forwarding, or an `Authorization` header in `comfy.headers`.
+- **Never expose unauthenticated ComfyUI (`:8188`), Ollama (`:11434`), or the Streamlit Review UI (`:8501`) to untrusted networks or the public internet.** Neither ComfyUI, Ollama, nor the review UI includes built-in user authentication. `docker-compose.yml` binds host ports to `127.0.0.1` by default and `mvd review` binds Streamlit to `127.0.0.1` locally; when running ComfyUI on another computer in your home network or on a remote cloud server, keep it on a private LAN/Tailscale network, use SSH port forwarding, or put it behind HTTPS with an `Authorization` header in `comfy.headers`.
 - **Treat ComfyUI workflow files (`*.api.json`) as executable code.** Custom nodes in ComfyUI can execute arbitrary Python on the GPU host. Only run workflow graphs you exported yourself or audited from a trusted source.
 - **Review model weight licenses before commercial use.** By default `qc.face_backend: mediapipe` uses Apache-2.0 components; opt-in `insightface` (`buffalo_l`) is non-commercial research only, and LatentSync weights carry an OpenRAIL++ license with use-case restrictions that should be reviewed prior to commercial deployment.
 - **Keep API keys in environment variables.** Never commit real API keys or tokens into `project.yaml`. Reference LLM keys by variable name via `llm.api_key_env` (e.g. `ANTHROPIC_API_KEY`), and reference ComfyUI connection tokens via `COMFY_*` or `MVD_*` (e.g. `${COMFY_TOKEN}`).

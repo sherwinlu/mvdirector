@@ -20,6 +20,7 @@ import re
 import stat
 import tempfile
 import zipfile
+import zlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -406,15 +407,16 @@ def classify_stem_name(filename: str) -> StemRole:
 
 
 def make_stem_id(label: str, existing: set[str]) -> str:
-    """Build a unique SAFE_ID-compatible slug for a stem label."""
+    """Build a unique SAFE_ID-compatible slug for a stem label (at most 64 characters)."""
     folded = ascii_fold(label).lower()
-    slug = re.sub(r"[^a-z0-9]+", "_", folded).strip("_")
+    slug = re.sub(r"[^a-z0-9]+", "_", folded).strip("_")[:64].rstrip("_")
     if not slug or not slug[0].isalnum():
         slug = "stem"
     candidate = slug
     suffix = 2
     while candidate in existing:
-        candidate = f"{slug}_{suffix}"
+        tail = f"_{suffix}"
+        candidate = f"{slug[: 64 - len(tail)].rstrip('_') or 'stem'}{tail}"
         suffix += 1
     existing.add(candidate)
     return candidate
@@ -472,8 +474,46 @@ def _write_bounded_stream(
     return written
 
 
+def _estimate_pcm_wav_bytes(src_audio: Path) -> int | None:
+    """Estimate uncompressed 16-bit PCM WAV byte size for a compressed audio file, if readable."""
+    try:
+        info = sf.info(str(src_audio))
+        duration = float(info.duration)
+        sr = max(int(info.samplerate), 44100)
+        channels = max(int(info.channels), 2)
+    except (sf.LibsndfileError, OSError, RuntimeError, ValueError):
+        try:
+            probed = media.probe(src_audio)
+            duration = float(probed.duration)
+            sr = 48000
+            channels = 2
+        except (MediaToolError, OSError, ValueError):
+            return None
+    if not math.isfinite(duration) or duration <= 0.0:
+        return None
+    return int(math.ceil(duration * sr * channels * 2))
+
+
+def _check_transcode_budget(
+    src_audio: Path, *, max_file_bytes: int, remaining_total_bytes: int
+) -> None:
+    if src_audio.suffix.lower() == ".wav":
+        return
+    estimated = _estimate_pcm_wav_bytes(src_audio)
+    if estimated is None:
+        return
+    limit = min(max_file_bytes, remaining_total_bytes)
+    if estimated > limit:
+        raise ConfigError(
+            f"Compressed stem {src_audio.name!r} would expand to ~{estimated // (1024 * 1024)} MiB "
+            f"PCM WAV, exceeding the {limit // (1024 * 1024)} MiB limit."
+        )
+
+
 def _store_stem_audio(src_audio: Path, dest_wav: Path, *, overwrite: bool) -> Path:
     """Place an audio file at ``dest_wav`` as PCM WAV atomically."""
+    if dest_wav.is_symlink():
+        raise ConfigError(f"Refusing to use symlinked stem destination: {dest_wav}")
     if dest_wav.is_file() and not overwrite:
         return dest_wav
     if src_audio.suffix.lower() == ".wav":
@@ -528,22 +568,44 @@ def extract_zip_stems(
         with tempfile.TemporaryDirectory(prefix="mvd_zip_stems_") as tmp:
             tmp_root = Path(tmp)
             for idx, (info, basename) in enumerate(audio_entries):
-                suffix = Path(basename).suffix.lower()
-                staged = tmp_root / f"entry_{idx}{suffix}"
-                with zf.open(info, "r") as member_stream:
-                    nbytes = _write_bounded_stream(
-                        member_stream,
-                        staged,
-                        max_file_bytes=MAX_STEM_FILE_BYTES,
-                        remaining_total_bytes=remaining[0],
-                    )
-                remaining[0] -= nbytes
-
                 label = clean_stem_label(basename)
                 role = classify_stem_name(basename)
                 stem_id = make_stem_id(label, ids)
                 dest_wav = dest_dir / f"{stem_id}.wav"
-                written_path = _store_stem_audio(staged, dest_wav, overwrite=overwrite)
+                if dest_wav.is_symlink():
+                    raise ConfigError(f"Refusing to use symlinked stem destination: {dest_wav}")
+                if not overwrite and dest_wav.is_file():
+                    extracted.append(IngestedStem(id=stem_id, name=label, role=role, path=dest_wav))
+                    continue
+
+                suffix = Path(basename).suffix.lower()
+                staged = tmp_root / f"entry_{idx}{suffix}"
+                try:
+                    try:
+                        with zf.open(info, "r") as member_stream:
+                            nbytes = _write_bounded_stream(
+                                member_stream,
+                                staged,
+                                max_file_bytes=MAX_STEM_FILE_BYTES,
+                                remaining_total_bytes=remaining[0],
+                            )
+                    except (zipfile.BadZipFile, zlib.error, RuntimeError, EOFError) as exc:
+                        raise ConfigError(
+                            f"Corrupt or unsupported zip entry {basename!r} in {zip_path}: {exc}"
+                        ) from exc
+                    _check_transcode_budget(
+                        staged,
+                        max_file_bytes=MAX_STEM_FILE_BYTES,
+                        remaining_total_bytes=remaining[0],
+                    )
+                    written_path = _store_stem_audio(staged, dest_wav, overwrite=overwrite)
+                    try:
+                        actual_bytes = max(nbytes, written_path.stat().st_size)
+                    except OSError:
+                        actual_bytes = nbytes
+                    remaining[0] = max(0, remaining[0] - actual_bytes)
+                finally:
+                    staged.unlink(missing_ok=True)
                 extracted.append(IngestedStem(id=stem_id, name=label, role=role, path=written_path))
 
     log.info("Extracted %d stems from %s into %s", len(extracted), zip_path.name, dest_dir)
@@ -718,18 +780,23 @@ def mix_stems_to_wav(stem_paths: Sequence[Path], dst: Path) -> Path:
     for path in stem_paths:
         if not path.is_file():
             raise MediaToolError(f"Stem audio file not found: {path}")
-        if path.suffix.lower() == ".wav":
-            data, sr = sf.read(str(path), dtype="float64", always_2d=True)
-        else:
-            import librosa
+        try:
+            if path.suffix.lower() == ".wav":
+                data, sr = sf.read(str(path), dtype="float64", always_2d=True)
+            else:
+                import librosa
 
-            mono, sr = librosa.load(str(path), sr=target_sr, mono=False)
-            data = mono.T if mono.ndim == 2 else mono[:, None]
-            data = data.astype(np.float64, copy=False)
+                mono, sr = librosa.load(str(path), sr=target_sr, mono=False)
+                data = mono.T if mono.ndim == 2 else mono[:, None]
+                data = data.astype(np.float64, copy=False)
+        except (sf.LibsndfileError, OSError, ValueError) as exc:
+            raise MediaToolError(f"Could not read stem audio {path}: {exc}") from exc
 
+        if int(sr) <= 0:
+            raise MediaToolError(f"Stem audio has invalid sample rate ({sr}): {path}")
         if target_sr is None:
             target_sr = int(sr)
-        elif int(sr) != target_sr:
+        elif int(sr) != target_sr and data.shape[0] > 0:
             import librosa
 
             resampled_cols = [

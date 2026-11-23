@@ -208,8 +208,7 @@ class VisionJudge:
             if is_video
             else "",
         )
-        character = manifest.shot_character(shot)
-        show_singer = shot.type.shows_singer and bool(character.appearance)
+        show_singer = shot.type.shows_singer
         content = []
         if show_singer and reference_image is not None:
             content += [
@@ -348,11 +347,12 @@ class VisionJudge:
                 lines.append(
                     "Vocal delivery: Non-singing performance — mouths closed, nobody singing."
                 )
-        if shot.type.shows_singer and character.appearance:
+        if shot.type.shows_singer:
             lines.append(
                 f"Detail level for a {shot.framing.value} shot: {DETAIL_BY_FRAMING[shot.framing]}"
             )
-            lines.append(f"Singer (must match exactly): {character.appearance}")
+            if character.appearance:
+                lines.append(f"Singer (must match exactly): {character.appearance}")
             if pinned := character.pinned():
                 lines.append(
                     f"Pinned details (expected wherever the framing and angle show them): {pinned}"

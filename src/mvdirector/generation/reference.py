@@ -15,21 +15,27 @@ edits of the first, changing only the clothes, so it is the same person in every
 from __future__ import annotations
 
 import logging
-import shutil
 from pathlib import Path
 from typing import Any
 
 from PIL import Image
 
 from mvdirector import media
+from mvdirector.audio.stems import atomic_copy
 from mvdirector.comfy.client import ComfyClient
 from mvdirector.comfy.workflow import WorkflowTemplate
 from mvdirector.errors import ConfigError
-from mvdirector.generation.candidates import load_rgb_candidate, render_candidate_batch
+from mvdirector.generation.candidates import (
+    atomic_save_png,
+    ensure_upload_audio_track,
+    load_rgb_candidate,
+    render_candidate_batch,
+)
 from mvdirector.models import COLUMNS_PANEL_NAMES, PANEL_NAMES, Manifest, ReferenceSet
 from mvdirector.planning import prompts
 from mvdirector.planning.segmenter import frames_for
 from mvdirector.project import Project, require_safe_id
+from mvdirector.store import path_is_file
 
 log = logging.getLogger(__name__)
 
@@ -71,6 +77,11 @@ def split_sheet(image: Image.Image, layout: str, inset: float) -> dict[str, Imag
     panels = {}
     for name, (left, top, right, bottom) in zip(names, cells):
         dx, dy = int((right - left) * inset), int((bottom - top) * inset)
+        if right - dx <= left + dx or bottom - dy <= top + dy:
+            raise ConfigError(
+                f"Reference sheet ({width}x{height}) is too small for layout '{layout}' "
+                f"with panel_inset={inset}."
+            )
         panels[name] = image.crop((left + dx, top + dy, right - dx, bottom - dy))
     return panels
 
@@ -196,7 +207,9 @@ def generate_candidates(
             src_id, src_char = _resolve_character(manifest, source_char_id)
             if src_id == char_id:
                 raise ConfigError(f"Character '{char_id}' cannot derive from itself.")
-            template = templates["still"]
+            template = templates.get("still")
+            if template is None:
+                raise ConfigError("A 'still' workflow is required to derive a character sheet.")
             if not template.accepts("reference_image"):
                 raise ConfigError(
                     f"Workflow '{template.name}' must bind 'reference_image' to derive a "
@@ -222,7 +235,11 @@ def generate_candidates(
                 "reference_image": comfy.upload(src_sheet_path),
             }
         else:
-            template = templates["t2i"]
+            template = templates.get("t2i")
+            if template is None:
+                raise ConfigError(
+                    "A 't2i' workflow is required to generate a base reference sheet."
+                )
             params = {
                 **base_params,
                 "positive_prompt": prompts.sheet_prompt(
@@ -235,7 +252,11 @@ def generate_candidates(
                 "Omit --from-character when generating a later wardrobe state "
                 "(it edits this character's own base sheet)."
             )
-        template = templates["still"]
+        template = templates.get("still")
+        if template is None:
+            raise ConfigError(
+                "A 'still' workflow is required to generate later wardrobe reference sheets."
+            )
         if template.accepts("reference_image"):
             base = character.default_reference
             if base is None or base.sheet is None:
@@ -247,12 +268,15 @@ def generate_candidates(
                     f"`mvd reference generate{char_flag}`, then "
                     f"`mvd reference lock <image>{char_flag}`. Later costumes are edits of it."
                 )
+            base_sheet_path = project.path(base.sheet)
+            if not base_sheet_path.is_file():
+                raise ConfigError(f"Locked base reference sheet is missing: {base.sheet}")
             params = {
                 **base_params,
                 "positive_prompt": prompts.state_sheet_prompt(
                     manifest, key, config.layout, character_id=char_id, background=config.background
                 ),
-                "reference_image": comfy.upload(project.path(base.sheet)),
+                "reference_image": comfy.upload(base_sheet_path),
             }
         else:
             params = {
@@ -311,10 +335,7 @@ def generate_video_candidates(
             f"`mvd reference lock <image>{char_flag}{state_flag}`."
         )
     sheet_path = project.path(ref_set.sheet)
-    if not sheet_path.is_file():
-        raise ConfigError(f"Locked reference sheet is missing: {sheet_path}")
-    with Image.open(sheet_path) as opened:
-        raw_w, raw_h = opened.size
+    raw_w, raw_h = load_rgb_candidate(sheet_path, "Reference").size
     width = max(2, raw_w - (raw_w % 2))
     height = max(2, raw_h - (raw_h % 2))
 
@@ -342,7 +363,9 @@ def generate_video_candidates(
         if base is not None and base.video and template.accepts("reference_video"):
             base_video_path = project.path(base.video)
             if base_video_path.is_file():
-                params["reference_video"] = comfy.upload(base_video_path)
+                params["reference_video"] = comfy.upload(
+                    ensure_upload_audio_track(project, base_video_path)
+                )
                 chained = True
     params["positive_prompt"] = prompts.reference_video_prompt(
         manifest,
@@ -374,7 +397,7 @@ def lock_reference_video(
     character_id: str | None = None,
 ) -> str:
     """Copy a chosen turnaround reference video into the project and record it on the state."""
-    if not video_path.is_file():
+    if not path_is_file(video_path):
         raise ConfigError(f"Reference video not found: {video_path}")
     suffix = video_path.suffix.lower()
     if suffix not in _ALLOWED_VIDEO_EXTENSIONS:
@@ -394,7 +417,7 @@ def lock_reference_video(
     project.reference_dir.mkdir(parents=True, exist_ok=True)
     dest = project.path(Path("assets") / "reference" / f"{prefix}_video{suffix}")
     if video_path.resolve() != dest.resolve():
-        shutil.copyfile(video_path, dest)
+        atomic_copy(video_path, dest)
     rel = project.rel(dest)
     ref_set.video = rel
     if (char_id is None or char_id == manifest.primary_character_id()) and (
@@ -434,14 +457,14 @@ def lock_reference(
 
     project.reference_dir.mkdir(parents=True, exist_ok=True)
     sheet_path = project.path(Path("assets") / "reference" / f"{prefix}_sheet.png")
-    sheet.save(sheet_path)
+    atomic_save_png(sheet, sheet_path)
     panels: dict[str, str] = {}
     if split:
         panel_dir = project.path(Path("assets") / "reference" / prefix)
         panel_dir.mkdir(parents=True, exist_ok=True)
         for name, crop in split_sheet(sheet, config.layout, config.panel_inset).items():
             path = project.path(Path("assets") / "reference" / prefix / f"{prefix}_{name}.png")
-            crop.save(path)
+            atomic_save_png(crop, path)
             panels[name] = project.rel(path)
     existing = character.references.get(key)
     reference = ReferenceSet(

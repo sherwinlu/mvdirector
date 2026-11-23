@@ -23,6 +23,7 @@ from mvdirector.comfy.cache import ComfyRenderCache, canonical_graph_key, file_s
 from mvdirector.comfy.client import ComfyClient
 from mvdirector.comfy.workflow import OutputSpec, WorkflowTemplate
 from mvdirector.errors import BudgetExceeded, ComfyJobError, ConfigError, MediaToolError
+from mvdirector.generation.candidates import ensure_upload_audio_track
 from mvdirector.models import (
     AssetKind,
     AssetState,
@@ -813,36 +814,44 @@ class ShotRunner:
         self._run_comfy(template.render(params), template.bindings.output, destination)
 
     def _with_audio(self, video_path: Path) -> Path:
-        """``video_path``, or a cached copy of it with a silent audio track to upload instead.
-
-        ComfyUI video loaders such as ``VHS_LoadVideoPath`` fail on files without audio. The
-        source is never rewritten: it may be a locked user asset in any container.
-        """
-        try:
-            return media.with_audio_track(video_path, self._project.path("assets/cache/audio"))
-        except MediaToolError as exc:
-            log.warning(
-                "Could not add a silent audio track to %s (%s); uploading it unchanged",
-                video_path.name,
-                exc,
-            )
-            return video_path
+        """``video_path``, or a cached copy of it with a silent audio track to upload instead."""
+        return ensure_upload_audio_track(self._project, video_path)
 
     def _run_comfy(self, graph: dict[str, Any], output: OutputSpec, destination: Path) -> Path:
+        """Render ``graph``, using the content-addressed cache when it can.
+
+        The cache is an optimization, so none of its failure modes may change the outcome of a
+        render. `canonical_graph_key` rejects a non-finite float in the graph and `store` rejects
+        an empty or symlinked source, both with a bare `ValueError` that `_attempt` does not
+        catch (it handles only ComfyJobError/MediaToolError) — so a cache problem used to abort
+        the entire run with a traceback, discarding every shot's progress, even though the render
+        itself had succeeded. Each cache interaction is now best-effort and logged.
+        """
+        key: str | None = None
         if self._cache is not None:
-            key = canonical_graph_key(
-                graph,
-                self._uploaded_local,
-                uploaded_digests=self._uploaded_digests,
-                output_node=output.node,
-                extensions=tuple(output.extensions),
-            )
-            if self._cache.lookup(key, destination):
-                return destination
-            result = self._comfy.run(graph, output, destination)
-            self._cache.store(key, result)
-            return result
-        return self._comfy.run(graph, output, destination)
+            try:
+                key = canonical_graph_key(
+                    graph,
+                    self._uploaded_local,
+                    uploaded_digests=self._uploaded_digests,
+                    output_node=output.node,
+                    extensions=tuple(output.extensions),
+                )
+            except (ValueError, OSError) as exc:
+                log.warning("Skipping ComfyUI cache for this render (unusable key): %s", exc)
+            if key is not None:
+                try:
+                    if self._cache.lookup(key, destination):
+                        return destination
+                except (ValueError, OSError) as exc:
+                    log.warning("ComfyUI cache lookup failed; rendering instead: %s", exc)
+        result = self._comfy.run(graph, output, destination)
+        if self._cache is not None and key is not None:
+            try:
+                self._cache.store(key, result)
+            except (ValueError, OSError) as exc:
+                log.warning("Could not cache render %s: %s", result.name, exc)
+        return result
 
     def _extra_reference_images(self, shot: Shot) -> list[tuple[str, Path]]:
         """Reference sheets for secondary visible performers and props in this shot."""
@@ -852,8 +861,10 @@ class ShotRunner:
                 sec_ref = sec_char.reference_for(sec_state)
                 sec_sheet = (sec_ref.sheet or sec_ref.panel("front")) if sec_ref else None
                 if sec_sheet:
-                    label = sec_char.name or sec_id or "performer"
-                    extras.append((label, self._project.path(sec_sheet)))
+                    sec_path = self._project.path(sec_sheet)
+                    if sec_path.is_file():
+                        label = sec_char.name or sec_id or "performer"
+                        extras.append((label, sec_path))
         for prop_name, prop_path in self._prop_paths(shot):
             extras.append((f"Prop: {prop_name}", prop_path))
         return extras
@@ -863,7 +874,10 @@ class ShotRunner:
         # path, so it works even when face analysis is unavailable.
         reference = self._reference_set(shot) if shot.type.shows_singer else None
         sheet = reference.sheet or reference.panel("front") if reference else None
-        reference_image = self._project.path(sheet) if sheet else None
+        ref_candidate = self._project.path(sheet) if sheet else None
+        reference_image = (
+            ref_candidate if (ref_candidate is not None and ref_candidate.is_file()) else None
+        )
         extra_references = self._extra_reference_images(shot)
         identity = self._identity_for(shot)
         expected_size = (
@@ -960,7 +974,11 @@ class ShotRunner:
             Smart Cutaway rescue prioritizing weak-lip-sync singing shots inspired by
             ``VisualFrisson/ComfyUI-OneShotMV`` (``fv/broll.py``).
         """
-        if not self._can_become_cutaway(shot) or "t2i" not in self._templates:
+        if (
+            not self._can_become_cutaway(shot)
+            or "t2i" not in self._templates
+            or "i2v" not in self._templates
+        ):
             return False
         # Snapshot mutable shot fields so a failed cutaway still or exception rolls back cleanly.
         snapshot = (
@@ -1040,7 +1058,11 @@ class ShotRunner:
 
     def _fall_back_from_lipsync(self, shot: Shot, state: AssetState) -> bool:
         """Convert an exhausted singing shot to b-roll (when configured) or performance."""
-        if not self._project.config.retry.lipsync_fallback or shot.type is not ShotType.LIPSYNC:
+        if (
+            not self._project.config.retry.lipsync_fallback
+            or shot.type is not ShotType.LIPSYNC
+            or "i2v" not in self._templates
+        ):
             return False
         if (
             self._project.config.retry.lipsync_fallback_mode == "broll"
@@ -1056,7 +1078,11 @@ class ShotRunner:
         lip-sync and so does not depend on the face being tracked. Earlier attempts stay in
         the history.
         """
-        if not self._project.config.retry.lipsync_fallback or shot.type is not ShotType.LIPSYNC:
+        if (
+            not self._project.config.retry.lipsync_fallback
+            or shot.type is not ShotType.LIPSYNC
+            or "i2v" not in self._templates
+        ):
             return False
         shot.fallback_from, shot.type = shot.type, ShotType.PERFORMANCE
         shot.singers = []
@@ -1216,8 +1242,17 @@ class ShotRunner:
     def _ensure_audio_video_slice(self, shot: Shot) -> Path:
         wav_path = self._ensure_audio_slice(shot)
         mp4_path = self._project.audio_video_slice_path(shot.id)
-        if not mp4_path.is_file() or mp4_path.stat().st_mtime < wav_path.stat().st_mtime:
-            media.audio_to_black_video(wav_path, mp4_path, fps=self._project.config.video.fps)
+        wav_stat = wav_path.stat()
+        fps = self._project.config.video.fps
+        stamp: dict[str, Any] = {
+            "wav_size": wav_stat.st_size,
+            "wav_mtime_ns": wav_stat.st_mtime_ns,
+            "fps": fps,
+        }
+        marker = mp4_path.with_name(f"{mp4_path.name}.json")
+        if not mp4_path.is_file() or _read_stamp(marker) != stamp:
+            media.audio_to_black_video(wav_path, mp4_path, fps=fps)
+            atomic_write(marker, json.dumps(stamp))
         return mp4_path
 
     def _upload(self, path: Path) -> str:

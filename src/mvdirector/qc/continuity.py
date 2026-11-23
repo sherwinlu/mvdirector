@@ -70,6 +70,10 @@ def estimate_frame_shift(a: np.ndarray, b: np.ndarray) -> tuple[float, float, fl
 
     ``dx`` and ``dy`` are expressed in normalized units of the downscaled grid side.
     """
+    if a.ndim != 2 or b.ndim != 2 or a.shape != b.shape or a.size == 0:
+        return 0.0, 0.0, 0.0
+    if not (np.all(np.isfinite(a)) and np.all(np.isfinite(b))):
+        return 0.0, 0.0, 0.0
     h, w = a.shape
     mad = float(np.mean(np.abs(b - a)))
     if mad < 1e-6:
@@ -179,10 +183,15 @@ def measure_beat_motion_sync(
     Evaluates a circular-shift permutation baseline so periodic/noisy motion does not masquerade as
     true beat lock.
     """
-    if len(frames) < 4 or fps <= 0.0 or not beat_times:
+    if len(frames) < 4 or not math.isfinite(fps) or fps <= 0.0 or not beat_times:
         return BeatMotionSyncReport(
             correlation=0.0, best_lag_seconds=0.0, chance_baseline=0.0, z_score=0.0
         )
+
+    sigma_safe = sigma_seconds if math.isfinite(sigma_seconds) else 0.10
+    lag_safe = (
+        max_lag_seconds if (math.isfinite(max_lag_seconds) and max_lag_seconds >= 0.0) else 0.0
+    )
 
     luma = [_to_luma(f, side=64) for f in frames]
     motion = np.array([float(np.mean(np.abs(b - a))) for a, b in zip(luma[:-1], luma[1:])])
@@ -194,15 +203,16 @@ def measure_beat_motion_sync(
 
     times = (np.arange(n, dtype=np.float64) + 0.5) / fps
     pulses = np.zeros(n, dtype=np.float64)
-    inv_2s2 = 1.0 / (2.0 * max(sigma_seconds, 0.01) ** 2)
+    inv_2s2 = 1.0 / (2.0 * max(sigma_safe, 0.01) ** 2)
     for beat in beat_times:
-        pulses += np.exp(-((times - beat) ** 2) * inv_2s2)
+        if math.isfinite(beat):
+            pulses += np.exp(-((times - beat) ** 2) * inv_2s2)
     if float(np.std(pulses)) < 1e-9:
         return BeatMotionSyncReport(
             correlation=0.0, best_lag_seconds=0.0, chance_baseline=0.0, z_score=0.0
         )
 
-    max_lag = min(n // 3, max(1, int(round(max_lag_seconds * fps))))
+    max_lag = min(n // 3, max(1, int(round(lag_safe * fps))))
 
     def _best_xcorr(series: np.ndarray, ref: np.ndarray) -> tuple[float, int]:
         best_r, best_l = -1.0, 0
@@ -214,7 +224,7 @@ def measure_beat_motion_sync(
             if a.size < 3 or float(np.std(a)) < 1e-9 or float(np.std(b)) < 1e-9:
                 continue
             r = float(np.corrcoef(a, b)[0, 1])
-            if r > best_r:
+            if math.isfinite(r) and r > best_r:
                 best_r, best_l = r, lag
         return max(0.0, best_r), best_l
 

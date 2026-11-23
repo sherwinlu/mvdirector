@@ -57,9 +57,15 @@ def utc_now() -> str:
 
 
 class StrictModel(BaseModel):
-    """Base for persisted models: unknown fields are errors, not silently dropped."""
+    """Base for persisted models: unknown fields are errors, not silently dropped.
 
-    model_config = ConfigDict(extra="forbid")
+    ``allow_inf_nan=False`` rejects ``NaN`` / ``Infinity`` in *every* float field. A hand-edited
+    (or LLM-written) ``manifest.json`` carrying ``1e400`` used to load fine and then blow up deep
+    in assembly with a bare ``OverflowError: cannot convert float infinity to integer``; a
+    non-finite number now fails validation at the edge, with the field named.
+    """
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
 class ProjectMode(str, Enum):
@@ -703,9 +709,10 @@ class AudioSlice(StrictModel):
     """Audio handed to the video model. Includes handles trimmed off at assembly."""
 
     path: str
+    # `start` may be negative: the first shot's slice can reach for a head handle before t=0.
     start: float
     end: float
-    head_handle: float = Field(description="Seconds between slice start and shot start.")
+    head_handle: float = Field(ge=0.0, description="Seconds between slice start and shot start.")
     mute_spans: list[TimeSpan] = Field(
         default_factory=list,
         description=(
@@ -713,6 +720,14 @@ class AudioSlice(StrictModel):
             "bleed into lip-sync."
         ),
     )
+
+    @model_validator(mode="after")
+    def _check_span(self) -> AudioSlice:
+        if self.end < self.start:
+            raise ValueError(
+                f"Audio slice end ({self.end}) must not be before start ({self.start})."
+            )
+        return self
 
 
 class Shot(StrictModel):
@@ -821,7 +836,7 @@ class Shot(StrictModel):
         description="Music ducking attenuation in dB while shot.sfx_path plays.",
     )
     audio_slice: AudioSlice
-    num_frames: int
+    num_frames: int = Field(ge=0)
     still: AssetState = Field(default_factory=AssetState)
     video: AssetState = Field(default_factory=AssetState)
     review: Review = Field(default_factory=Review)
@@ -830,6 +845,22 @@ class Shot(StrictModel):
     @classmethod
     def _check_id(cls, value: str) -> str:
         return validate_safe_id(value, "shot id")
+
+    @model_validator(mode="after")
+    def _check_timeline(self) -> Shot:
+        """Reject a backwards shot span.
+
+        ``frame_counts`` turns ``end < start`` into a negative frame count, assembly silently
+        drops the shot, and every later shot then plays early — the finished video drifts out of
+        sync with the music with no error anywhere. Catch it where it is still fixable.
+        """
+        if self.start < 0.0:
+            raise ValueError(f"Shot {self.id!r} start ({self.start}) must not be negative.")
+        if self.end < self.start:
+            raise ValueError(
+                f"Shot {self.id!r} end ({self.end}) must not be before start ({self.start})."
+            )
+        return self
 
     @field_validator("chapter_id")
     @classmethod
@@ -1217,8 +1248,10 @@ class Manifest(StrictModel):
     schema_version: int = MANIFEST_SCHEMA_VERSION
     mode: ProjectMode = ProjectMode.STANDARD
     title: str
-    duration: float
-    fps: int
+    duration: float = Field(ge=0.0)
+    # fps divides into frame durations and crossfade lengths; 0 or a negative value yields an
+    # empty timeline or a ZeroDivisionError deep inside assembly.
+    fps: int = Field(ge=1, le=1000)
     created_at: str = Field(default_factory=utc_now)
     updated_at: str = Field(default_factory=utc_now)
     character: Character = Field(default_factory=Character)

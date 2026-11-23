@@ -1153,9 +1153,15 @@ def test_pass2_qc_continuity_scoring_alignment_qa_and_mix_assemble(tmp_path: Pat
     # 2. scoring guards against NaN/Inf scores and weights.
     assert scoring.linear_score(float("nan"), 0.0, 1.0) == 0.0
     assert scoring.linear_score(0.5, float("nan"), 1.0) == 0.0
+    # StrictModel rejects non-finite floats at the edge, so a NaN score can only reach
+    # aggregate() in-process; model_construct() reproduces that without validation.
+    with pytest.raises(ValidationError):
+        CheckResult(name="bad_nan", status=CheckStatus.PASSED, score=float("nan"), weight=1.0)
     report = scoring.aggregate(
         [
-            CheckResult(name="bad_nan", status=CheckStatus.PASSED, score=float("nan"), weight=1.0),
+            CheckResult.model_construct(
+                name="bad_nan", status=CheckStatus.PASSED, score=float("nan"), weight=1.0
+            ),
             CheckResult(name="good", status=CheckStatus.PASSED, score=0.8, weight=1.0),
             CheckResult(name="neg_w", status=CheckStatus.PASSED, score=0.0, weight=-5.0),
         ],
@@ -1175,7 +1181,7 @@ def test_pass2_qc_continuity_scoring_alignment_qa_and_mix_assemble(tmp_path: Pat
         8000,
         [
             LyricLine(text="neg", start=-0.5, end=1.0),
-            LyricLine(text="nan", start=float("nan"), end=1.5),
+            LyricLine.model_construct(text="nan", start=float("nan"), end=1.5),
         ],
         [TimeSpan(start=-1.0, end=2.0)],
     )
@@ -1378,3 +1384,110 @@ def test_pr_review_pass1_symlink_target_decimal_split_stdio_eof_and_comfy_null_s
     updated = tuning_mod.update_yaml_scalar(crlf_yaml, "video", "fps", "24")
     assert "\r\n" in updated
     assert "\n" not in updated.replace("\r\n", "")
+
+
+def test_pass4_manifest_rejects_non_finite_backwards_spans_and_bad_fps(tmp_path: Path) -> None:
+    """Hand-edited manifests used to reach assembly with values that cannot be rendered.
+
+    `1e400` parses to `inf`, which blew up as a bare `OverflowError: cannot convert float
+    infinity to integer` inside `frame_counts`; `end < start` was worse, producing a negative
+    frame count that assembly silently dropped, so every later shot played early and the whole
+    video drifted out of sync with the music without a single warning.
+    """
+    good = _minimal_shot()
+    base = Manifest(title="T", duration=10.0, fps=24, shots=[good])
+    raw = json.loads(base.model_dump_json())
+
+    def _mutate(**changes: Any) -> str:
+        doc = json.loads(json.dumps(raw))
+        for key, value in changes.items():
+            if key in ("fps", "duration"):
+                doc[key] = value
+            else:
+                doc["shots"][0][key] = value
+        return json.dumps(doc)
+
+    # 1. Non-finite floats are refused at the edge, naming the offending field.
+    for literal in ("1e400", "-1e400"):
+        payload = _mutate(end=json.loads(literal))
+        with pytest.raises(ValidationError, match="finite"):
+            Manifest.model_validate_json(payload)
+    nan_payload = _mutate(end=0.0).replace('"end": 0.0', '"end": NaN', 1)
+    with pytest.raises(ValidationError, match="finite"):
+        Manifest.model_validate_json(nan_payload)
+    with pytest.raises(ValidationError, match="finite"):
+        Manifest.model_validate_json(_mutate(intensity=json.loads("1e400")))
+
+    # 2. A backwards or negative shot span is a hard error, not a silent timeline shift.
+    with pytest.raises(ValidationError, match="must not be before start"):
+        Manifest.model_validate_json(_mutate(start=5.0, end=1.0))
+    with pytest.raises(ValidationError, match="must not be negative"):
+        Manifest.model_validate_json(_mutate(start=-1.0, end=1.0))
+    with pytest.raises(ValidationError, match="must not be before start"):
+        AudioSlice(path="a.wav", start=4.0, end=1.0, head_handle=0.0)
+    with pytest.raises(ValidationError):
+        AudioSlice(path="a.wav", start=0.0, end=1.0, head_handle=-0.5)
+
+    # A slice may still reach behind t=0 for the first shot's head handle.
+    assert AudioSlice(path="a.wav", start=-0.25, end=1.25, head_handle=0.25).start == -0.25
+
+    # 3. fps divides into frame and crossfade lengths, so it must be a usable rate.
+    for bad_fps in (0, -24, 100_000):
+        with pytest.raises(ValidationError):
+            Manifest.model_validate_json(_mutate(fps=bad_fps))
+    with pytest.raises(ValidationError):
+        Manifest.model_validate_json(_mutate(duration=-1.0))
+
+    # 4. Analysis shares the same base, so analysis.json is guarded too.
+    with pytest.raises(ValidationError, match="finite"):
+        Analysis.model_validate_json(
+            json.dumps(
+                {
+                    "duration": 10.0,
+                    "tempo_bpm": 120.0,
+                    "beats": [0.0, 1e400],
+                    "bars": [0.0],
+                    "bar_intensity": [0.5],
+                    "vocal_windows": [],
+                }
+            )
+        )
+
+    # 5. A valid manifest still round-trips through disk unchanged.
+    store = LocalStateStore(tmp_path)
+    store.save_manifest(base)
+    assert store.load_manifest().shots[0].end == good.end
+
+
+def test_pass4_init_project_never_copies_platform_junk(tmp_path: Path) -> None:
+    """`mvd init` shipped `.DS_Store` into every new project from an editable install.
+
+    `templates/` is served straight from the source checkout, so `shutil.copytree` faithfully
+    copied whatever Finder (or Python) had left lying in it.
+    """
+    template_root = Path(api_mod.__file__).parent / "templates"
+    junk = [
+        template_root / ".DS_Store",
+        template_root / "inputs" / "._style.md",
+        template_root / "workflows" / "Thumbs.db",
+    ]
+    created: list[Path] = []
+    try:
+        for item in junk:
+            if not item.exists():
+                item.write_bytes(b"junk")
+                created.append(item)
+        target = tmp_path / "fresh"
+        api_mod.init_project(target)
+        leftovers = sorted(
+            p.relative_to(target).as_posix()
+            for p in target.rglob("*")
+            if p.name in api_mod._JUNK_TEMPLATE_NAMES or p.name.startswith("._")
+        )
+        assert leftovers == [], f"init copied platform junk: {leftovers}"
+        # The real template content still arrives.
+        assert (target / "project.yaml").is_file()
+        assert (target / "workflows").is_dir()
+    finally:
+        for item in created:
+            item.unlink(missing_ok=True)

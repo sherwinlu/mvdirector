@@ -212,6 +212,26 @@ _STARTER_MIX_TRACKLIST = {
 }
 
 
+#: Platform and tooling debris that must never be copied into a user's new project. An editable
+#: install serves `templates/` straight from the source checkout, so whatever Finder, Windows
+#: Explorer or Python left lying there would otherwise land in every `mvd init`.
+_JUNK_TEMPLATE_NAMES = (
+    ".DS_Store",
+    "Thumbs.db",
+    "desktop.ini",
+    "__pycache__",
+    ".ipynb_checkpoints",
+)
+
+
+def _ignore_junk_files(_directory: str, names: list[str]) -> set[str]:
+    return {
+        name
+        for name in names
+        if name in _JUNK_TEMPLATE_NAMES or name.startswith("._") or name.endswith(".pyc")
+    }
+
+
 def init_project(directory: Path, *, mode: ProjectMode = ProjectMode.STANDARD) -> Path:
     """Create a project folder with a starter config and workflow binding examples."""
     if directory.exists() and not directory.is_dir():
@@ -220,7 +240,7 @@ def init_project(directory: Path, *, mode: ProjectMode = ProjectMode.STANDARD) -
         raise MVDError(f"{directory} already contains {CONFIG_FILENAME}")
     template_root = resources.files("mvdirector") / "templates"
     with resources.as_file(template_root) as source:
-        shutil.copytree(source, directory, dirs_exist_ok=True)
+        shutil.copytree(source, directory, dirs_exist_ok=True, ignore=_ignore_junk_files)
     for folder in ("inputs", "assets", "output"):
         (directory / folder).mkdir(exist_ok=True)
     if mode is ProjectMode.MIX:

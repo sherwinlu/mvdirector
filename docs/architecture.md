@@ -16,18 +16,22 @@ src/mvdirector/
   llm/                LLMClient protocol, request loop (base.py), shared HTTP/retry (http.py),
                       one backend per provider, factory.py (build_llm), check.py (mvd llm-check)
   audio/              analysis.py (beats, vocals, key/Camelot), cues.py (structural energy landmarks),
-                      lyrics.py (parsing, transcription, alignment), stems.py (Demucs stem separation),
+                      lyrics.py (parsing, transcription, alignment), alignment_qa.py, broadcast_qa.py,
+                      foley.py, stems.py (Demucs stem separation), stem_pack.py (multi-stem pack ingest),
                       prepare.py (`mvd prepare` audio-only ingest),
                       tracklist.py (cue sheet / WeaveShift report & CSV ingestion & YouTube/FFmpeg chapters),
                       mix_analysis.py (windowed per-chapter audio analysis for long-form mixes)
   planning/           segmenter.py (timing, dynamic pacing, sections), planner.py (direction),
                       mix_planner.py (mix-mode chapter themes & loop units), prompts.py (prompt text),
-                      brief.py (`mvd brief`), previz.py (3D camera plans)
-  comfy/              workflow.py (templates + bindings), client.py (HTTP),
+                      brief.py (`mvd brief`), previz.py (3D camera plans), world_state.py
+  comfy/              workflow.py (templates, bindings, UI-to-API converter, switch pruning),
+                      client.py (version-agnostic HTTP client), cache.py (content-addressed cache),
                       provider.py (ComfyEndpointProvider: which endpoint serves a stage)
-  qc/                 scoring, common.py, image and video gates, lipsync maths, syncnet
-                      (LatentSync StableSyncNet + MediaPipe), faces, vision (judge + prompt),
-                      factory
+  qc/                 scoring, common.py, image and video gates, continuity.py, color_drift.py,
+                      lipsync maths, syncnet (LatentSync StableSyncNet + MediaPipe), faces,
+                      vision (judge + prompt), factory
+  mcp/                zero-dependency MCP server (stdio + Streamable HTTP), async jobs, bundled SKILL.md
+  setup.py            environment diagnostics (`mvd setup --check-only`) and interactive project setup
   tuning.py           track characteristic profiling (`TrackProfile`) and parameter auto-tuning
   retry.py            retry policy
   report.py           per-check tallies for `mvd qc-report`
@@ -78,7 +82,7 @@ Changing `models.py` changes the manifest format. Once a release has shipped, bu
 
 - **Beat/bar grid assumptions:** Bars assume the first detected beat is a downbeat and a fixed `beats_per_bar`. If cuts feel a beat early or late, edit `bars` in `analysis.json` and re-run `mvd plan`.
 - **Section-aware pacing:** By default on single-character songs (`video.dynamic_pacing: false`), shots are a fixed number of bars long. Enable `video.dynamic_pacing: true` in `project.yaml` to cut faster on high-intensity bars and snap cuts to `[Section]` transitions; songs whose lyric section tags name multiple singers automatically snap bar cuts to lyric section transitions before calling the LLM so adjacent vocalists do not share a shot. Only explicit performer cues count (`[Verse 1: Elias]`, `[Chorus (Odalie)]`, `[Female Verse]`, `[Singer 2]`, or a bare `[Elias]`); structural tags such as `[Chorus x2]`, `[Guitar Solo]` or `[Verse 1 - angry]` do not. Set `video.snap_sections: always` or `never` to override detection. Cuts still land on bar lines rather than mid-bar lyric phrases.
-- **Vocal bleed in AI stems:** Suno stems are AI-separated. Bleed in the vocal stem can mark instrumental passages as sung; check `vocal_windows` in `analysis.json` if shot types look wrong.
+- **Vocal bleed in AI stems:** AI-separated vocal stems (e.g. from Suno or Demucs) can contain bleed that marks instrumental passages as sung; check `vocal_windows` in `analysis.json` if shot types look wrong.
 - **Costume changes depend on the image-edit model:** Stills are edits of a reference sheet; when you lock a separate sheet per wardrobe state, each shot starts from its own costume's front panel. Without a per-state sheet, the prompt says what is absent (for example `"No cape"`), and `vision_character` catches mistakes at the cost of extra retries.
 - **Vision judge token overhead:** `vision_character` adds the reference sheet image (and optional hero prop image) to each call.
 - **Sheet panels are cut by position:** The image model is asked for four equal panels and the code cuts the image into equal parts. If it draws uneven panels, the crops will be off. Check `assets/reference/<state>/` after locking, or lock a hand-made sheet with `--single`.

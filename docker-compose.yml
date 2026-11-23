@@ -14,6 +14,10 @@
 #        MVD_LLM_URL=http://host.docker.internal:11434 \
 #        docker compose --profile ui up -d
 #
+#   5. Remote ComfyUI (another computer on your home LAN/Tailscale or a cloud GPU server):
+#        COMFY_URL=http://192.168.1.50:8188 \
+#        docker compose --profile ui up -d
+#
 #   Run CLI commands with:
 #        docker compose run --rm mvd validate -p /workspace/projects/my-song
 

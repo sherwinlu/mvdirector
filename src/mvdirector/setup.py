@@ -34,7 +34,7 @@ from mvdirector.config import (
     is_allowed_env_var,
     mask_unset_allowed_env_refs,
 )
-from mvdirector.errors import ComfyConnectionError, ConfigError
+from mvdirector.errors import ComfyConnectionError, ComfyJobError, ConfigError
 from mvdirector.models import ProjectMode
 from mvdirector.store import atomic_write
 from mvdirector.tuning import (
@@ -109,6 +109,14 @@ VIDEO_PRESETS: dict[str, VideoPreset] = {
         frame_offset=1,
         size_multiple=1,
         max_clip_seconds=5.0,
+    ),
+    "exact": VideoPreset(
+        key="exact",
+        label="Exact-duration / cloud API or any other model (1n+0 frames, any resolution)",
+        frame_multiple=1,
+        frame_offset=0,
+        size_multiple=1,
+        max_clip_seconds=10.0,
     ),
     "custom": VideoPreset(
         key="custom",
@@ -303,7 +311,7 @@ def probe_comfy(
     try:
         with ComfyClient(config, transport=transport) as client:
             stats = client.ping()
-    except (ComfyConnectionError, ValueError) as exc:
+    except (ComfyConnectionError, ComfyJobError, ValueError) as exc:
         return ComfyProbe(url=normalized, reachable=False, error=str(exc))
 
     devices: list[str] = []
@@ -631,13 +639,16 @@ def render_environment_report(report: EnvironmentReport) -> str:
         lines.append(f"  MISS Ollama at {report.ollama.url}: {report.ollama.error}")
         lines.append(
             "       -> Install Ollama (https://ollama.com), start `ollama serve`, "
-            f"then `ollama pull {DEFAULT_LLM_MODEL}`."
+            f"then `ollama pull {DEFAULT_LLM_MODEL}` — or point at a remote/cloud LLM "
+            "with `--ollama-url` or `--llm-provider`."
         )
 
     if report.comfy.reachable:
         details: list[str] = []
         if report.comfy.comfy_version:
-            details.append(f"v{report.comfy.comfy_version}")
+            cleaned_ver = report.comfy.comfy_version.strip().lstrip("v")
+            if cleaned_ver:
+                details.append(f"v{cleaned_ver}")
         if report.comfy.devices:
             details.append(report.comfy.devices[0])
         if report.comfy.vram_total_gb is not None:
@@ -652,8 +663,8 @@ def render_environment_report(report: EnvironmentReport) -> str:
     else:
         lines.append(f"  MISS ComfyUI at {report.comfy.url}: {report.comfy.error}")
         lines.append(
-            "       -> Start ComfyUI locally on port 8188, or point at a separate server with "
-            "`--comfy-url <url>` (and `--comfy-token-env COMFY_TOKEN` if authenticated)."
+            "       -> Start ComfyUI locally on port 8188, or point at a home-LAN/cloud server "
+            "with `--comfy-url <url>` (and `--comfy-token-env COMFY_TOKEN` if authenticated)."
         )
 
     return "\n".join(lines)

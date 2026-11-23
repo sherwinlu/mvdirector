@@ -21,6 +21,7 @@ from typing import Any
 
 import httpx
 
+from mvdirector import __version__
 from mvdirector.comfy.cache import file_sha256
 from mvdirector.comfy.workflow import OutputSpec
 from mvdirector.config import ComfyConfig
@@ -99,9 +100,12 @@ class ComfyClient:
         # The VRAM floor is checked once per phase (the first job after a /free), not per job:
         # within a phase ComfyUI keeps the phase's model loaded on purpose.
         self._vram_floor_checked = False
+        headers = dict(config.headers)
+        if not any(key.lower() == "user-agent" for key in headers):
+            headers["User-Agent"] = f"mvdirector/{__version__}"
         self._http = httpx.Client(
             base_url=config.base_url.rstrip("/"),
-            headers=config.headers,
+            headers=headers,
             timeout=config.request_timeout,
             transport=transport,
         )
@@ -238,7 +242,10 @@ class ComfyClient:
             for grp in ("required", "optional"):
                 if isinstance(spec_groups.get(grp), dict):
                     all_specs.update(spec_groups[grp])
-            for field, val in (node.get("inputs") or {}).items():
+            raw_inputs = node.get("inputs")
+            if not isinstance(raw_inputs, dict):
+                continue
+            for field, val in raw_inputs.items():
                 if (str(node_id), field) in skip:
                     continue
                 if isinstance(val, list) or not isinstance(val, str) or not val:
@@ -248,13 +255,12 @@ class ComfyClient:
                 if isinstance(spec, list) and spec:
                     if isinstance(spec[0], list):
                         allowed = spec[0]
-                    elif (
-                        spec[0] == "COMBO"
-                        and len(spec) > 1
-                        and isinstance(spec[1], dict)
-                        and isinstance(spec[1].get("options"), list)
-                    ):
-                        allowed = spec[1]["options"]
+                    elif spec[0] == "COMBO" and len(spec) > 1 and isinstance(spec[1], dict):
+                        opts = spec[1].get("options")
+                        if not isinstance(opts, list):
+                            opts = spec[1].get("values")
+                        if isinstance(opts, list):
+                            allowed = opts
                 if allowed and val not in allowed and field.endswith(("_name", "model", "ckpt")):
                     problems.append(
                         f"node {node_id} ({ctype}).{field}: '{val}' not installed on ComfyUI"
@@ -383,22 +389,26 @@ class ComfyClient:
             history = _json_dict(self._request("GET", f"/history/{encoded_id}"), "GET /history")
             entry = history.get(prompt_id)
             if isinstance(entry, dict):
-                status = entry.get("status", {})
+                status = entry.get("status")
                 if isinstance(status, dict):
                     if status.get("status_str") == "error":
                         raise ComfyJobError(f"ComfyUI job failed: {_summarize_failure(status)}")
                     if status.get("completed", True):
                         return entry
+                elif status is None and isinstance(entry.get("outputs"), dict) and entry["outputs"]:
+                    return entry
             self._sleep(self._config.poll_interval)
             waited = max(waited + min_step, time.monotonic() - started)
         raise ComfyJobError(f"ComfyUI job {prompt_id} timed out after {self._config.job_timeout}s")
 
     def download_output(self, entry: dict[str, Any], output: OutputSpec, destination: Path) -> Path:
-        file_info = _pick_output(entry.get("outputs", {}), output)
+        raw_outputs = entry.get("outputs")
+        file_info = _pick_output(raw_outputs if isinstance(raw_outputs, dict) else {}, output)
         raw_filename = file_info.get("filename")
         raw_subfolder = file_info.get("subfolder")
         subfolder = "" if raw_subfolder is None else raw_subfolder
-        file_type = file_info.get("type", "output")
+        raw_type = file_info.get("type")
+        file_type = "output" if raw_type is None else raw_type
         if (
             not _is_safe_comfy_path(raw_filename, subfolder)
             or not isinstance(file_type, str)
@@ -462,7 +472,7 @@ class ComfyClient:
         temp_path.unlink(missing_ok=True)
         raise ComfyConnectionError(
             f"Could not reach ComfyUI at {redact_url(self._config.base_url)} ({last_error}). "
-            "Check that the pod is running and COMFY_URL is correct."
+            "Check that ComfyUI is running and COMFY_URL is correct."
         )
 
     # --------------------------------------------------------------- private
@@ -506,7 +516,7 @@ class ComfyClient:
                 self._sleep(retry_delay(response, attempt))
         raise ComfyConnectionError(
             f"Could not reach ComfyUI at {redact_url(self._config.base_url)} ({last_error}). "
-            "Check that the pod is running and COMFY_URL is correct."
+            "Check that ComfyUI is running and COMFY_URL is correct."
         )
 
 
@@ -515,8 +525,12 @@ def _pick_output(outputs: dict[str, Any], spec: OutputSpec) -> dict[str, Any]:
     nodes = [spec.node] if spec.node is not None else sorted(outputs)
     extensions = tuple(ext.lower() for ext in spec.extensions)
     for node in nodes:
-        # Different nodes report files under different keys (images, gifs, videos, audio).
-        for files in outputs.get(node, {}).values():
+        # Different nodes and ComfyUI versions report files under different keys
+        # (images, gifs, videos, audio).
+        node_outputs = outputs.get(node)
+        if not isinstance(node_outputs, dict):
+            continue
+        for files in node_outputs.values():
             if not isinstance(files, list):
                 continue
             for item in files:
@@ -537,20 +551,34 @@ def _summarize_rejection(body: dict[str, Any]) -> str:
         parts.append(str(error.get("message", error)))
     elif error:
         parts.append(str(error))
-    for node_id, info in (body.get("node_errors") or {}).items():
-        messages = "; ".join(
-            f"{e.get('message', '')} {e.get('details', '')}".strip() for e in info.get("errors", [])
-        )
-        parts.append(f"node {node_id} ({info.get('class_type', '?')}): {messages}")
+    raw_node_errors = body.get("node_errors")
+    if isinstance(raw_node_errors, dict):
+        for node_id, info in raw_node_errors.items():
+            if not isinstance(info, dict):
+                parts.append(f"node {node_id}: {info}")
+                continue
+            raw_errors = info.get("errors")
+            error_list = raw_errors if isinstance(raw_errors, list) else []
+            messages = "; ".join(
+                (
+                    f"{e.get('message', '')} {e.get('details', '')}".strip()
+                    if isinstance(e, dict)
+                    else str(e).strip()
+                )
+                for e in error_list
+            )
+            parts.append(f"node {node_id} ({info.get('class_type', '?')}): {messages}")
     return " | ".join(parts) or str(body)[:300]
 
 
 def _summarize_failure(status: dict[str, Any]) -> str:
-    for message in status.get("messages", []):
+    raw_messages = status.get("messages")
+    messages = raw_messages if isinstance(raw_messages, list) else []
+    for message in messages:
         if isinstance(message, list) and len(message) == 2 and message[0] == "execution_error":
             detail = message[1]
-            return (
-                f"node {detail.get('node_id')} ({detail.get('node_type')}): "
-                f"{detail.get('exception_message', '').strip()}"
-            )
+            if isinstance(detail, dict):
+                exc_msg = str(detail.get("exception_message") or "").strip()
+                return f"node {detail.get('node_id')} ({detail.get('node_type')}): {exc_msg}"
+            return str(detail).strip() or "execution_error"
     return "unknown error (see the ComfyUI log)"

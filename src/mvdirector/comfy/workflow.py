@@ -290,15 +290,27 @@ def convert_ui_workflow(ui_graph: dict[str, Any], object_info: dict[str, Any]) -
         return copy.deepcopy(ui_graph)
 
     links_by_id: dict[int, tuple[str, int]] = {}
-    for link in ui_graph.get("links", []):
+    raw_links = ui_graph.get("links")
+    for link in raw_links if isinstance(raw_links, list) else []:
         if isinstance(link, list) and len(link) >= 4:
             try:
                 links_by_id[int(link[0])] = (str(link[1]), int(link[2]))
             except (TypeError, ValueError):
                 continue
+        elif isinstance(link, dict):
+            # Newer ComfyUI frontend exports can serialize links as objects.
+            lid = link.get("id")
+            origin_id = link.get("origin_id")
+            origin_slot = link.get("origin_slot")
+            if lid is not None and origin_id is not None and origin_slot is not None:
+                try:
+                    links_by_id[int(lid)] = (str(origin_id), int(origin_slot))
+                except (TypeError, ValueError):
+                    continue
 
     api_graph: dict[str, Any] = {}
-    for node in ui_graph.get("nodes", []):
+    raw_nodes = ui_graph.get("nodes")
+    for node in raw_nodes if isinstance(raw_nodes, list) else []:
         if not isinstance(node, dict):
             continue
         # Skip muted (mode=2) or bypassed (mode=4) UI nodes.
@@ -364,10 +376,15 @@ def convert_ui_workflow(ui_graph: dict[str, Any], object_info: dict[str, Any]) -
                 break
             inputs[field_name] = widgets[w_idx]
             w_idx += 1
-            # ComfyUI adds an implicit control_after_generate widget after seed/noise_seed ints.
+            # ComfyUI adds an implicit control_after_generate widget after seed ints (or any INT
+            # input whose /object_info spec declares control_after_generate: true).
+            spec_opts = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
+            has_control = field_name in ("seed", "noise_seed") or bool(
+                spec_opts.get("control_after_generate")
+            )
             if (
                 kind == "INT"
-                and field_name in ("seed", "noise_seed")
+                and has_control
                 and w_idx < len(widgets)
                 and widgets[w_idx] in ("fixed", "increment", "decrement", "randomize")
             ):

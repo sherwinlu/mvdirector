@@ -190,7 +190,7 @@ def setup(
     video_preset: str | None = typer.Option(
         None,
         "--video-preset",
-        help="Video model family preset: ltx, wan, wan-i2v, or custom.",
+        help="Video model family preset: ltx, wan, wan-i2v, exact, or custom.",
     ),
     non_interactive: bool = typer.Option(
         False,
@@ -215,7 +215,20 @@ def setup(
     typer.echo(setup_mod.render_environment_report(report))
 
     if check_only:
-        if not report.tools_ok or not report.comfy.reachable or not report.ollama.reachable:
+        chosen_check_provider = (llm_provider or setup_mod.DEFAULT_LLM_PROVIDER).strip().lower()
+        if chosen_check_provider not in _VALID_SETUP_PROVIDERS:
+            valid = ", ".join(_VALID_SETUP_PROVIDERS)
+            raise _fail(
+                MVDError(
+                    f"Unsupported --llm-provider {chosen_check_provider!r}. Choose from: {valid}"
+                )
+            )
+        needs_ollama = chosen_check_provider == "ollama"
+        if (
+            not report.tools_ok
+            or not report.comfy.reachable
+            or (needs_ollama and not report.ollama.reachable)
+        ):
             raise typer.Exit(code=1)
         return
 
@@ -248,7 +261,7 @@ def setup(
         chosen_title = typer.prompt("Project title", default=chosen_title).strip()
         while True:
             raw_comfy = typer.prompt(
-                "ComfyUI URL (local or separate server)", default=chosen_comfy
+                "ComfyUI URL (local, LAN, or cloud server)", default=chosen_comfy
             ).strip()
             try:
                 chosen_comfy = setup_mod.validate_http_url(raw_comfy, "ComfyUI URL")

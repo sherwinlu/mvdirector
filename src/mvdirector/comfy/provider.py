@@ -7,7 +7,7 @@
 The engine never decides which GPU endpoint serves a job. It asks a `ComfyEndpointProvider` for a
 leased client and releases it when the stage is done. The default provider reads the single
 `comfy.base_url` from the project config. A hosted service can implement the protocol to route
-each lease to a pod pool, check health, enforce concurrency limits or cold-start capacity.
+each lease to a server pool, check health, enforce concurrency limits or cold-start capacity.
 """
 
 from __future__ import annotations

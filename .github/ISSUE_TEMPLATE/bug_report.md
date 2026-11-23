@@ -13,8 +13,8 @@ Describe what happened and what you expected.
 
 - `mvdirector` version (`mvd --version` or commit hash):
 - Python version:
-- OS / Docker / Cloud GPU:
-- ComfyUI workflow & models used:
+- OS / Docker / ComfyUI hosting (local, home LAN, or cloud):
+- ComfyUI version, workflow & models used:
 - LLM provider & model:
 
 ## Diagnostic Output

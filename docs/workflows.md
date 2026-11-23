@@ -21,9 +21,9 @@ Each workflow is a pair of files in the project's `workflows/` folder:
 
 ## Customizing for Any Image or Video Model (Open-Weight or Paid API Nodes)
 
-**All image and video generation runs through ComfyUI.** Because `mvdirector` talks to ComfyUI purely through your exported `<name>.api.json` graph and `<name>.bindings.json` map, you can swap in any open-weight model **or** any paid cloud model (via ComfyUI Official Partner Nodes or custom API nodes such as FAL.ai / Replicate / vendor nodes) without changing Python code:
+**All image and video generation runs through ComfyUI — locally, on another computer on your home LAN/Tailscale, or on a remote cloud server.** Because `mvdirector` talks to ComfyUI purely through your exported `<name>.api.json` graph and `<name>.bindings.json` map, you can swap in **any open-weight model or any paid cloud model** (via ComfyUI Official Partner Nodes or custom API nodes such as FAL.ai / Replicate / vendor nodes) without changing Python code:
 
-1. **Build and test the workflow in ComfyUI** (local GPU, remote cloud GPU, or CPU-only ComfyUI if using cloud API nodes).
+1. **Build and test the workflow in ComfyUI** (local GPU, another GPU computer on your home LAN/Tailscale, remote cloud GPU, or CPU-only ComfyUI if using cloud API nodes).
 2. **Export it with Save (API Format)** into your project's `workflows/` folder.
 3. **Map its inputs in `<name>.bindings.json`**. The pipeline only sends parameters you bind; unbound parameters are ignored:
    - **Stills (`t2i`, `still`):** `positive_prompt`, `negative_prompt`, `seed`, `width`, `height`, plus `reference_image` (and optional `reference_profile`, `reference_three_quarter`, `reference_face`, `reference_image_2` on two-shots, `set_image`, `prop_image`, `prop_image_2`, `previous_frame` for `reframe` shots) on `still`.
@@ -77,3 +77,19 @@ For lip-sync models that ingest an audio-bearing video clip rather than a raw `.
   }
   ```
 - **Cap retries and preview in Draft Mode to control spend:** Every failed QC check triggers a regeneration attempt. When using paid per-generation nodes, lower `retry.max_attempts` (e.g. `2`) and `retry.max_generations_per_run` (e.g. `40`) in `project.yaml`, test on two shots first with `mvd run --shot s001 --shot s002`, or render low-resolution previews with `--draft` before promoting winners with `mvd upscale`.
+
+---
+
+## ComfyUI Version Compatibility
+
+`mvdirector` is designed to stay **ComfyUI version-agnostic** across older and newer releases, whether ComfyUI runs locally, on another computer on your home network, or on a cloud server:
+
+- **No hardcoded node IDs, model names, or ComfyUI version checks:** Every workflow is exported from *your* ComfyUI installation (`Save (API Format)`) and wired via `<name>.bindings.json`. When ComfyUI or a custom node pack renames a node class or input field, you only update your exported graph and binding entry — never `mvdirector` code.
+- **Core stable HTTP API only:** Generation uses ComfyUI's long-standing HTTP endpoints (`GET /system_stats`, `POST /upload/image`, `POST /prompt`, `GET /history/{prompt_id}`, `GET /view`). Polling `/history` avoids WebSocket protocol/proxy incompatibilities across local, LAN, and cloud reverse proxies.
+- **Graceful degradation for optional endpoints:**
+  - `POST /free` (unloading models between stills and videos) ignores HTTP errors or unreachable responses on older ComfyUI builds or locked-down proxies.
+  - `GET /object_info` (live node/checkpoint pre-flight checks in `mvd validate`) handles both classic ComfyUI V1 combo lists (`[["opt1", ...], {...}]`) and newer V3 `COMBO` schemas (`["COMBO", {"options": [...]}]`), and is skipped cleanly if the server does not expose `/object_info`.
+  - `HEAD /view` (when `comfy.dedup_uploads: true`) falls back to `POST /upload/image` if an older server or proxy returns `404`/`405`.
+  - `partial_execution_targets` is never sent in `POST /prompt` unless explicitly requested, keeping payloads compatible with older ComfyUI servers.
+- **Flexible output and UI-format handling:** `_pick_output` scans all output lists on the bound node (`images`, `gifs`, `videos`, `audio`, etc.) by file extension rather than hardcoding a single output key, and `convert_ui_workflow` handles both classic LiteGraph list links/widgets and newer dict-shaped links/widgets and `control_after_generate` metadata.
+- **Docker builds:** The `COMFYUI_REF` build arg in `docker/Dockerfile.comfy` and `docker/Dockerfile.allinone` only pins a tested tag for reproducible container builds — override it with `--build-arg COMFYUI_REF=<tag>` or connect to any existing ComfyUI installation directly via `comfy.base_url`.

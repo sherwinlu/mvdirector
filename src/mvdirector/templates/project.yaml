@@ -34,7 +34,7 @@ video:
   draft_height: null             # optional height for --draft runs
   size_multiple: 1               # grid your workflow renders on (LTX: 64); sizes snap to it, keeping the aspect
   fps: 24
-  max_clip_seconds: 8.0          # longest clip your LTX workflow handles well
+  max_clip_seconds: 8.0          # longest clip your video workflow handles well
   min_clip_seconds: 1.5
   handle_seconds: 0.25           # extra on each side of a shot, trimmed at assembly
   frame_multiple: 8              # frame rule multiple*n+offset (LTX: 8/1, Wan: 4/1, MiniMax: 1/0)
@@ -67,14 +67,14 @@ mix:                             # used when mode: mix (30-90+ minute continuous
     position: bottom_left        # bottom_left | bottom_right | top_left | top_right
 
 comfy:
-  base_url: ${COMFY_URL:-http://127.0.0.1:8188}   # e.g. https://<remote-comfy-host>:8188
+  base_url: ${COMFY_URL:-http://127.0.0.1:8188}   # local, home LAN/Tailscale (http://192.168.x.x:8188), or cloud HTTPS
   headers: {}                    # e.g. {Authorization: "Bearer ${COMFY_TOKEN}"}
   request_timeout: 60
   job_timeout: 1800
   poll_interval: 3
   workflows_dir: workflows
   reference_notation: prose      # prose ('first/second reference image') | tags ('@image1', '@video1')
-  workflows:
+  workflows:                     # starter examples; point these at bindings for any model you prefer
     t2i: qwen_t2i.bindings.json            # reference portrait and b-roll stills
     still: qwen_edit_still.bindings.json   # singer stills from the reference portrait
     lipsync: ltx_lipsync.bindings.json     # image + audio -> video
@@ -83,7 +83,7 @@ comfy:
 llm:
   # One model does every text task: planning, vision checks and prompt rewrites.
   enabled: true                  # false = rule-based planning, no vision checks, no prompt rewrites
-  provider: ollama               # ollama (local) | anthropic | openai | gemini | openai_compatible
+  provider: ollama               # ollama (local or remote) | anthropic | openai | gemini | openai_compatible
   model: gemma3:12b              # any model name your provider offers; accepts images for vision checks
                                  #   must be set explicitly for every provider except ollama
   base_url: null                 # server address (or set MVD_LLM_URL); required for openai_compatible

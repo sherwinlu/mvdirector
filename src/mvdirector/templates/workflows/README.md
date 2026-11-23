@@ -1,9 +1,13 @@
 # Workflows
 
-All image and video generation in `mvdirector` runs through **ComfyUI**. This folder connects
-the pipeline to **your** ComfyUI workflows—whether they run open-weight GPU models (Qwen,
-Z-Image, Krea, Flux, LTX, Wan, MOSS) or **paid cloud models** via ComfyUI Partner/API nodes
-(Nano Banana, Seedance, Grok, P-H3 / MiniMax, Kling, FAL.ai, Replicate).
+All image and video generation in `mvdirector` runs through **ComfyUI** — locally, on another
+computer in your home LAN/Tailscale, or on a remote cloud server. This folder connects the
+pipeline to **your** ComfyUI workflows—whether they run open-weight GPU models (Qwen, Z-Image,
+Krea, Flux, LTX, Wan, HunyuanVideo, MOSS, etc.) or **paid cloud models** via ComfyUI Partner/API
+nodes (Nano Banana, Seedance, Grok, P-H3 / MiniMax, Kling, FAL.ai, Replicate). Because graphs
+are exported directly from your own ComfyUI server and `mvdirector` relies only on ComfyUI's
+core HTTP API (`/system_stats`, `/upload/image`, `/prompt`, `/history`, `/view`) with graceful
+fallbacks for optional endpoints, workflows stay portable across ComfyUI versions.
 
 Each workflow needs two files:
 

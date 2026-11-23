@@ -301,3 +301,127 @@ def test_render_never_cuts_out_the_required_reference_or_a_defaulted_image():
     assert "10" in graph and "images.image_1" in graph["20"]["inputs"]
     assert graph["11"]["inputs"]["image"] == "blank.png"
     assert "12" not in graph
+
+
+def test_client_sets_default_user_agent_and_respects_override():
+    seen: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("user-agent"))
+        return httpx.Response(200, json={"system": {}})
+
+    with ComfyClient(
+        ComfyConfig(base_url="http://comfy.test"), transport=httpx.MockTransport(handler)
+    ) as comfy:
+        comfy.ping()
+    assert seen[-1] is not None and seen[-1].startswith("mvdirector/")
+
+    with ComfyClient(
+        ComfyConfig(base_url="http://comfy.test", headers={"user-agent": "custom-proxy/1.0"}),
+        transport=httpx.MockTransport(handler),
+    ) as comfy:
+        comfy.ping()
+    assert seen[-1] == "custom-proxy/1.0"
+
+
+def test_comfy_version_agnostic_payload_and_error_handling(tmp_path):
+    from mvdirector.comfy.client import _summarize_failure, _summarize_rejection
+
+    # 1. History entry with explicit status=null and outputs completes without hanging,
+    #    and download_output tolerates non-dict node outputs and explicit type=null.
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/history/p1":
+            return httpx.Response(
+                200,
+                json={
+                    "p1": {
+                        "status": None,
+                        "outputs": {
+                            "bad": None,
+                            "9": {
+                                "videos": [
+                                    {"filename": "clip.mp4", "subfolder": None, "type": None}
+                                ]
+                            },
+                        },
+                    }
+                },
+            )
+        if request.url.path == "/view":
+            assert request.url.params["type"] == "output"
+            assert request.url.params["filename"] == "clip.mp4"
+            return httpx.Response(200, content=b"MP4DATA")
+        raise AssertionError(f"Unexpected path {request.url.path}")
+
+    config = ComfyConfig(base_url="http://comfy.test", poll_interval=0.0)
+    with ComfyClient(config, transport=httpx.MockTransport(handler), sleep=lambda _: None) as comfy:
+        entry = comfy.wait("p1")
+        out = comfy.download_output(entry, OutputSpec(extensions=[".mp4"]), tmp_path / "clip.mp4")
+        assert out.read_bytes() == b"MP4DATA"
+
+        # 2. validate_graph_live handles V3 COMBO values/options and malformed node inputs.
+        obj_info = {
+            "LoaderV3": {
+                "input": {
+                    "required": {
+                        "ckpt_name": ["COMBO", {"values": ["good.safetensors"]}],
+                        "lora_name": ["COMBO", {"options": ["lora_a.safetensors"]}],
+                    }
+                }
+            }
+        }
+        problems = comfy.validate_graph_live(
+            {
+                "1": {
+                    "class_type": "LoaderV3",
+                    "inputs": {
+                        "ckpt_name": "missing.safetensors",
+                        "lora_name": "lora_a.safetensors",
+                    },
+                },
+                "2": {"class_type": "LoaderV3", "inputs": None},
+            },
+            object_info=obj_info,
+        )
+        assert len(problems) == 1 and "missing.safetensors" in problems[0]
+
+    # 3. Error summarizers tolerate unexpected shapes without raising AttributeError/TypeError.
+    assert "node 1" in _summarize_rejection(
+        {"node_errors": {"1": "bad", "2": {"class_type": "K", "errors": ["plain error"]}}}
+    )
+    assert "boom" in _summarize_failure({"messages": [["execution_error", "boom"]]})
+    assert "unknown error" in _summarize_failure({"messages": None})
+
+
+def test_convert_ui_workflow_supports_dict_links_and_control_after_generate():
+    from mvdirector.comfy.workflow import convert_ui_workflow
+
+    ui_graph = {
+        "nodes": [
+            {"id": 1, "type": "SourceNode", "inputs": [], "widgets_values": []},
+            {
+                "id": 2,
+                "type": "CustomSampler",
+                "inputs": [{"name": "model", "link": 10}],
+                "widgets_values": [42, "randomize", 25],
+            },
+        ],
+        "links": [{"id": 10, "origin_id": 1, "origin_slot": 0, "target_id": 2, "target_slot": 0}],
+    }
+    object_info = {
+        "CustomSampler": {
+            "input": {
+                "required": {
+                    "model": ["MODEL"],
+                    "batch_seed": ["INT", {"default": 0, "control_after_generate": True}],
+                    "steps": ["INT", {"default": 20}],
+                }
+            }
+        }
+    }
+    api_graph = convert_ui_workflow(ui_graph, object_info)
+    assert api_graph["2"]["inputs"] == {
+        "model": ["1", 0],
+        "batch_seed": 42,
+        "steps": 25,
+    }

@@ -42,6 +42,10 @@ _TXT_TAG_RE = re.compile(r"(?:^|\s)#([A-Za-z0-9][A-Za-z0-9_-]{0,31})\b")
 
 _MIN_AUTO_LEAD_IN_SECONDS = 10.0
 
+#: Ceiling on fixed-interval chapters. At the 30s floor for `mix.default_segment_seconds` this
+#: still allows an 83-hour mix, far past the 30-90+ minute sets the mix mode is built for.
+MAX_FALLBACK_CHAPTERS = 10_000
+
 
 def _clean_line(text: str) -> str:
     """Collapse internal whitespace and strip control characters."""
@@ -726,6 +730,16 @@ def resolve_chapters(
 
     if spec is None:
         count = max(1, round(duration / default_segment_seconds))
+        if count > MAX_FALLBACK_CHAPTERS:
+            # The loop below walks every chapter and the planner then directs each one, so an
+            # absurd duration (a mistyped `analysis.json`, say) would otherwise grind through
+            # millions of iterations and exhaust memory instead of reporting anything.
+            raise ConfigError(
+                f"A {duration / 3600.0:.3g} hour mix split every "
+                f"{default_segment_seconds:.0f}s needs {count:.3g} chapters, over the "
+                f"{MAX_FALLBACK_CHAPTERS} limit. Check the mix duration, raise "
+                "mix.default_segment_seconds, or supply inputs.tracklist."
+            )
         span = duration / count
         tolerance = min(20.0, span * 0.2)
         min_gap = min(15.0, span * 0.5)

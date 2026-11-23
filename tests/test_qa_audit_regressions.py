@@ -1586,3 +1586,36 @@ def test_pass4_project_yaml_rejects_non_finite_thresholds(tmp_path: Path) -> Non
 
     cfg.write_text("title: T\nqc:\n  pass_score: 0.6\n", encoding="utf-8")
     assert load_config(cfg).qc.pass_score == pytest.approx(0.6)
+
+
+def test_pass4_fallback_chapter_count_is_bounded() -> None:
+    """An absurd mix duration used to grind, not fail.
+
+    `resolve_chapters` derived its fixed-interval chapter count straight from the audio
+    duration, so a mistyped `analysis.json` duration walked millions of loop iterations and
+    exhausted memory (the probe run was OOM-killed) instead of reporting anything. The
+    `mix.default_segment_seconds` floor of 30s bounds the divisor, so the duration alone decided
+    the work.
+    """
+    from mvdirector.audio.tracklist import MAX_FALLBACK_CHAPTERS, resolve_chapters
+
+    # Real-world mixes are unaffected: 90 minutes and a 24-hour set still resolve.
+    assert len(resolve_chapters(None, 5400.0, default_segment_seconds=30.0)) == 180
+    assert len(resolve_chapters(None, 86_400.0, default_segment_seconds=30.0)) == 2880
+
+    # Exactly at the ceiling is still allowed.
+    at_limit = 30.0 * MAX_FALLBACK_CHAPTERS
+    assert len(resolve_chapters(None, at_limit, default_segment_seconds=30.0)) == (
+        MAX_FALLBACK_CHAPTERS
+    )
+
+    # Past it, a clear error naming the knobs that fix it.
+    for absurd in (1e7, 1e9, 1e300):
+        with pytest.raises(ConfigError, match="chapters, over the"):
+            resolve_chapters(None, absurd, default_segment_seconds=30.0)
+
+    # An explicit tracklist is unaffected: its chapter count comes from the document.
+    spec = tracklist_mod.TracklistSpec.model_validate(
+        {"tracks": [{"start": 0.0, "title": "A"}, {"start": 120.0, "title": "B"}]}
+    )
+    assert len(resolve_chapters(spec, 1e7)) == 2

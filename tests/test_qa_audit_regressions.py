@@ -1517,9 +1517,7 @@ def test_pass4_deeply_nested_json_is_a_parse_error_everywhere(tmp_path: Path) ->
     # 2. MCP over HTTP answers -32700 instead of killing the worker, and stays up afterwards.
     server = MCPServer(allowed_roots=[])
     body = ('{"jsonrpc":"2.0","id":1,"method":"x","params":' + deep + "}").encode()
-    status, _, payload = handle_http_request(
-        server, "POST", "/mcp", {"Host": "127.0.0.1"}, body
-    )
+    status, _, payload = handle_http_request(server, "POST", "/mcp", {"Host": "127.0.0.1"}, body)
     assert status == 200
     assert json.loads(payload)["error"]["code"] == -32700
     status, _, payload = handle_http_request(

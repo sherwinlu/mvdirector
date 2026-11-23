@@ -278,11 +278,7 @@ def scan_splice_clicks(
         floor = max(1e-5, float(np.median(np.concatenate([pre, post]))))
         tail_rms = float(np.sqrt(np.mean(post * post)))
         # True splice clicks are impulse-like (high peak-to-floor and low sustained tail).
-        if (
-            peak / floor >= spike_ratio
-            and tail_rms < 0.35 * peak
-            and _accept_click(clicks, t_sec)
-        ):
+        if peak / floor >= spike_ratio and tail_rms < 0.35 * peak and _accept_click(clicks, t_sec):
             bisect.insort(clicks, round(t_sec, 4))
     return clicks
 

@@ -1113,6 +1113,10 @@ def load_or_transcribe_words(project: Project) -> list[Word]:
             raw = json.loads(ts_path.read_text("utf-8-sig"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ConfigError(f"Could not parse word timestamps file {ts_path}: {exc}") from exc
+        except RecursionError:
+            raise ConfigError(
+                f"Word timestamps file {ts_path} nests JSON too deeply to parse."
+            ) from None
         if not isinstance(raw, list):
             raise ConfigError(
                 f"Invalid word timestamps file {ts_path}: expected a JSON list of word objects."

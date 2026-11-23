@@ -186,6 +186,10 @@ def extract_json(text: str) -> str:
                 value, end = decoder.raw_decode(cleaned, pos)
             except ValueError:
                 value = end = None
+            except RecursionError:
+                # A reply nested thousands of levels deep exhausts the stack rather than
+                # raising ValueError; treat it as unusable JSON, not as a crash.
+                raise LLMError("The model reply nested JSON too deeply to parse") from None
             if isinstance(value, dict) and end is not None:
                 return cleaned[pos:end]
             pos = cleaned.find("{", pos + 1)
@@ -274,7 +278,7 @@ class ChatBackend(ABC):
                         parsed = json.loads(
                             raw_json, strict=False, parse_constant=_reject_json_constant
                         )
-                    except ValueError:
+                    except (ValueError, RecursionError):
                         raise first_exc from None
                     return schema.model_validate(parsed)
             except (ValidationError, LLMError) as exc:

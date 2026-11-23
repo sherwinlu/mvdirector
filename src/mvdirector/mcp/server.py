@@ -64,7 +64,16 @@ def _reject_json_constant(token: str) -> Any:
 
 
 def _loads_strict_json(raw: str) -> Any:
-    return json.loads(raw, parse_constant=_reject_json_constant)
+    """Decode one JSON message, turning stack exhaustion into an ordinary parse error.
+
+    `json.loads` recurses per nesting level, so a body of `[[[[...` well under the 1 MiB cap
+    raises `RecursionError` — not a `ValueError` — and escapes every parse handler here: over
+    HTTP it killed the worker thread mid-response, and over stdio it tore down the serve loop.
+    """
+    try:
+        return json.loads(raw, parse_constant=_reject_json_constant)
+    except RecursionError:
+        raise ValueError("JSON nesting is too deep.") from None
 
 
 def _host_without_port(host_header: str) -> str:

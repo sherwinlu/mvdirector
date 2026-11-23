@@ -102,6 +102,8 @@ def load_labels(path: Path) -> list[Label]:
             data = json.loads(text)
         except json.JSONDecodeError as exc:
             raise ConfigError(f"{path}: invalid JSON ({exc})") from exc
+        except RecursionError:
+            raise ConfigError(f"{path}: JSON nests too deeply to parse.") from None
         if not isinstance(data, list) or not all(isinstance(item, dict) for item in data):
             raise ConfigError(f"{path} must hold a JSON list of label objects")
         rows = [dict(item) for item in data]

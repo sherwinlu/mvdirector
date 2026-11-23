@@ -112,6 +112,10 @@ class WorkflowTemplate:
             graph = json.loads(graph_path.read_text("utf-8"))
         except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
             raise WorkflowBindingError(f"{graph_path} is not valid JSON: {exc}") from exc
+        except RecursionError:
+            raise WorkflowBindingError(
+                f"{graph_path} nests JSON too deeply to parse."
+            ) from None
         if not isinstance(graph, dict):
             raise WorkflowBindingError(
                 f"{graph_path} must hold a JSON object of ComfyUI nodes, "

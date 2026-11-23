@@ -700,6 +700,8 @@ def load_tracklist(path: Path) -> TracklistSpec:
         raw = json.loads(text) if suffix == ".json" else yaml.safe_load(text)
     except (json.JSONDecodeError, yaml.YAMLError) as exc:
         raise ConfigError(f"Could not parse tracklist {path}: {exc}") from exc
+    except RecursionError:
+        raise ConfigError(f"Tracklist {path} nests collections too deeply to parse.") from None
     try:
         return TracklistSpec.model_validate(raw)
     except ValidationError as exc:

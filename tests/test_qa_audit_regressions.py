@@ -47,6 +47,7 @@ from mvdirector.config import (
     ProjectConfig,
     RetryConfig,
     VideoConfig,
+    load_config,
 )
 from mvdirector.errors import (
     ComfyError,
@@ -1491,3 +1492,97 @@ def test_pass4_init_project_never_copies_platform_junk(tmp_path: Path) -> None:
     finally:
         for item in created:
             item.unlink(missing_ok=True)
+
+
+def test_pass4_deeply_nested_json_is_a_parse_error_everywhere(tmp_path: Path) -> None:
+    """`json.loads`/`yaml.safe_load` recurse per level and raise RecursionError, not ValueError.
+
+    Nothing caught it: a sub-1 MiB `[[[[...` body killed the MCP HTTP worker thread mid-response
+    and tore down the stdio serve loop, and a hostile or malfunctioning LLM endpoint could crash
+    planning the same way.
+    """
+    import io
+
+    from mvdirector.audio.tracklist import load_tracklist
+    from mvdirector.comfy.workflow import WorkflowTemplate
+    from mvdirector.llm.base import extract_json
+    from mvdirector.mcp.server import MCPServer, handle_http_request, serve_stdio
+
+    deep = "[" * 60_000 + "]" * 60_000
+
+    # 1. LLM replies: a clean LLMError, so the caller can ask for a correction.
+    with pytest.raises(LLMError, match="too deeply"):
+        extract_json('{"a":' + deep + "}")
+
+    # 2. MCP over HTTP answers -32700 instead of killing the worker, and stays up afterwards.
+    server = MCPServer(allowed_roots=[])
+    body = ('{"jsonrpc":"2.0","id":1,"method":"x","params":' + deep + "}").encode()
+    status, _, payload = handle_http_request(
+        server, "POST", "/mcp", {"Host": "127.0.0.1"}, body
+    )
+    assert status == 200
+    assert json.loads(payload)["error"]["code"] == -32700
+    status, _, payload = handle_http_request(
+        server,
+        "POST",
+        "/mcp",
+        {"Host": "127.0.0.1"},
+        b'{"jsonrpc":"2.0","id":2,"method":"ping"}',
+    )
+    assert json.loads(payload)["result"] == {}
+
+    # 3. MCP over stdio keeps serving the frames after the bad one.
+    out = io.StringIO()
+    serve_stdio(
+        server,
+        stdin=io.StringIO(
+            '{"jsonrpc":"2.0","id":1,"method":"x","params":'
+            + deep
+            + '}\n{"jsonrpc":"2.0","id":2,"method":"ping"}\n'
+        ),
+        stdout=out,
+        max_line_bytes=10_000_000,
+    )
+    replies = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
+    assert len(replies) == 2
+    assert replies[0]["error"]["code"] == -32700
+    assert replies[1]["result"] == {}
+
+    # 4. Local documents report a clean ConfigError / WorkflowBindingError.
+    cfg = tmp_path / "project.yaml"
+    cfg.write_text("a: " + "[" * 2_000 + "]" * 2_000, encoding="utf-8")
+    with pytest.raises(ConfigError, match="too deeply"):
+        load_config(cfg)
+
+    tl = tmp_path / "tracks.json"
+    tl.write_text(deep, encoding="utf-8")
+    with pytest.raises(ConfigError, match="too deeply"):
+        load_tracklist(tl)
+
+    (tmp_path / "graph.json").write_text(deep, encoding="utf-8")
+    bindings = tmp_path / "w.bindings.json"
+    bindings.write_text(json.dumps({"workflow": "graph.json", "inputs": {}}), encoding="utf-8")
+    with pytest.raises(WorkflowBindingError, match="too deeply"):
+        WorkflowTemplate.load("w", bindings)
+
+
+def test_pass4_project_yaml_rejects_non_finite_thresholds(tmp_path: Path) -> None:
+    """YAML spells NaN `.nan`, and unbounded QC thresholds used to accept it.
+
+    `score >= nan` is always false, so a NaN `qc.pass_score` quietly failed every take and burned
+    the whole generation budget without raising anything.
+    """
+    cfg = tmp_path / "project.yaml"
+    for body in (
+        "title: T\nqc:\n  pass_score: .nan\n",
+        "title: T\nqc:\n  pass_score: .inf\n",
+        "title: T\nqc:\n  weights: {sharpness: .nan}\n",
+        "title: T\nqc:\n  image:\n    sharpness_good: .nan\n",
+        "title: T\nqc:\n  video:\n    lipsync_good: -.inf\n",
+    ):
+        cfg.write_text(body, encoding="utf-8")
+        with pytest.raises(ConfigError, match="finite"):
+            load_config(cfg)
+
+    cfg.write_text("title: T\nqc:\n  pass_score: 0.6\n", encoding="utf-8")
+    assert load_config(cfg).qc.pass_score == pytest.approx(0.6)

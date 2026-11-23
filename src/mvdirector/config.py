@@ -100,7 +100,15 @@ def is_allowed_api_key_env(name: str) -> bool:
 
 
 class _Section(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    """Base for every `project.yaml` section.
+
+    ``allow_inf_nan=False`` matters most for the unbounded thresholds: YAML spells NaN as
+    ``.nan``, and a NaN ``qc.pass_score`` makes every ``score >= pass_score`` comparison false,
+    so every take is rejected and the whole generation budget burns with nothing to show and no
+    error anywhere. Bounded fields already rejected it by accident; now all of them do on purpose.
+    """
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
 class InputsConfig(_Section):
@@ -1074,6 +1082,10 @@ def load_config(path: Path) -> ProjectConfig:
         raw = yaml.safe_load(text) or {}
     except yaml.YAMLError as exc:
         raise ConfigError(f"{path} is not valid YAML: {exc}") from exc
+    except RecursionError:
+        # PyYAML recurses per nesting level, so a deeply nested document exhausts the stack
+        # instead of raising YAMLError.
+        raise ConfigError(f"{path} nests collections too deeply to parse.") from None
     try:
         return ProjectConfig.model_validate(raw)
     except ValidationError as exc:

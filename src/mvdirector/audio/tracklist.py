@@ -685,7 +685,10 @@ def load_tracklist(path: Path) -> TracklistSpec:
         raise ConfigError(
             f"Unsupported tracklist format {path.suffix!r} for {path}. Supported: {supported}."
         )
-    text = path.read_text(encoding="utf-8-sig")
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ConfigError(f"Could not read tracklist {path}: {exc}") from exc
     if suffix == ".cue":
         return _parse_cue_sheet(text)
     if suffix == ".txt":

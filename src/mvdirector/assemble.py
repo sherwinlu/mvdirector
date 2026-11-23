@@ -11,6 +11,7 @@ never accumulates and the picture stays locked to the music from start to finish
 from __future__ import annotations
 
 import logging
+import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -219,7 +220,14 @@ def clip_command(
         filters = "setsar=1"
     elif plan.is_video:
         effective_ss = max(0.0, plan.head_handle + plan.sync_delay)
-        source = ["-ss", f"{effective_ss:.4f}", "-i", str(plan.source)]
+        source = [
+            "-protocol_whitelist",
+            "file",
+            "-ss",
+            f"{effective_ss:.4f}",
+            "-i",
+            str(plan.source.resolve()),
+        ]
         # Drop duplicated handoff frame 0 on CONTINUE one-take chains; tpad covers slight shorts.
         chain = [f"fps={fps}"]
         if plan.drop_first_frame and target_frames > 1:
@@ -228,7 +236,16 @@ def clip_command(
         chain.append(fit)
         filters = ",".join(chain)
     else:
-        source = ["-loop", "1", "-framerate", str(fps), "-i", str(plan.source)]
+        source = [
+            "-protocol_whitelist",
+            "file",
+            "-loop",
+            "1",
+            "-framerate",
+            str(fps),
+            "-i",
+            str(plan.source.resolve()),
+        ]
         filters = fit
     if extra_vf:
         filters = f"{filters},{extra_vf}"
@@ -243,7 +260,7 @@ def clip_command(
         "-frames:v",
         str(target_frames),
         *_ENCODE,
-        str(output),
+        str(output.resolve()),
     ]
 
 
@@ -303,6 +320,8 @@ def _transition_pieces(
                     "-y",
                     "-v",
                     "error",
+                    "-protocol_whitelist",
+                    "file",
                     "-i",
                     str(clip_path.resolve()),
                     "-vf",
@@ -330,8 +349,12 @@ def _transition_pieces(
                     "-y",
                     "-v",
                     "error",
+                    "-protocol_whitelist",
+                    "file",
                     "-i",
                     str(clip_path.resolve()),
+                    "-protocol_whitelist",
+                    "file",
                     "-i",
                     str(clips[idx + 1][1].resolve()),
                     "-filter_complex",
@@ -469,6 +492,8 @@ def assemble(
                 "-y",
                 "-v",
                 "error",
+                "-protocol_whitelist",
+                "file",
                 "-f",
                 "concat",
                 "-i",
@@ -513,30 +538,44 @@ def assemble(
         except Exception as exc:  # noqa: BLE001
             log.warning("Skipped broadcast audio QA on %s: %s", mux_audio.name, exc)
 
-        mux_cmd = [
-            "ffmpeg",
-            "-y",
-            "-v",
-            "error",
-            "-i",
-            str(silent.resolve()),
-            "-i",
-            str(mux_audio.resolve()),
-            "-map",
-            "0:v:0",
-            "-map",
-            "1:a:0",
-            "-c:v",
-            "copy",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "320k",
-            "-shortest",
-        ]
-        if video_cfg.strip_metadata:
-            mux_cmd.extend(["-map_metadata", "-1"])
-        mux_cmd.extend(["-movflags", "+faststart", str(output.resolve())])
-        media.run(mux_cmd)
+        fd_out, out_tmp = tempfile.mkstemp(
+            prefix=f".mvd_{output.stem}_", suffix=".part.mp4", dir=output.parent
+        )
+        os.close(fd_out)
+        out_part = Path(out_tmp)
+        try:
+            mux_cmd = [
+                "ffmpeg",
+                "-y",
+                "-v",
+                "error",
+                "-protocol_whitelist",
+                "file",
+                "-i",
+                str(silent.resolve()),
+                "-protocol_whitelist",
+                "file",
+                "-i",
+                str(mux_audio.resolve()),
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "320k",
+                "-shortest",
+            ]
+            if video_cfg.strip_metadata:
+                mux_cmd.extend(["-map_metadata", "-1"])
+            mux_cmd.extend(["-movflags", "+faststart", str(out_part.resolve())])
+            media.run(mux_cmd)
+            os.replace(out_part, output)
+        except BaseException:
+            out_part.unlink(missing_ok=True)
+            raise
     log.info("Wrote %s (%d shots)", output, len(plans))
     return output

@@ -267,6 +267,8 @@ class InsightFaceAnalyzer:
         self._app.prepare(ctx_id=-1, det_size=(640, 640))
 
     def faces(self, image: np.ndarray) -> list[Face]:
+        if not _validate_rgb_image(image):
+            return []
         height, width = image.shape[0], image.shape[1]
         found = []
         for f in self._app.get(image[:, :, ::-1]):  # insightface expects BGR
@@ -274,10 +276,12 @@ class InsightFaceAnalyzer:
             y1 = max(0, min(height, int(round(float(f.bbox[1])))))
             x2 = max(x1, min(width, int(round(float(f.bbox[2])))))
             y2 = max(y1, min(height, int(round(float(f.bbox[3])))))
+            height_fraction = float(np.clip(float(f.bbox[3] - f.bbox[1]) / height, 0.0, 1.0))
+            embedding = np.asarray(f.normed_embedding) if f.normed_embedding is not None else None
             found.append(
                 Face(
-                    height_fraction=float(f.bbox[3] - f.bbox[1]) / height,
-                    embedding=np.asarray(f.normed_embedding),
+                    height_fraction=height_fraction,
+                    embedding=embedding,
                     bbox=(x1, y1, x2, y2) if (x2 > x1 and y2 > y1) else None,
                 )
             )
@@ -373,7 +377,9 @@ class MediaPipeMouthTracker:
                             if empty is not None:
                                 slot = empty
                     else:
-                        slot = next(i for i in range(limit) if i not in used)
+                        slot = next((i for i in range(limit) if i not in used), -1)
+                        if slot < 0:
+                            continue
                     used.add(slot)
                     anchors[slot] = x_pos
                     tracks[slot][index] = openness

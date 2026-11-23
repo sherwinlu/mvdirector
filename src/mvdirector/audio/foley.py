@@ -69,7 +69,7 @@ def level_active_rms(
     if not math.isfinite(peak) or peak <= 1e-9:
         return arr.copy()
 
-    frame_len = max(1, int(round(0.010 * sr)))
+    frame_len = min(mono.size, max(1, int(round(0.010 * sr))))
     n_frames = max(1, mono.size // frame_len)
     trimmed = mono[: n_frames * frame_len].reshape(n_frames, frame_len)
     frame_rms = np.sqrt(np.mean(trimmed * trimmed, axis=1))
@@ -197,7 +197,8 @@ def _cue_duck_shape(cue: DiegeticCue) -> tuple[float, float, float, float] | Non
     ):
         return None
     duck_gain = 10.0 ** (max(-40.0, min(-0.1, cue.duck_db)) / 20.0)
-    fade = max(0.01, min(cue.fade_seconds, (cue.end - cue.start) * 0.45))
+    span = cue.end - cue.start
+    fade = min(max(0.0, cue.fade_seconds), span * 0.45)
     return cue.start, cue.end, fade, duck_gain
 
 
@@ -217,10 +218,11 @@ def ducking_gain(times: np.ndarray, cues: Sequence[DiegeticCue]) -> np.ndarray:
             continue
         t = times[lo:hi]
         factor = np.full(t.shape, duck)
-        ramp_in = t < start + fade
-        factor[ramp_in] = 1.0 - (1.0 - duck) * (t[ramp_in] - start) / fade
-        ramp_out = t > end - fade
-        factor[ramp_out] = duck + (1.0 - duck) * (t[ramp_out] - (end - fade)) / fade
+        if fade > 0.0:
+            ramp_in = t < start + fade
+            factor[ramp_in] = 1.0 - (1.0 - duck) * (t[ramp_in] - start) / fade
+            ramp_out = t > end - fade
+            factor[ramp_out] = duck + (1.0 - duck) * (t[ramp_out] - (end - fade)) / fade
         gain[lo:hi] *= factor
     return gain
 
@@ -291,9 +293,18 @@ def _mix_cues_over(
     ducked: Path, cues: Sequence[DiegeticCue], output_path: Path, limit: float
 ) -> None:
     """Mix faded, gained ``cues`` over the already-ducked song and true-peak limit the result."""
-    cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(ducked.resolve())]
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-v",
+        "error",
+        "-protocol_whitelist",
+        "file",
+        "-i",
+        str(ducked.resolve()),
+    ]
     for cue in cues:
-        cmd.extend(["-i", str(cue.audio_path.resolve())])
+        cmd.extend(["-protocol_whitelist", "file", "-i", str(cue.audio_path.resolve())])
 
     filters: list[str] = []
     mix_labels = ["[0:a]"]
@@ -347,7 +358,12 @@ def _read_audio(src: Path, max_seconds: float | None = None) -> tuple[np.ndarray
 
     def _read(path: Path) -> tuple[np.ndarray, int]:
         with sf.SoundFile(str(path)) as handle:
-            frames = -1 if max_seconds is None else int(math.ceil(max_seconds * handle.samplerate))
+            if max_seconds is None:
+                frames = -1
+            elif not math.isfinite(max_seconds) or max_seconds <= 0.0:
+                frames = 0
+            else:
+                frames = int(math.ceil(max_seconds * handle.samplerate))
             return handle.read(frames, dtype="float64", always_2d=True), int(handle.samplerate)
 
     try:

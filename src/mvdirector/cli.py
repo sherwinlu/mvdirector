@@ -665,7 +665,9 @@ def reference_generate(
         "--from-character",
         help="Derive this character's base sheet by editing another character's locked sheet.",
     ),
-    count: int = typer.Option(None, help="Number of candidates. Defaults to reference.candidates."),
+    count: int | None = typer.Option(
+        None, min=1, help="Number of candidates. Defaults to reference.candidates."
+    ),
 ) -> None:
     """Generate candidate reference sheets (front, profile, 3/4 and face panels)."""
     try:
@@ -703,8 +705,8 @@ def reference_video(
     project_dir: Path = ProjectDir,
     state: str = StateOption,
     character: str = CharacterOption,
-    count: int = typer.Option(
-        None, help="Number of candidates. Defaults to reference.video_candidates."
+    count: int | None = typer.Option(
+        None, min=1, help="Number of candidates. Defaults to reference.video_candidates."
     ),
 ) -> None:
     """Generate candidate silent turnaround reference videos from a locked reference sheet."""
@@ -748,7 +750,9 @@ def plates_generate(
     from_set: str = typer.Option(
         None, "--from-set", help="Derive this set's plate by editing another locked set plate."
     ),
-    count: int = typer.Option(None, help="Candidates per set. Defaults to plates.candidates."),
+    count: int | None = typer.Option(
+        None, min=1, help="Candidates per set. Defaults to plates.candidates."
+    ),
 ) -> None:
     """Generate candidate images of the empty sets."""
     try:
@@ -793,7 +797,9 @@ def _reference_status(char: Character, key: str, index: int) -> str:
 def props_generate(
     project_dir: Path = ProjectDir,
     prop: str = typer.Option(None, "--prop", help="Prop id or name. Defaults to every prop."),
-    count: int = typer.Option(None, help="Candidates per prop. Defaults to props.candidates."),
+    count: int | None = typer.Option(
+        None, min=1, help="Candidates per prop. Defaults to props.candidates."
+    ),
 ) -> None:
     """Generate candidate two-angle reference sheets for recurring hero props."""
     try:
@@ -1187,7 +1193,7 @@ def reject(
 def review(project_dir: Path = ProjectDir, review_mode: ReviewMode = ModeOption) -> None:
     """Open the review UI in your browser."""
     app_path = Path(__file__).parent / "review" / "app.py"
-    bind_address = os.environ.get("STREAMLIT_SERVER_ADDRESS", "127.0.0.1")
+    bind_address = os.environ.get("STREAMLIT_SERVER_ADDRESS", "127.0.0.1").strip() or "127.0.0.1"
     command = [
         sys.executable,
         "-m",

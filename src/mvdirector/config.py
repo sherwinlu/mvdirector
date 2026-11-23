@@ -244,16 +244,19 @@ class VideoConfig(_Section):
             "draft_width and draft_height are used as written."
         ),
     )
-    fps: int = 24
-    max_clip_seconds: float = 8.0
-    min_clip_seconds: float = 1.5
+    fps: int = Field(default=24, ge=1)
+    max_clip_seconds: float = Field(default=8.0, gt=0.0, allow_inf_nan=False)
+    min_clip_seconds: float = Field(default=1.5, gt=0.0, allow_inf_nan=False)
     handle_seconds: float = Field(
-        default=0.25, description="Extra audio/video on each side of a shot, trimmed at assembly."
+        default=0.25,
+        ge=0.0,
+        allow_inf_nan=False,
+        description="Extra audio/video on each side of a shot, trimmed at assembly.",
     )
     # Frame count rule: multiple * n + offset (LTX: 8n+1, Wan/Hunyuan: 4n+1, MiniMax/exact: 1n+0).
     frame_multiple: int = Field(default=8, ge=1)
     frame_offset: int = Field(default=1, ge=0)
-    beats_per_bar: int = 4
+    beats_per_bar: int = Field(default=4, ge=1)
     cut_mode: Literal["bars", "phrases"] = Field(
         default="bars",
         description=(
@@ -273,7 +276,11 @@ class VideoConfig(_Section):
         ),
     )
     lipsync_min_vocal_fraction: float = Field(
-        default=0.25, description="Share of a shot that must be sung to make it a lip-sync shot."
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+        description="Share of a shot that must be sung to make it a lip-sync shot.",
     )
     lipsync_audio_source: Literal["vocals", "mix"] = "vocals"
     motion_single_take: bool = Field(
@@ -396,6 +403,11 @@ class VideoConfig(_Section):
     def _check_draft_dimensions(self) -> VideoConfig:
         if (self.draft_width is None) != (self.draft_height is None):
             raise ValueError("Set both video.draft_width and video.draft_height together.")
+        if self.min_clip_seconds > self.max_clip_seconds:
+            raise ValueError(
+                f"video.min_clip_seconds ({self.min_clip_seconds}) must not exceed "
+                f"video.max_clip_seconds ({self.max_clip_seconds})."
+            )
         for label, val in (
             ("video.width", self.width),
             ("video.height", self.height),
@@ -427,9 +439,19 @@ class ComfyConfig(_Section):
         """Expand ``${NAME}`` here (defaults included) rather than on the raw YAML."""
         return expand_env(value)
 
-    request_timeout: float = 60.0
-    job_timeout: float = 1800.0
-    poll_interval: float = 3.0
+    @field_validator("headers")
+    @classmethod
+    def _check_headers(cls, value: dict[str, str]) -> dict[str, str]:
+        for key, header_val in value.items():
+            if not key.strip() or any(ord(ch) < 32 or ord(ch) == 127 for ch in key):
+                raise ValueError(f"Invalid ComfyUI header name: {key!r}")
+            if any(ord(ch) < 32 or ord(ch) == 127 for ch in header_val):
+                raise ValueError(f"ComfyUI header '{key}' must not contain control characters.")
+        return value
+
+    request_timeout: float = Field(default=60.0, gt=0.0, allow_inf_nan=False)
+    job_timeout: float = Field(default=1800.0, gt=0.0, allow_inf_nan=False)
+    poll_interval: float = Field(default=3.0, ge=0.0, allow_inf_nan=False)
     workflows_dir: str = "workflows"
     reference_notation: Literal["prose", "tags"] = Field(
         default="prose",
@@ -516,7 +538,7 @@ class LLMConfig(_Section):
     )
     max_tokens: int = Field(default=8000, ge=256)
     shots_per_request: int = Field(default=20, ge=1)
-    timeout_seconds: float = Field(default=600.0, gt=0)
+    timeout_seconds: float = Field(default=600.0, gt=0, allow_inf_nan=False)
     json_mode: Literal["auto", "off", "object", "schema"] = Field(
         default="auto",
         description="How to ask the server for JSON: 'object' (valid JSON), 'schema' (JSON "
@@ -620,8 +642,12 @@ class ReferenceConfig(_Section):
             "(avoids clipping on bright or glowing outfits)."
         ),
     )
-    width: int | None = Field(default=None, description="Sheet width. Default depends on layout.")
-    height: int | None = Field(default=None, description="Sheet height. Default depends on layout.")
+    width: int | None = Field(
+        default=None, ge=64, description="Sheet width. Default depends on layout."
+    )
+    height: int | None = Field(
+        default=None, ge=64, description="Sheet height. Default depends on layout."
+    )
     candidates: int = Field(default=4, ge=1)
     video_candidates: int = Field(
         default=2,
@@ -688,7 +714,7 @@ class VideoQCConfig(_Section):
     duration_tolerance: float = 0.3
     aspect_tolerance: float = 0.03
     min_resolution_scale: float = 0.5
-    analysis_width: int = 512
+    analysis_width: int = Field(default=512, ge=16)
     # Lip-sync: correlation between mouth opening and vocal loudness.
     # The 0.40 floor suppresses random-noise false passes while the ±0.25s (±6 frames at 24fps)
     # lag window avoids rejecting workflows with a small constant AV offset.
@@ -713,7 +739,7 @@ class VideoQCConfig(_Section):
             "desync_risk triage (inspired by JavaDerek/music-video-pipeline)."
         ),
     )
-    lipsync_max_lag_seconds: float = 0.25
+    lipsync_max_lag_seconds: float = Field(default=0.25, ge=0.0, allow_inf_nan=False)
     # Advisory by default: on sung vocals the mouth-vs-loudness correlation did not separate
     # clips a person judged in sync from ones out of sync, so a low score sends the shot to
     # review (with the score shown) instead of failing it. Set true to reject and retry.
@@ -731,7 +757,7 @@ class VideoQCConfig(_Section):
     jump_cut_threshold: float = 0.25
     flicker_good: float = 0.03
     flicker_bad: float = 0.12
-    vision_frames: int = 5
+    vision_frames: int = Field(default=5, ge=1)
     vision_hard_min: float = Field(default=0.50, ge=0.0, le=1.0)
     vision_spec_hard_min: float = Field(default=0.60, ge=0.0, le=1.0)
     vision_character_hard_min: float = Field(default=0.40, ge=0.0, le=1.0)
@@ -1019,11 +1045,33 @@ def expand_env(value: Any) -> Any:
     return value
 
 
+def mask_unset_allowed_env_refs(value: Any) -> Any:
+    """Replace unset allowed ``${VAR}`` placeholders so validation works before export."""
+    if isinstance(value, str):
+
+        def _sub(match: re.Match[str]) -> str:
+            var_name = match.group(1)
+            if is_allowed_env_var(var_name) and os.environ.get(var_name) is None:
+                return "placeholder"
+            return match.group(0)
+
+        return _ENV_PATTERN.sub(_sub, value)
+    if isinstance(value, dict):
+        return {key: mask_unset_allowed_env_refs(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [mask_unset_allowed_env_refs(item) for item in value]
+    return value
+
+
 def load_config(path: Path) -> ProjectConfig:
     if not path.is_file():
         raise ConfigError(f"Config file not found: {path}")
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ConfigError(f"Could not read {path}: {exc}") from exc
+    try:
+        raw = yaml.safe_load(text) or {}
     except yaml.YAMLError as exc:
         raise ConfigError(f"{path} is not valid YAML: {exc}") from exc
     try:

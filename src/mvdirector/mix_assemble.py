@@ -31,7 +31,7 @@ from mvdirector.audio.tracklist import (
     format_youtube_chapters,
 )
 from mvdirector.config import MixConfig, MixHudConfig
-from mvdirector.errors import MVDError
+from mvdirector.errors import ConfigError, MVDError
 from mvdirector.models import Manifest, MixChapter
 from mvdirector.planning.mix_planner import quantize_loop_clip_seconds
 from mvdirector.project import Project, require_safe_id
@@ -125,14 +125,16 @@ def render_hud_card(
         return None
 
     scale = max(0.45, min(2.0, frame_h / 720.0))
-    pad_x = max(10, round(16 * scale))
-    pad_y = max(8, round(12 * scale))
-    gap_y = max(4, round(6 * scale))
-    margin_x = max(12, round(frame_w * 0.028))
-    margin_y = max(12, round(frame_h * 0.04))
+    pad_x = max(6, min(round(16 * scale), max(6, frame_w // 8)))
+    pad_y = max(4, min(round(12 * scale), max(4, frame_h // 8)))
+    gap_y = max(2, min(round(6 * scale), max(2, frame_h // 16)))
+    margin_x = min(max(12, round(frame_w * 0.028)), max(0, (frame_w - 64) // 2))
+    margin_y = min(max(12, round(frame_h * 0.04)), max(0, (frame_h - 32) // 2))
 
-    card_w = _even(min(frame_w - 2 * margin_x, max(160, round(frame_w * 0.36))), minimum=64)
-    inner_w = max(32, card_w - 2 * pad_x)
+    max_card_w = _even(max(32, frame_w - 2 * margin_x), minimum=min(32, _even(frame_w, minimum=2)))
+    card_w = _even(min(max_card_w, max(160, round(frame_w * 0.36))), minimum=min(64, max_card_w))
+    card_w = min(card_w, _even(frame_w, minimum=2))
+    inner_w = max(16, card_w - 2 * pad_x)
 
     meta_font = _load_font(max(9, round(12 * scale)))
     title_font = _load_font(max(11, round(17 * scale)))
@@ -161,16 +163,23 @@ def render_hud_card(
         title_h = max(12, round(tb[3] - tb[1]))
         y_cursor += title_h + (gap_y if has_spec else 0)
 
-    spec_w = _even(inner_w, minimum=32) if has_spec else 0
+    spec_w = _even(inner_w, minimum=16) if has_spec else 0
     spec_h = _even(max(18, round(28 * scale)), minimum=16) if has_spec else 0
     spec_rel_y = y_cursor
+    max_card_h = _even(max(24, frame_h - 2 * margin_y), minimum=min(24, _even(frame_h, minimum=2)))
+    max_card_h = min(max_card_h, _even(frame_h, minimum=2))
+    if has_spec and spec_rel_y + spec_h + pad_y > max_card_h:
+        # Frame too small to fit text + spectrum bar; drop the spectrum bar so the card fits.
+        has_spec = False
+        spec_w = 0
+        spec_h = 0
     if has_spec:
         y_cursor += spec_h
 
-    card_h = _even(y_cursor + pad_y, minimum=24)
+    card_h = min(_even(y_cursor + pad_y, minimum=min(24, max_card_h)), max_card_h)
     card = Image.new("RGBA", (card_w, card_h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(card)
-    radius = max(6, round(10 * scale))
+    radius = min(max(4, round(10 * scale)), card_w // 2, card_h // 2)
     draw.rounded_rectangle(
         (0, 0, card_w - 1, card_h - 1),
         radius=radius,
@@ -191,8 +200,12 @@ def render_hud_card(
 
     is_right = hud.position.endswith("right")
     is_top = hud.position.startswith("top")
-    card_x = max(0, (frame_w - card_w - margin_x) if is_right else margin_x)
-    card_y = max(0, margin_y if is_top else (frame_h - card_h - margin_y))
+    card_x = (
+        max(0, frame_w - card_w - margin_x) if is_right else max(0, min(margin_x, frame_w - card_w))
+    )
+    card_y = (
+        max(0, min(margin_y, frame_h - card_h)) if is_top else max(0, frame_h - card_h - margin_y)
+    )
     return HudLayout(
         card_path=dst,
         card_x=card_x,
@@ -227,7 +240,12 @@ def _resolve_chapter_sources(
     stills_only = uses_stills_only(manifest, project.config)
     sources: list[LoopUnitSource] = []
     for shot_id in chapter.shot_ids:
-        shot = manifest.shot(shot_id)
+        try:
+            shot = manifest.shot(shot_id)
+        except KeyError as exc:
+            raise ConfigError(
+                f"Chapter '{chapter.id}' references unknown shot '{shot_id}'."
+            ) from exc
         if not stills_only:
             video = shot.video.selected or shot.video.best_attempt()
             if video is not None and video.path:
@@ -375,6 +393,8 @@ def _conform_unit_clip(
             "-y",
             "-v",
             "error",
+            "-protocol_whitelist",
+            "file",
             "-ss",
             f"{src.head_handle:.4f}",
             "-i",
@@ -419,6 +439,8 @@ def _conform_unit_clip(
         "-y",
         "-v",
         "error",
+        "-protocol_whitelist",
+        "file",
         "-loop",
         "1",
         "-framerate",
@@ -538,7 +560,7 @@ def _build_seamless_loop(
 
     inputs_argv: list[str] = []
     for unit_path in unit_paths:
-        inputs_argv.extend(["-i", str(unit_path)])
+        inputs_argv.extend(["-protocol_whitelist", "file", "-i", str(unit_path.resolve())])
 
     media.run(
         [
@@ -630,7 +652,9 @@ def _render_chapter_segment(
                 height=height,
                 fps=fps,
             )
-            inputs_argv.extend(["-stream_loop", "-1", "-i", str(loop_mp4)])
+            inputs_argv.extend(
+                ["-protocol_whitelist", "file", "-stream_loop", "-1", "-i", str(loop_mp4.resolve())]
+            )
         else:
             inputs_argv.extend(["-f", "lavfi", "-i", f"color=c=black:s={width}x{height}:r={fps}"])
 
@@ -645,13 +669,24 @@ def _render_chapter_segment(
             hud_input_idx = next_input
             next_input += 1
             inputs_argv.extend(
-                ["-loop", "1", "-framerate", str(fps), "-i", str(hud_layout.card_path)]
+                [
+                    "-protocol_whitelist",
+                    "file",
+                    "-loop",
+                    "1",
+                    "-framerate",
+                    str(fps),
+                    "-i",
+                    str(hud_layout.card_path.resolve()),
+                ]
             )
             if hud_layout.spec_w > 0 and hud_layout.spec_h > 0:
                 spec_input_idx = next_input
                 next_input += 1
                 inputs_argv.extend(
                     [
+                        "-protocol_whitelist",
+                        "file",
                         "-ss",
                         f"{chapter.start:.4f}",
                         "-t",
@@ -874,12 +909,18 @@ def assemble_mix(
                 "-y",
                 "-v",
                 "error",
+                "-protocol_whitelist",
+                "file",
                 "-f",
                 "concat",
                 "-i",
                 str(concat_path.resolve()),
+                "-protocol_whitelist",
+                "file",
                 "-i",
                 str(mix_path.resolve()),
+                "-protocol_whitelist",
+                "file",
                 "-f",
                 "ffmetadata",
                 "-i",

@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from mvdirector.audio.cues import format_cues_summary
 from mvdirector.audio.tracklist import resolve_chapters
 from mvdirector.config import ProjectConfig
-from mvdirector.errors import LLMError
+from mvdirector.errors import LLMError, LLMUnavailableError
 from mvdirector.llm import LLMClient, text_block
 from mvdirector.models import (
     Analysis,
@@ -327,6 +327,15 @@ def _request_llm_themes(
                 content=[text_block("\n\n".join(prompt_parts))],
                 schema=_MixThemesBatchReply,
             )
+        except LLMUnavailableError as exc:
+            log.warning(
+                "Mix theme LLM unavailable at batch %d..%d (%s); using deterministic themes for "
+                "remaining chapters.",
+                offset + 1,
+                offset + len(batch),
+                exc,
+            )
+            break
         except LLMError as exc:
             log.warning(
                 "Mix theme LLM batch %d..%d failed (%s); falling back to deterministic themes.",
@@ -390,6 +399,11 @@ def _chapter_sample_starts(
         if len(chosen) >= clips_per_seg:
             break
         if all(abs(cand - prev) >= min_sep for prev in chosen):
+            chosen.append(cand)
+    for cand in uniform:
+        if len(chosen) >= clips_per_seg:
+            break
+        if cand not in chosen:
             chosen.append(cand)
     for cand in uniform:
         if len(chosen) >= clips_per_seg:

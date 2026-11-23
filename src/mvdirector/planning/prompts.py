@@ -105,6 +105,12 @@ def fit_prompt_budget(prompt: str, max_chars: int, *, keep_tail: int = 2) -> str
     middle = sentences[1 : len(sentences) - len(tail)]
     reserved = len(head) + sum(len(t) + 1 for t in tail)
     if reserved >= max_chars:
+        tail_str = " ".join(tail)
+        if tail_str and len(tail_str) < max_chars:
+            head_budget = max_chars - len(tail_str) - 1
+            if head_budget >= 20:
+                return f"{head[:head_budget].rstrip()} {tail_str}"
+            return tail_str[:max_chars].rstrip()
         joined = " ".join([head, *tail])
         return joined[:max_chars].rstrip()
 

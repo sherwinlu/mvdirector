@@ -16,8 +16,16 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from mvdirector.errors import LLMError
 from mvdirector.llm.base import ChatBackend, Message, Reply, blocks_of, has_images
-from mvdirector.llm.http import IMAGE_WORDS, HttpJSON, check_response, error_message, json_body
+from mvdirector.llm.http import (
+    IMAGE_WORDS,
+    HttpJSON,
+    check_response,
+    error_message,
+    json_body,
+    redact_url,
+)
 
 log = logging.getLogger("mvdirector.llm")
 
@@ -84,7 +92,7 @@ class OllamaChat(ChatBackend):
             payload["format"] = "json"
         elif self._json_mode == "schema":
             payload["format"] = schema.model_json_schema()
-        hint = f"Is Ollama running at {self._base_url}? Start it with `ollama serve`."
+        hint = f"Is Ollama running at {redact_url(self._base_url)}? Start it with `ollama serve`."
         images = has_images(messages)
         words = IMAGE_WORDS if images else ()
         response = self._http.post(self._url, payload, unreachable_hint=hint, no_retry_words=words)
@@ -120,5 +128,14 @@ class OllamaChat(ChatBackend):
                 used,
                 self._num_ctx,
             )
-        text = (data.get("message") or {}).get("content") or ""
+        raw_message = data.get("message")
+        if raw_message is not None and not isinstance(raw_message, dict):
+            raise LLMError(f"Ollama returned an unexpected message field: {raw_message!r}")
+        raw_content = raw_message.get("content") if isinstance(raw_message, dict) else None
+        if raw_content is None:
+            text = ""
+        elif isinstance(raw_content, str):
+            text = raw_content
+        else:
+            raise LLMError(f"Ollama returned non-text content: {type(raw_content).__name__}")
         return Reply(text, truncated=data.get("done_reason") == "length")

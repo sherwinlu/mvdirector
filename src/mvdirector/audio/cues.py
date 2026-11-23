@@ -69,7 +69,7 @@ def _pick_local_peaks(
     min_distance_sec: float,
     count: int,
 ) -> list[float]:
-    """Select well-separated local maxima within ``[min_time, max_time]``."""
+    """Select well-separated local maxima within ``[min_time, max_time]``, strongest first."""
     if len(times) < 3:
         return []
     mask = (times >= min_time) & (times <= max_time)
@@ -96,7 +96,7 @@ def _pick_local_peaks(
             chosen.append(t)
         if len(chosen) >= count:
             break
-    return sorted(chosen)
+    return chosen
 
 
 def _first_sustained_energy_lift(

@@ -613,7 +613,9 @@ def prepare_project(
     pack_drums = stem_pack_mod.select_drum_stems(ingested_stems)
 
     vocals_path: Path
-    drums_path: Path | None = drums_target if (drums_target and drums_target.is_file()) else None
+    drums_path: Path | None = (
+        drums_target if (drums_target and not overwrite and drums_target.is_file()) else None
+    )
 
     if pack_vocals and (overwrite or not vocals_target.is_file()):
         log.info(
@@ -646,7 +648,11 @@ def prepare_project(
             sep = separator or DemucsSeparator(
                 model=prepare_cfg.stem_model, device=prepare_cfg.stem_device
             )
-            need_drums_out = drums_target if (drums_target and not drums_target.is_file()) else None
+            need_drums_out = (
+                drums_target
+                if (drums_target and (overwrite or not drums_target.is_file()))
+                else None
+            )
             stem_result = sep.separate(mix_path, vocals_target, drums_out=need_drums_out)
             vocals_path = stem_result.vocals
             if stem_result.drums is not None:

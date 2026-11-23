@@ -37,6 +37,8 @@ def sharpness(image: np.ndarray) -> float:
     grey = Image.fromarray(image).convert("L")
     grey.thumbnail((_SHARPNESS_SIDE, _SHARPNESS_SIDE))
     pixels = np.asarray(grey, dtype=np.float64)
+    if pixels.shape[0] < 3 or pixels.shape[1] < 3:
+        return 0.0
     laplacian = (
         -4.0 * pixels[1:-1, 1:-1]
         + pixels[:-2, 1:-1]

@@ -82,17 +82,21 @@ class WorkflowTemplate:
             raise WorkflowBindingError(
                 f"Bindings file for workflow '{name}' not found: {bindings_path}"
             )
+        allowed_root = (root or bindings_path.parent).resolve()
+        if root is not None and not bindings_path.resolve().is_relative_to(allowed_root):
+            raise WorkflowBindingError(
+                f"Bindings file for workflow '{name}' escapes the project folder ({allowed_root})."
+            )
         try:
             bindings = WorkflowBindings.model_validate_json(bindings_path.read_text("utf-8"))
             bindings.defaults = expand_env(bindings.defaults)
-        except (ValidationError, ConfigError) as exc:
+        except (ValidationError, ConfigError, OSError, UnicodeDecodeError) as exc:
             raise WorkflowBindingError(f"Invalid bindings file {bindings_path}:\n{exc}") from exc
         raw_workflow = Path(bindings.workflow)
         if raw_workflow.is_absolute():
             raise WorkflowBindingError(
                 f"Workflow '{name}' path '{bindings.workflow}' must be relative."
             )
-        allowed_root = (root or bindings_path.parent).resolve()
         graph_path = (bindings_path.parent / raw_workflow).resolve()
         if not graph_path.is_relative_to(allowed_root):
             raise WorkflowBindingError(
@@ -106,8 +110,13 @@ class WorkflowTemplate:
             )
         try:
             graph = json.loads(graph_path.read_text("utf-8"))
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
             raise WorkflowBindingError(f"{graph_path} is not valid JSON: {exc}") from exc
+        if not isinstance(graph, dict):
+            raise WorkflowBindingError(
+                f"{graph_path} must hold a JSON object of ComfyUI nodes, "
+                f"got {type(graph).__name__}."
+            )
         template = cls(name, bindings, graph)
         problems = template.problems()
         if problems:
@@ -133,15 +142,18 @@ class WorkflowTemplate:
         for param, targets in self.bindings.inputs.items():
             for target in targets:
                 node = self._graph.get(target.node)
-                if node is None:
+                if not isinstance(node, dict):
                     found.append(f"'{param}' is bound to node {target.node}, which does not exist")
-                elif target.field not in node.get("inputs", {}):
-                    available = ", ".join(sorted(node.get("inputs", {}))) or "none"
-                    found.append(
-                        f"'{param}' is bound to node {target.node} "
-                        f"({node.get('class_type', '?')}), which has no input '{target.field}' "
-                        f"(available: {available})"
-                    )
+                else:
+                    raw_inputs = node.get("inputs")
+                    node_inputs = raw_inputs if isinstance(raw_inputs, dict) else {}
+                    if target.field not in node_inputs:
+                        available = ", ".join(sorted(node_inputs)) or "none"
+                        found.append(
+                            f"'{param}' is bound to node {target.node} "
+                            f"({node.get('class_type', '?')}), which has no input "
+                            f"'{target.field}' (available: {available})"
+                        )
         for param in self.bindings.required:
             if param not in self.bindings.inputs:
                 found.append(f"Required parameter '{param}' has no binding")
@@ -372,10 +384,14 @@ def _drop_loader(graph: dict[str, Any], node_id: str) -> None:
     input); a fixed input left without a link is reported by ComfyUI when the job is queued.
     """
     node = graph.get(node_id)
-    if node is None or "Load" not in str(node.get("class_type", "")):
+    if not isinstance(node, dict) or "Load" not in str(node.get("class_type", "")):
         return
     del graph[node_id]
     for other in graph.values():
-        inputs = other.get("inputs", {})
+        if not isinstance(other, dict):
+            continue
+        inputs = other.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
         for name in [n for n, v in inputs.items() if isinstance(v, list) and v[:1] == [node_id]]:
             del inputs[name]

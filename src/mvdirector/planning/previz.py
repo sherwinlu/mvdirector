@@ -15,11 +15,11 @@ import logging
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from mvdirector.errors import ConfigError, LLMError
+from mvdirector.errors import ConfigError, ImagesNotSupportedError, LLMError
 from mvdirector.llm import LLMClient, image_block, text_block
-from mvdirector.models import Framing, Manifest, Shot, ShotType
+from mvdirector.models import Framing, Manifest, Shot, ShotType, validate_safe_id
 
 log = logging.getLogger(__name__)
 
@@ -48,11 +48,13 @@ class _PrevizBase(BaseModel):
 RGBChannel = Annotated[int, Field(ge=0, le=255)]
 RGBColor = tuple[RGBChannel, RGBChannel, RGBChannel]
 PositiveExtent = Annotated[float, Field(gt=0.0, le=100.0)]
+Coord = Annotated[float, Field(ge=-1000.0, le=1000.0)]
+Vec3 = tuple[Coord, Coord, Coord]
 
 
 class BlockingKeyframe(_PrevizBase):
     time: float = Field(ge=0.0)
-    position: tuple[float, float, float]
+    position: Vec3
     yaw_deg: float = 0.0
     scale: float = Field(default=1.0, gt=0.05, le=10.0)
     visible: bool = True
@@ -64,13 +66,18 @@ class BlockingActor(_PrevizBase):
     role: Literal["primary", "extra", "set", "prop"] = "set"
     color: RGBColor = (90, 100, 125)
     size: tuple[PositiveExtent, PositiveExtent, PositiveExtent] = (0.6, 1.7, 0.4)
-    keyframes: list[BlockingKeyframe] = Field(default_factory=list)
+    keyframes: list[BlockingKeyframe] = Field(default_factory=list, max_length=128)
+
+    @field_validator("id")
+    @classmethod
+    def _check_id(cls, value: str) -> str:
+        return validate_safe_id(value, "actor id")
 
 
 class CameraKeyframe(_PrevizBase):
     time: float = Field(ge=0.0)
-    eye: tuple[float, float, float]
-    look_at: tuple[float, float, float]
+    eye: Vec3
+    look_at: Vec3
     fov_deg: float = Field(default=48.0, ge=18.0, le=100.0)
 
 
@@ -78,8 +85,8 @@ class PrevizPlan(_PrevizBase):
     background_color: RGBColor = (18, 22, 32)
     grid_color: RGBColor = (48, 125, 145)
     stand_in_mapping: str = ""
-    actors: list[BlockingActor] = Field(default_factory=list)
-    camera: list[CameraKeyframe] = Field(default_factory=list)
+    actors: list[BlockingActor] = Field(default_factory=list, max_length=64)
+    camera: list[CameraKeyframe] = Field(default_factory=list, max_length=128)
 
 
 _CAMERA_BY_FRAMING: dict[Framing, tuple[tuple[float, float, float], tuple[float, float, float]]] = {
@@ -167,7 +174,7 @@ def default_previz_plan(shot: Shot, manifest: Manifest) -> PrevizPlan:
             CameraKeyframe(time=0.0, eye=start_eye, look_at=(0.0, target_y, 0.0), fov_deg=46.0),
             CameraKeyframe(
                 time=duration,
-                eye=(end_eye[0], end_eye[1], max(1.15, end_eye[2] * 0.85)),
+                eye=(end_eye[0], end_eye[1], max(1.15, start_eye[2] * 0.85)),
                 look_at=(0.0, target_y, 0.0),
                 fov_deg=44.0,
             ),
@@ -179,10 +186,14 @@ def _shot_previz_prompt(shot: Shot, manifest: Manifest) -> str:
     bible = manifest.visual_bible
     scene = bible.find_set(shot.setting)
     duration = max(0.5, round(shot.audio_slice.end - shot.audio_slice.start, 3))
-    cast = [
-        f"{cid or 'singer'} ({char.name or 'lead'})"
-        for cid, char, _ in manifest.visible_characters(shot)
-    ]
+    cast = (
+        [
+            f"{cid or 'singer'} ({char.name or 'lead'})"
+            for cid, char, _ in manifest.visible_characters(shot)
+        ]
+        if shot.type.shows_singer
+        else []
+    )
     return "\n".join(
         [
             f"Shot ID: {shot.id}",
@@ -207,18 +218,28 @@ def plan_previz(
     if llm is None:
         return default_previz_plan(shot, manifest)
 
-    content = []
-    if set_plate_path is not None and set_plate_path.is_file():
-        content.append(text_block("SET PLATE IMAGE (match this room layout and proportions):"))
-        content.append(image_block(set_plate_path))
-    content.append(text_block(_shot_previz_prompt(shot, manifest)))
+    prompt_block = text_block(_shot_previz_prompt(shot, manifest))
     try:
-        plan = llm.complete_json(system=PREVIZ_SYSTEM, content=content, schema=PrevizPlan)
+        content = []
+        has_image = False
+        if set_plate_path is not None and set_plate_path.is_file():
+            content.append(text_block("SET PLATE IMAGE (match this room layout and proportions):"))
+            content.append(image_block(set_plate_path))
+            has_image = True
+        content.append(prompt_block)
+        try:
+            plan = llm.complete_json(system=PREVIZ_SYSTEM, content=content, schema=PrevizPlan)
+        except ImagesNotSupportedError:
+            if not has_image:
+                raise
+            plan = llm.complete_json(
+                system=PREVIZ_SYSTEM, content=[prompt_block], schema=PrevizPlan
+            )
         if not plan.actors or len(plan.camera) < 1:
             log.warning("%s: LLM previz plan was incomplete; using default blocking", shot.id)
             return default_previz_plan(shot, manifest)
         return plan
-    except LLMError as exc:
+    except (LLMError, OSError) as exc:
         log.warning("%s: previz LLM planning failed (%s); using default blocking", shot.id, exc)
         return default_previz_plan(shot, manifest)
 
@@ -239,18 +260,33 @@ def refine_previz(
     if llm is None:
         raise ConfigError("`mvd previz refine` requires llm.enabled: true in project.yaml.")
 
-    content = []
-    if set_plate_path is not None and set_plate_path.is_file():
-        content.append(text_block("SET PLATE IMAGE (match this room layout and proportions):"))
-        content.append(image_block(set_plate_path))
-    content.append(
-        text_block(
-            f"{_shot_previz_prompt(shot, manifest)}\n\n"
-            f"CURRENT 3D BLOCKING PLAN:\n{current_plan.model_dump_json(indent=2)}\n\n"
-            f"REVISION FEEDBACK:\n{cleaned}"
-        )
+    prompt_block = text_block(
+        f"{_shot_previz_prompt(shot, manifest)}\n\n"
+        f"CURRENT 3D BLOCKING PLAN:\n{current_plan.model_dump_json(indent=2)}\n\n"
+        f"REVISION FEEDBACK:\n{cleaned}"
     )
-    refined = llm.complete_json(system=PREVIZ_SYSTEM, content=content, schema=PrevizPlan)
+    content = []
+    has_image = False
+    if set_plate_path is not None and set_plate_path.is_file():
+        try:
+            content.append(text_block("SET PLATE IMAGE (match this room layout and proportions):"))
+            content.append(image_block(set_plate_path))
+            has_image = True
+        except OSError as exc:
+            log.warning(
+                "%s: could not read set plate %s (%s); continuing without it",
+                shot.id,
+                set_plate_path,
+                exc,
+            )
+            content.clear()
+    content.append(prompt_block)
+    try:
+        refined = llm.complete_json(system=PREVIZ_SYSTEM, content=content, schema=PrevizPlan)
+    except ImagesNotSupportedError:
+        if not has_image:
+            raise
+        refined = llm.complete_json(system=PREVIZ_SYSTEM, content=[prompt_block], schema=PrevizPlan)
     if not refined.actors or len(refined.camera) < 1:
         raise ConfigError(f"{shot.id}: LLM returned an incomplete refined previz plan.")
     return refined

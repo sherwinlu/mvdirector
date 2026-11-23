@@ -124,13 +124,12 @@ def dp_phrase_cuts(
         Global shortest-path phrase-aware slicing inspired by ``JavaDerek/music-video-pipeline``
         (https://github.com/JavaDerek/music-video-pipeline — ``slicing.py:phrase_aware_slicing``).
     """
-    pts = sorted(
-        {
-            round(p, 3)
-            for p in [*candidate_points, 0.0, analysis.duration]
-            if 0.0 <= p <= analysis.duration
-        }
+    if analysis.duration <= 0.0:
+        return [0.0]
+    interior = sorted(
+        {round(p, 3) for p in candidate_points if 1e-6 < p < analysis.duration - 1e-6}
     )
+    pts = [0.0, *[p for p in interior if p < analysis.duration - 1e-6], analysis.duration]
     n = len(pts)
     if n <= 2:
         return pts
@@ -363,6 +362,9 @@ def cut_points(
     multi-character songs).
     """
     duration, bars = analysis.duration, analysis.bars
+    if not math.isfinite(duration) or duration <= 0.0:
+        return [0.0]
+    max_clip_seconds = max(0.1, video.max_clip_seconds)
     voices = {t.voice for t in analysis.vocal_turns}
     use_handoffs = (
         snap_sections or video.cut_mode == "phrases" or len(voices) >= 2 or BOTH_VOICES in voices
@@ -461,7 +463,7 @@ def cut_points(
     final = [merged[0]]
     for point in merged[1:]:
         span = point - final[-1]
-        parts = max(1, math.ceil(span / video.max_clip_seconds - 1e-9))
+        parts = max(1, math.ceil(span / max_clip_seconds - 1e-9))
         origin = final[-1]
         final += [origin + span * k / parts for k in range(1, parts + 1)]
     cuts = [round(p, 3) for p in final]
@@ -547,6 +549,8 @@ def segment(
     timeline = section_timeline(analysis)
     segments = []
     for start, end in zip(points[:-1], points[1:]):
+        if end <= start:
+            continue
         sung = sum(window.overlap(start, end) for window in analysis.vocal_windows)
         is_lipsync = sung / (end - start) >= video.lipsync_min_vocal_fraction
         segments.append(

@@ -18,9 +18,9 @@ from dataclasses import dataclass
 from pydantic import BaseModel, ConfigDict
 
 from mvdirector.config import RetryConfig
-from mvdirector.errors import LLMError
+from mvdirector.errors import LLMError, LLMUnavailableError
 from mvdirector.llm import LLMClient, text_block
-from mvdirector.models import AssetKind, AssetState, RetryStrategy, Shot
+from mvdirector.models import AssetKind, AssetState, RetryStrategy, Shot, ShotType
 from mvdirector.planning import prompts
 
 log = logging.getLogger(__name__)
@@ -62,12 +62,15 @@ class RetryPolicy:
         """Choose the next attempt's strategy and apply it to the asset's overrides."""
         state = shot.asset(kind)
         number = len(state.attempts) + 1
-        after_fallback = kind is AssetKind.VIDEO and shot.fallback_from is not None
+        after_fallback = shot.fallback_from is not None and (
+            kind is AssetKind.VIDEO or shot.type is ShotType.BROLL
+        )
+        has_note = bool(state.director_note and state.director_note.strip())
         if (
             kind is AssetKind.STILL
             and can_repair
-            and not state.director_note
-            and self.can_repair_still(state)
+            and not has_note
+            and self.can_repair_still(state, after_fallback=after_fallback)
         ):
             return AttemptPlan(
                 number=number,
@@ -88,14 +91,15 @@ class RetryPolicy:
         base = random.Random(key).randrange(_SEED_MODULUS)
         return knuth_seed(base, number)
 
-    def can_repair_still(self, state: AssetState) -> bool:
+    def can_repair_still(self, state: AssetState, *, after_fallback: bool = False) -> bool:
         """True when ``in_place_repair`` is enabled and the latest failed still is repairable.
 
         Inspired by ``afj176/open-cinema-studio`` (``studio.py:_repair_frame``).
         """
-        if not self._config.in_place_repair or not state.attempts:
+        prior = state.pass_attempts(after_fallback=after_fallback)
+        if not self._config.in_place_repair or not prior:
             return False
-        last = state.attempts[-1]
+        last = prior[-1]
         if last.path is None or last.qc is None or last.qc.passed:
             return False
         failed_names = {c.name for c in last.qc.failed_checks}
@@ -105,7 +109,7 @@ class RetryPolicy:
         return last.strategy is not RetryStrategy.REPAIR_STILL
 
     def _strategy_for(self, state: AssetState, *, after_fallback: bool = False) -> RetryStrategy:
-        if state.director_note:
+        if state.director_note and state.director_note.strip():
             return RetryStrategy.REWRITE_PROMPT
         prior = state.pass_attempts(after_fallback=after_fallback)
         if not prior:
@@ -138,8 +142,8 @@ class RetryPolicy:
         last_report = next((a.qc for a in reversed(prior) if a.qc is not None), None)
         issues = last_report.issues if last_report else []
         hints = last_report.fix_hints if last_report else []
-        if state.director_note:
-            hints = [state.director_note, *hints]
+        if state.director_note and state.director_note.strip():
+            hints = [state.director_note.strip(), *hints]
 
         if self._llm is not None:
             request = (
@@ -157,6 +161,13 @@ class RetryPolicy:
                 )
                 if reply.prompt.strip():
                     return reply.prompt.strip()
+            except LLMUnavailableError as exc:
+                log.warning(
+                    "Prompt rewrite unavailable for %s (%s); disabling LLM rewrites for this run",
+                    shot.id,
+                    exc,
+                )
+                self._llm = None
             except LLMError as exc:
                 log.warning("Prompt rewrite failed for %s (%s); appending fix hints", shot.id, exc)
 

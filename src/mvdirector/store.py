@@ -21,10 +21,12 @@ manifest never points at an asset that was not published. `Project` also stamps
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import socket
 import tempfile
+import time
 import uuid
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
@@ -159,48 +161,131 @@ class LocalStateStore:
         self._clear_stale_lock()
         return self.lock_path.exists()
 
-    def _clear_stale_lock(self) -> bool:
-        """Remove a lock file left behind by a dead local process. Returns True if cleared."""
-        if not self.lock_path.exists():
-            return False
-        try:
-            info = json.loads(self.lock_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return False
+    @property
+    def _reclaim_path(self) -> Path:
+        return self.root / ".run.lock.reclaim"
+
+    @staticmethod
+    def _is_stale_lock_info(info: object) -> bool:
         if not isinstance(info, dict):
             return False
         pid = info.get("pid")
         host = info.get("host")
-        if not isinstance(pid, int) or pid <= 0:
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
             return False
         # Only probe PID liveness when the lock was written on this machine.
         if host is not None and host != socket.gethostname():
             return False
-        if _pid_is_alive(pid):
+        return not _pid_is_alive(pid)
+
+    def _clear_stale_lock(self) -> bool:
+        """Remove a lock file left behind by a dead local process without racing live holders."""
+        try:
+            st_before = self.lock_path.stat()
+            info = json.loads(self.lock_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
             return False
-        self.lock_path.unlink(missing_ok=True)
-        return True
+        if not self._is_stale_lock_info(info):
+            return False
+
+        # Serialize concurrent stale-lock reclaimers so a second reclaimer cannot unlink a live
+        # lock newly created by the winner.
+        reclaim_fd: int | None = None
+        try:
+            reclaim_fd = os.open(self._reclaim_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                if time.time() - self._reclaim_path.stat().st_mtime > 30.0:
+                    self._reclaim_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return False
+        except OSError:
+            return False
+        try:
+            os.close(reclaim_fd)
+            reclaim_fd = None
+            try:
+                st_now = self.lock_path.stat()
+                if (st_now.st_dev, st_now.st_ino) != (st_before.st_dev, st_before.st_ino):
+                    return False
+                now_info = json.loads(self.lock_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return False
+            if not self._is_stale_lock_info(now_info):
+                return False
+            self.lock_path.unlink(missing_ok=True)
+            return True
+        finally:
+            if reclaim_fd is not None:
+                os.close(reclaim_fd)
+            self._reclaim_path.unlink(missing_ok=True)
+
+    def _acquire_lock_file(self, payload: str) -> tuple[int, int] | None:
+        """Create ``.run.lock`` atomically with ``payload`` already written (no 0-byte window)."""
+        self.root.mkdir(parents=True, exist_ok=True)
+        tmp_fd, tmp_name = tempfile.mkstemp(dir=self.root, prefix=".run.lock.", suffix=".tmp")
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+            tmp_stat = tmp_path.stat()
+            try:
+                os.link(tmp_path, self.lock_path)
+                return (tmp_stat.st_dev, tmp_stat.st_ino)
+            except OSError as exc:
+                if exc.errno == errno.EEXIST:
+                    raise FileExistsError from exc
+                if exc.errno not in (errno.EPERM, errno.EXDEV, errno.ENOTSUP, errno.EOPNOTSUPP):
+                    raise
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+        # Fallback for filesystems that disallow hard links.
+        fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+            st = self.lock_path.stat()
+            return (st.st_dev, st.st_ino)
+        except BaseException:
+            self.lock_path.unlink(missing_ok=True)
+            raise
 
     @contextmanager
     def lock(self) -> Iterator[None]:
         """Guard long-running writers so two processes never overwrite the manifest."""
-        self._clear_stale_lock()
+        payload = json.dumps(
+            {
+                "pid": os.getpid(),
+                "host": socket.gethostname(),
+                "started": utc_now(),
+                "token": uuid.uuid4().hex[:12],
+            }
+        )
+        owner_id: tuple[int, int] | None = None
+        for attempt in range(2):
+            try:
+                owner_id = self._acquire_lock_file(payload)
+                break
+            except FileExistsError as exc:
+                if attempt == 0 and self._clear_stale_lock():
+                    continue
+                raise ProjectLocked(
+                    f"Another run holds {self.lock_path}. If no run is active, delete the file."
+                ) from exc
         try:
-            fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError as exc:
-            raise ProjectLocked(
-                f"Another run holds {self.lock_path}. If no run is active, delete the file."
-            ) from exc
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(
-                    json.dumps(
-                        {"pid": os.getpid(), "host": socket.gethostname(), "started": utc_now()}
-                    )
-                )
             yield
         finally:
-            self.lock_path.unlink(missing_ok=True)
+            try:
+                if owner_id is None:
+                    self.lock_path.unlink(missing_ok=True)
+                else:
+                    st = self.lock_path.stat()
+                    if (st.st_dev, st.st_ino) == owner_id:
+                        self.lock_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _pid_is_alive(pid: int) -> bool:
@@ -217,7 +302,11 @@ def _load_model(path: Path, model: type[_ModelT], hint: str) -> _ModelT:
     if not path.is_file():
         raise ConfigError(f"{path.name} not found in {path.parent}. {hint}")
     try:
-        return model.model_validate_json(path.read_text(encoding="utf-8"))
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ConfigError(f"Could not read {path}: {exc}") from exc
+    try:
+        return model.model_validate_json(raw)
     except ValidationError as exc:
         raise ConfigError(f"{path} does not match the expected schema:\n{exc}") from exc
 

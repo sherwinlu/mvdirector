@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import math
+
 from mvdirector.models import CheckResult, CheckStatus, QCReport
 
 
@@ -14,6 +16,8 @@ def linear_score(value: float, bad: float, good: float) -> float:
 
     Works for metrics where lower is better too: pass ``bad`` greater than ``good``.
     """
+    if not (math.isfinite(value) and math.isfinite(bad) and math.isfinite(good)):
+        return 0.0
     if bad == good:
         return 1.0 if value >= good else 0.0
     return float(min(1.0, max(0.0, (value - bad) / (good - bad))))
@@ -31,7 +35,14 @@ def aggregate(checks: list[CheckResult], weights: dict[str, float], pass_score: 
     active = [c for c in checks if c.status is not CheckStatus.SKIPPED]
     for check in active:
         check.weight = weights.get(check.name, check.weight)
-    scored = [c for c in active if c.score is not None]
+    scored = [
+        c
+        for c in active
+        if c.score is not None
+        and math.isfinite(c.score)
+        and math.isfinite(c.weight)
+        and c.weight > 0.0
+    ]
     total_weight = sum(c.weight for c in scored)
     if total_weight > 0:
         score = sum((c.score or 0.0) * c.weight for c in scored) / total_weight

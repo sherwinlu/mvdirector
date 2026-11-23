@@ -135,10 +135,11 @@ def camelot_key(key: str | None) -> str | None:
 
 def load_mono(path: Path, sr: int = ANALYSIS_SR) -> np.ndarray:
     import librosa  # imported lazily: slow to import and unused by most commands
+    import soundfile as sf
 
     try:
         samples, _ = librosa.load(str(path), sr=sr, mono=True)
-    except librosa.util.exceptions.ParameterError as exc:
+    except (librosa.util.exceptions.ParameterError, sf.LibsndfileError, OSError) as exc:
         raise MediaToolError(
             f"{path.name} cannot be analyzed ({exc}); re-export it, e.g. as 24-bit PCM WAV."
         ) from exc
@@ -222,7 +223,7 @@ def bars_from_beats(beats: list[float], beats_per_bar: int) -> list[float]:
     librosa has no downbeat detector, so the bar phase can be off by a beat or two.
     Cuts still land on beats; edit ``bars`` in analysis.json to fix the phase.
     """
-    return beats[::beats_per_bar]
+    return beats[:: max(1, beats_per_bar)]
 
 
 def rms_envelope(samples: np.ndarray, sr: int = ANALYSIS_SR) -> tuple[np.ndarray, np.ndarray]:

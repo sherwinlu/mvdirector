@@ -75,18 +75,48 @@ def probe(path: Path) -> MediaInfo:
             str(path.resolve()),
         ]
     )
-    data = json.loads(result.stdout)
-    streams = data.get("streams", [])
-    video = next((s for s in streams if s.get("codec_type") == "video"), None)
-    fps = None
-    if video and video.get("avg_frame_rate") not in (None, "0/0"):
-        fps = float(Fraction(video["avg_frame_rate"]))
+    try:
+        data = json.loads(result.stdout)
+    except ValueError as exc:
+        raise MediaToolError(f"ffprobe returned invalid JSON for {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise MediaToolError(f"ffprobe returned unexpected JSON for {path}")
+    raw_streams = data.get("streams", [])
+    streams = raw_streams if isinstance(raw_streams, list) else []
+    video = next(
+        (s for s in streams if isinstance(s, dict) and s.get("codec_type") == "video"), None
+    )
+    fps: float | None = None
+    if video and video.get("avg_frame_rate") not in (None, "", "0/0", "N/A"):
+        try:
+            frac = Fraction(str(video["avg_frame_rate"]))
+            if frac > 0:
+                fps = float(frac)
+        except (ValueError, ZeroDivisionError):
+            fps = None
+    raw_duration = (data.get("format") or {}).get("duration", 0.0)
+    try:
+        duration = float(raw_duration)
+        if not math.isfinite(duration) or duration < 0.0:
+            duration = 0.0
+    except (TypeError, ValueError):
+        duration = 0.0
+    width: int | None = None
+    height: int | None = None
+    if video is not None:
+        try:
+            if video.get("width") is not None:
+                width = int(video["width"])
+            if video.get("height") is not None:
+                height = int(video["height"])
+        except (TypeError, ValueError):
+            width = height = None
     return MediaInfo(
-        duration=float(data.get("format", {}).get("duration", 0.0)),
-        width=int(video["width"]) if video else None,
-        height=int(video["height"]) if video else None,
+        duration=duration,
+        width=width,
+        height=height,
         fps=fps,
-        has_audio=any(s.get("codec_type") == "audio" for s in streams),
+        has_audio=any(isinstance(s, dict) and s.get("codec_type") == "audio" for s in streams),
     )
 
 
@@ -123,27 +153,37 @@ def transcode_to_wav(src: Path, dst: Path) -> Path:
 
 
 def slice_audio(src: Path, dst: Path, start: float, end: float) -> None:
-    """Cut [start, end] seconds of ``src`` into a mono-compatible PCM wav."""
+    """Cut [start, end] seconds of ``src`` into a mono-compatible PCM wav atomically."""
+    if not (math.isfinite(start) and math.isfinite(end)) or start < 0.0 or end <= start:
+        raise MediaToolError(f"Invalid audio slice span [{start}, {end}].")
     dst.parent.mkdir(parents=True, exist_ok=True)
-    run(
-        [
-            "ffmpeg",
-            "-y",
-            "-v",
-            "error",
-            "-protocol_whitelist",
-            "file",
-            "-ss",
-            f"{start:.4f}",
-            "-t",
-            f"{end - start:.4f}",
-            "-i",
-            str(src.resolve()),
-            "-c:a",
-            "pcm_s16le",
-            str(dst.resolve()),
-        ]
-    )
+    fd, tmp_name = tempfile.mkstemp(prefix=".mvd_slice_", suffix=".wav", dir=dst.parent)
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        run(
+            [
+                "ffmpeg",
+                "-y",
+                "-v",
+                "error",
+                "-protocol_whitelist",
+                "file",
+                "-ss",
+                f"{start:.4f}",
+                "-t",
+                f"{end - start:.4f}",
+                "-i",
+                str(src.resolve()),
+                "-c:a",
+                "pcm_s16le",
+                str(tmp_path.resolve()),
+            ]
+        )
+        os.replace(tmp_path, dst)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def mute_audio_spans(
@@ -207,34 +247,44 @@ def audio_to_black_video(
     if fps <= 0:
         raise MediaToolError(f"FPS must be positive, got {fps}.")
     dst.parent.mkdir(parents=True, exist_ok=True)
-    run(
-        [
-            "ffmpeg",
-            "-y",
-            "-v",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            f"color=c=black:s={width}x{height}:r={fps}",
-            "-i",
-            str(audio.resolve()),
-            "-shortest",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-movflags",
-            "+faststart",
-            str(dst.resolve()),
-        ]
-    )
+    fd, tmp_name = tempfile.mkstemp(prefix=".mvd_black_", suffix=".mp4", dir=dst.parent)
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        run(
+            [
+                "ffmpeg",
+                "-y",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                f"color=c=black:s={width}x{height}:r={fps}",
+                "-protocol_whitelist",
+                "file",
+                "-i",
+                str(audio.resolve()),
+                "-shortest",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-movflags",
+                "+faststart",
+                str(tmp_path.resolve()),
+            ]
+        )
+        os.replace(tmp_path, dst)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def extract_frames(video: Path, width: int, fps: float | None = None) -> list[np.ndarray]:
@@ -249,6 +299,8 @@ def extract_frames(video: Path, width: int, fps: float | None = None) -> list[np
                 "-y",
                 "-v",
                 "error",
+                "-protocol_whitelist",
+                "file",
                 "-i",
                 str(video.resolve()),
                 "-vf",
@@ -385,6 +437,8 @@ def extract_frame_at_index(video: Path, frame_index: int, dst: Path) -> Path:
                 "-y",
                 "-v",
                 "error",
+                "-protocol_whitelist",
+                "file",
                 "-i",
                 str(video.resolve()),
                 "-vf",
@@ -402,6 +456,8 @@ def extract_frame_at_index(video: Path, frame_index: int, dst: Path) -> Path:
                     "-y",
                     "-v",
                     "error",
+                    "-protocol_whitelist",
+                    "file",
                     "-sseof",
                     "-0.2",
                     "-i",
@@ -479,6 +535,8 @@ def _write_with_silent_audio(video_path: Path, dst: Path) -> None:
                         "-y",
                         "-v",
                         "error",
+                        "-protocol_whitelist",
+                        "file",
                         "-i",
                         str(video_path.resolve()),
                         "-f",

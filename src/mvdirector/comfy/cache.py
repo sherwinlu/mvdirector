@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -49,6 +50,8 @@ def _normalize_value(value: Any, uploaded_digests: Mapping[str, str]) -> Any:
     if isinstance(value, bool):
         return value
     if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"Non-finite float in ComfyUI graph: {value!r}")
         return int(value) if value.is_integer() else round(value, 6)
     if isinstance(value, str):
         if value in uploaded_digests:
@@ -106,7 +109,9 @@ def canonical_graph_key(
         "output_node": output_node,
         "extensions": sorted(ext.lower() for ext in extensions),
     }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(
+        "utf-8"
+    )
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -123,10 +128,24 @@ class ComfyRenderCache:
             raise ValueError(f"Invalid cache key: {key!r}")
         return self.cache_dir / key[:2] / f"{key}{safe_suffix}"
 
+    def _is_confined(self, path: Path) -> bool:
+        try:
+            cache_root = self.cache_dir.resolve()
+            return path.resolve().is_relative_to(cache_root)
+        except OSError:
+            return False
+
     def lookup(self, key: str, destination: Path) -> bool:
         """Copy a cached render into ``destination`` atomically if present. Returns True on hit."""
         entry = self._entry_path(key, destination.suffix or ".bin")
-        if entry.is_symlink() or not entry.is_file() or entry.stat().st_size == 0:
+        if (
+            self.cache_dir.is_symlink()
+            or entry.parent.is_symlink()
+            or entry.is_symlink()
+            or not self._is_confined(entry)
+            or not entry.is_file()
+            or entry.stat().st_size == 0
+        ):
             return False
         destination.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(
@@ -145,8 +164,16 @@ class ComfyRenderCache:
 
     def store(self, key: str, source: Path) -> Path:
         """Persist ``source`` into the content-addressed cache atomically."""
+        if source.is_symlink() or not source.is_file() or source.stat().st_size == 0:
+            raise ValueError(f"Cannot cache missing, empty, or symlinked source: {source}")
+        if self.cache_dir.is_symlink():
+            raise ValueError(f"Cache directory must not be a symlink: {self.cache_dir}")
         entry = self._entry_path(key, source.suffix or ".bin")
+        if entry.parent.is_symlink():
+            raise ValueError(f"Cache shard directory must not be a symlink: {entry.parent}")
         entry.parent.mkdir(parents=True, exist_ok=True)
+        if not self._is_confined(entry.parent):
+            raise ValueError(f"Cache entry parent escapes cache directory: {entry.parent}")
         fd, tmp_name = tempfile.mkstemp(prefix=f".{key[:12]}.", suffix=".part", dir=entry.parent)
         os.close(fd)
         tmp_path = Path(tmp_name)

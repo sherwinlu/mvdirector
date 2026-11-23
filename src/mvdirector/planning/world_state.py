@@ -183,7 +183,7 @@ def filter_look_for_state(look_text: str, active_states: Mapping[str, str]) -> s
     if not contradictions:
         return look_text
 
-    clauses = re.split(r"([,;.])", look_text)
+    clauses = re.split(r"([,;]|(?<!\d)\.(?=\s|$))", look_text)
     kept: list[str] = []
     i = 0
     while i < len(clauses):

@@ -984,7 +984,7 @@ def _expand_inline_section_if_needed(lines: list[str], section: str) -> list[str
             dumped = yaml.safe_dump(
                 {section: loaded}, sort_keys=False, width=1_000_000, allow_unicode=True
             )
-            block_lines = dumped.splitlines(keepends=True)
+            block_lines = [f"{ln}{newline}" for ln in dumped.splitlines()]
             if comment and block_lines:
                 first_body, first_nl = _split_line_ending(block_lines[0])
                 block_lines[0] = f"{first_body}{_format_comment_suffix(comment)}{first_nl}"
@@ -1109,12 +1109,6 @@ def apply_adjustments_to_yaml(yaml_path: Path, adjustments: list[Adjustment]) ->
             and parsed_before.get(section) is not None
         ):
             raise ConfigError(f"Section '{section}' in {yaml_path} must be a mapping or null.")
-        # If the section was `section: null`, `~`, or `{}`, normalize to `section:` header first.
-        sec_empty_re = re.compile(
-            rf"^{re.escape(section)}:[ \t]*(?:null|~|\{{[ \t]*\}})([ \t]*#[^\r\n]*)?(\r?)$",
-            re.MULTILINE,
-        )
-        updated_text = sec_empty_re.sub(rf"{section}:\1\2", updated_text)
         updated_text = update_yaml_scalar(
             updated_text, section, field, format_yaml_scalar(adj.recommended)
         )

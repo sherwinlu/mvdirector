@@ -41,6 +41,37 @@ def _has_control_chars(value: str) -> bool:
     return any(ord(ch) < 32 or ord(ch) == 127 for ch in value)
 
 
+def _validate_prompt_id(prompt_id: object, *, label: str) -> str:
+    if (
+        not isinstance(prompt_id, str)
+        or not prompt_id
+        or "/" in prompt_id
+        or "\\" in prompt_id
+        or ".." in prompt_id
+        or "?" in prompt_id
+        or "#" in prompt_id
+        or _has_control_chars(prompt_id)
+    ):
+        raise ComfyJobError(f"{label}: {prompt_id!r}")
+    return prompt_id
+
+
+def _is_safe_comfy_path(filename: object, subfolder: object) -> bool:
+    return (
+        isinstance(filename, str)
+        and bool(filename)
+        and "/" not in filename
+        and "\\" not in filename
+        and ".." not in filename
+        and not _has_control_chars(filename)
+        and isinstance(subfolder, str)
+        and not subfolder.startswith("/")
+        and "\\" not in subfolder
+        and ".." not in subfolder.split("/")
+        and not _has_control_chars(subfolder)
+    )
+
+
 def _json_dict(response: httpx.Response, label: str) -> dict[str, Any]:
     try:
         data = response.json()
@@ -163,7 +194,7 @@ class ComfyClient:
                 or "/" in class_type
                 or "\\" in class_type
                 or ".." in class_type
-                or any(ord(ch) < 32 or ord(ch) == 127 for ch in class_type)
+                or _has_control_chars(class_type)
             ):
                 raise ComfyJobError(f"Invalid ComfyUI node class_type: {class_type!r}")
             endpoint = f"/object_info/{urllib.parse.quote(class_type, safe='')}"
@@ -286,22 +317,12 @@ class ComfyClient:
             )
         body = _json_dict(response, "POST /upload/image")
         name = body.get("name")
-        raw_sub = body.get("subfolder") or ""
-        if (
-            not isinstance(name, str)
-            or not name
-            or "/" in name
-            or "\\" in name
-            or ".." in name
-            or _has_control_chars(name)
-            or not isinstance(raw_sub, str)
-            or raw_sub.startswith("/")
-            or "\\" in raw_sub
-            or ".." in raw_sub.split("/")
-            or _has_control_chars(raw_sub)
-        ):
+        raw_sub = body.get("subfolder")
+        subfolder_str = "" if raw_sub is None else raw_sub
+        if not _is_safe_comfy_path(name, subfolder_str):
             raise ComfyJobError(f"ComfyUI /upload/image returned an unsafe name: {body!r}")
-        return f"{raw_sub}/{name}" if raw_sub else name
+        assert isinstance(name, str) and isinstance(subfolder_str, str)
+        return f"{subfolder_str}/{name}" if subfolder_str else name
 
     def run(
         self,
@@ -341,33 +362,15 @@ class ComfyClient:
         body = _json_dict(response, "POST /prompt")
         if response.status_code == 400 or body.get("node_errors"):
             raise ComfyJobError(f"ComfyUI rejected the workflow: {_summarize_rejection(body)}")
-        prompt_id = body.get("prompt_id")
-        if (
-            not isinstance(prompt_id, str)
-            or not prompt_id
-            or "/" in prompt_id
-            or "\\" in prompt_id
-            or ".." in prompt_id
-            or "?" in prompt_id
-            or "#" in prompt_id
-            or _has_control_chars(prompt_id)
-        ):
-            raise ComfyJobError(f"ComfyUI returned an invalid prompt_id: {prompt_id!r}")
+        prompt_id = _validate_prompt_id(
+            body.get("prompt_id"), label="ComfyUI returned an invalid prompt_id"
+        )
         log.debug("Queued prompt %s", prompt_id)
         return prompt_id
 
     def wait(self, prompt_id: str) -> dict[str, Any]:
         """Block until the prompt finishes; return its history entry."""
-        if (
-            not prompt_id
-            or "/" in prompt_id
-            or "\\" in prompt_id
-            or ".." in prompt_id
-            or "?" in prompt_id
-            or "#" in prompt_id
-            or _has_control_chars(prompt_id)
-        ):
-            raise ComfyJobError(f"Invalid ComfyUI prompt_id: {prompt_id!r}")
+        _validate_prompt_id(prompt_id, label="Invalid ComfyUI prompt_id")
         encoded_id = urllib.parse.quote(prompt_id, safe="")
         started = time.monotonic()
         waited = 0.0
@@ -392,23 +395,18 @@ class ComfyClient:
 
     def download_output(self, entry: dict[str, Any], output: OutputSpec, destination: Path) -> Path:
         file_info = _pick_output(entry.get("outputs", {}), output)
-        filename = str(file_info.get("filename", ""))
-        subfolder = str(file_info.get("subfolder", ""))
+        raw_filename = file_info.get("filename")
+        raw_subfolder = file_info.get("subfolder")
+        subfolder = "" if raw_subfolder is None else raw_subfolder
         file_type = file_info.get("type", "output")
         if (
-            not filename
-            or "/" in filename
-            or "\\" in filename
-            or ".." in filename
-            or _has_control_chars(filename)
-            or subfolder.startswith("/")
-            or "\\" in subfolder
-            or ".." in subfolder.split("/")
-            or _has_control_chars(subfolder)
+            not _is_safe_comfy_path(raw_filename, subfolder)
             or not isinstance(file_type, str)
             or file_type not in _ALLOWED_OUTPUT_TYPES
         ):
             raise ComfyJobError(f"ComfyUI returned an unsafe output path: {file_info!r}")
+        assert isinstance(raw_filename, str) and isinstance(subfolder, str)
+        filename = raw_filename
         params = {
             "filename": filename,
             "subfolder": subfolder,

@@ -39,6 +39,18 @@ class CleanupPlan:
         return [*self.superseded, *self.orphaned, *self.cache_files]
 
 
+def _has_symlink_component(root: Path, relative: str | Path) -> bool:
+    """Return True if any path component under ``root`` for ``relative`` is a symlink."""
+    current = root
+    for part in Path(relative).parts:
+        if part in ("", "."):
+            continue
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
+
+
 def plan_cleanup(project: Project, manifest: Manifest) -> CleanupPlan:
     """What would be deleted; nothing is changed."""
     plan = CleanupPlan()
@@ -53,10 +65,11 @@ def plan_cleanup(project: Project, manifest: Manifest) -> CleanupPlan:
             for attempt in state.attempts:
                 if not attempt.path:
                     continue
+                is_symlinked = _has_symlink_component(project.root, attempt.path)
                 path = project.path(attempt.path)
                 if not settled or attempt.number == state.selected_attempt:
                     kept.add(path)
-                elif path.is_file() and not path.is_symlink():
+                elif not is_symlinked and path.is_file():
                     superseded_candidates.append(path)
     seen_superseded: set[Path] = set()
     for path in superseded_candidates:
@@ -64,8 +77,10 @@ def plan_cleanup(project: Project, manifest: Manifest) -> CleanupPlan:
             seen_superseded.add(path)
             plan.superseded.append(path)
     for folder in _GENERATION_FOLDERS:
+        if _has_symlink_component(project.root, folder):
+            continue
         root = project.path(folder)
-        if root.is_dir() and not root.is_symlink():
+        if root.is_dir():
             plan.orphaned += sorted(
                 p
                 for p in root.iterdir()
@@ -75,25 +90,26 @@ def plan_cleanup(project: Project, manifest: Manifest) -> CleanupPlan:
                 and p not in kept
                 and p not in seen_superseded
             )
-    seg_root = project.path("assets/segments")
-    if seg_root.is_dir() and not seg_root.is_symlink():
-        active_segments = {
-            path
-            for ch in manifest.chapters
-            for draft in (False, True)
-            for path in (
-                project.segment_video_path(ch.id, draft=draft),
-                project.segment_stamp_path(ch.id, draft=draft),
+    if not _has_symlink_component(project.root, "assets/segments"):
+        seg_root = project.path("assets/segments")
+        if seg_root.is_dir():
+            active_segments = {
+                path
+                for ch in manifest.chapters
+                for draft in (False, True)
+                for path in (
+                    project.segment_video_path(ch.id, draft=draft),
+                    project.segment_stamp_path(ch.id, draft=draft),
+                )
+            }
+            plan.orphaned += sorted(
+                p
+                for p in seg_root.iterdir()
+                if not p.is_symlink()
+                and p.is_file()
+                and _SEGMENT_CACHE_NAME.fullmatch(p.name)
+                and p not in active_segments
             )
-        }
-        plan.orphaned += sorted(
-            p
-            for p in seg_root.iterdir()
-            if not p.is_symlink()
-            and p.is_file()
-            and _SEGMENT_CACHE_NAME.fullmatch(p.name)
-            and p not in active_segments
-        )
     cache_root = project.root / ".comfy_cache"
     if cache_root.is_dir() and not cache_root.is_symlink():
         cache_files: list[Path] = []
@@ -115,7 +131,11 @@ def apply_cleanup(project: Project, manifest: Manifest, plan: CleanupPlan) -> No
     for shot in manifest.shots:
         for kind in AssetKind:
             for attempt in shot.asset(kind).attempts:
-                if attempt.path and project.path(attempt.path) in gone:
+                if (
+                    attempt.path
+                    and not _has_symlink_component(project.root, attempt.path)
+                    and project.path(attempt.path) in gone
+                ):
                     attempt.path = None
     for path in plan.files:
         if not path.is_symlink():

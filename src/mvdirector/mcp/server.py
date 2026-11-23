@@ -324,8 +324,8 @@ def serve_stdio(
         raw_line = in_stream.readline(limit + 1)
         if not raw_line:
             break
-        oversized = len(raw_line) > limit or (
-            len(raw_line) == limit and not raw_line.endswith("\n")
+        oversized = len(raw_line) > limit and not (
+            len(raw_line) == limit + 1 and raw_line.endswith("\n")
         )
         if oversized:
             # Drain the rest of the oversized frame so the next newline-delimited message parses.

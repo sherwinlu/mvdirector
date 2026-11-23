@@ -512,6 +512,8 @@ def _check_transcode_budget(
 
 def _store_stem_audio(src_audio: Path, dest_wav: Path, *, overwrite: bool) -> Path:
     """Place an audio file at ``dest_wav`` as PCM WAV atomically."""
+    if dest_wav.is_symlink():
+        raise ConfigError(f"Refusing to use symlinked stem destination: {dest_wav}")
     if dest_wav.is_file() and not overwrite:
         return dest_wav
     if src_audio.suffix.lower() == ".wav":
@@ -570,7 +572,9 @@ def extract_zip_stems(
                 role = classify_stem_name(basename)
                 stem_id = make_stem_id(label, ids)
                 dest_wav = dest_dir / f"{stem_id}.wav"
-                if not overwrite and dest_wav.is_file() and not dest_wav.is_symlink():
+                if dest_wav.is_symlink():
+                    raise ConfigError(f"Refusing to use symlinked stem destination: {dest_wav}")
+                if not overwrite and dest_wav.is_file():
                     extracted.append(IngestedStem(id=stem_id, name=label, role=role, path=dest_wav))
                     continue
 

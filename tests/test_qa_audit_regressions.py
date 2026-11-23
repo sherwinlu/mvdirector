@@ -1263,3 +1263,118 @@ def test_pass3_comfy_wait_zero_poll_timeout_and_mcp_503_socket_drain() -> None:
     finally:
         client_sock.close()
         srv_sock.close()
+
+
+def test_pr_review_pass1_symlink_target_decimal_split_stdio_eof_and_comfy_null_subfolder(
+    tmp_path: Path,
+) -> None:
+    import io
+
+    from mvdirector.mcp.server import serve_stdio
+
+    # 1. cleanup must never resolve and delete an in-project target of a superseded symlink.
+    proj_dir = tmp_path / "clean_proj"
+    api_mod.init_project(proj_dir)
+    project = Project.open(proj_dir)
+    ref_file = project.path("assets/reference/base_sheet.png")
+    ref_file.parent.mkdir(parents=True, exist_ok=True)
+    ref_file.write_bytes(b"KEEP_ME")
+    stills_dir = project.path("assets/stills")
+    stills_dir.mkdir(parents=True, exist_ok=True)
+    sym_attempt = stills_dir / "s001_a01.png"
+    sym_attempt.symlink_to(ref_file)
+    winner = stills_dir / "s001_a02.png"
+    winner.write_bytes(b"WINNER")
+    shot = _minimal_shot()
+    shot.still = AssetState(
+        status=AssetStatus.PASSED,
+        selected_attempt=2,
+        attempts=[
+            Attempt(
+                number=1,
+                strategy=RetryStrategy.INITIAL,
+                seed=1,
+                prompt="p",
+                path="assets/stills/s001_a01.png",
+            ),
+            Attempt(
+                number=2,
+                strategy=RetryStrategy.NEW_SEED,
+                seed=2,
+                prompt="p",
+                path="assets/stills/s001_a02.png",
+            ),
+        ],
+    )
+    manifest = Manifest(title="T", duration=4.0, fps=24, shots=[shot])
+    plan = cleanup_mod.plan_cleanup(project, manifest)
+    assert ref_file not in plan.files
+    cleanup_mod.apply_cleanup(project, manifest, plan)
+    assert ref_file.is_file() and ref_file.read_bytes() == b"KEEP_ME"
+
+    # 2. world_state preserves decimals (f/1.4, 2.39:1) while stripping contradictory sentences.
+    filtered = world_state_mod.filter_look_for_state(
+        "35mm f/1.4 anamorphic, 2.39:1 framing. Warm glowing lantern light. Deep blue night.",
+        {"lantern.illumination": "unlit"},
+    )
+    assert "f/1.4" in filtered
+    assert "2.39:1" in filtered
+    assert "glowing lantern" not in filtered
+    assert "Deep blue night." in filtered
+
+    # 3. serve_stdio accepts an exact-limit frame at EOF without trailing newline.
+    base_msg = '{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}'
+    exact_limit_msg = base_msg + " " * (1024 - len(base_msg))
+    assert len(exact_limit_msg) == 1024
+    out = io.StringIO()
+    serve_stdio(
+        MCPServer(allowed_roots=[tmp_path]),
+        stdin=io.StringIO(exact_limit_msg),
+        stdout=out,
+        max_line_bytes=1024,
+    )
+    resp = json.loads(out.getvalue().strip())
+    assert resp == {"jsonrpc": "2.0", "id": 1, "result": {}}
+
+    # 4. stem_pack rejects symlinked destination even when overwrite=False.
+    stems_dir = tmp_path / "stems_out"
+    stems_dir.mkdir()
+    decoy = tmp_path / "decoy.wav"
+    decoy.write_bytes(b"DECOY")
+    (stems_dir / "lead_vocals.wav").symlink_to(decoy)
+    zpath = tmp_path / "pack.zip"
+    with zipfile.ZipFile(zpath, "w") as zf:
+        zf.writestr("lead_vocals.wav", b"RIFF" + b"\x00" * 40)
+    with pytest.raises(ConfigError, match="symlinked stem destination"):
+        stem_pack_mod.extract_zip_stems(zpath, stems_dir, overwrite=False)
+
+    # 5. ComfyClient.download_output maps JSON null subfolder to "" rather than "None".
+    from mvdirector.comfy.workflow import OutputSpec
+
+    seen_params: list[dict[str, str]] = []
+
+    def _view_handler(req: httpx.Request) -> httpx.Response:
+        seen_params.append(dict(req.url.params))
+        return httpx.Response(200, content=b"PNG")
+
+    comfy = ComfyClient(
+        ComfyConfig(base_url="http://comfy.test", poll_interval=0.0),
+        transport=httpx.MockTransport(_view_handler),
+        sleep=lambda _: None,
+    )
+    try:
+        entry = {
+            "outputs": {
+                "1": {"images": [{"filename": "out.png", "subfolder": None, "type": "output"}]}
+            }
+        }
+        comfy.download_output(entry, OutputSpec(node="1"), tmp_path / "out.png")
+    finally:
+        comfy.close()
+    assert seen_params == [{"filename": "out.png", "subfolder": "", "type": "output"}]
+
+    # 6. tuning flow-section expansion preserves CRLF line endings.
+    crlf_yaml = "title: test\r\nvideo: {fps: 30}  # keep\r\n"
+    updated = tuning_mod.update_yaml_scalar(crlf_yaml, "video", "fps", "24")
+    assert "\r\n" in updated
+    assert "\n" not in updated.replace("\r\n", "")

@@ -13,29 +13,43 @@ import os
 import platform
 import re
 import shutil
+import subprocess
 import sys
+import time
 import urllib.parse
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 import httpx
 import yaml
 from pydantic import ValidationError
 
 from mvdirector.comfy.client import ComfyClient
+from mvdirector.comfy.workflow import WorkflowTemplate
 from mvdirector.config import (
     CONFIG_FILENAME,
     DEFAULT_LLM_MODEL,
     DEFAULT_LLM_PROVIDER,
     ComfyConfig,
+    LLMConfig,
     ProjectConfig,
+    is_allowed_api_key_env,
     is_allowed_env_var,
     mask_unset_allowed_env_refs,
 )
-from mvdirector.errors import ComfyConnectionError, ComfyJobError, ConfigError
-from mvdirector.models import ProjectMode
+from mvdirector.dotenv import merged_project_environ, write_project_dotenv_var
+from mvdirector.errors import (
+    ComfyConnectionError,
+    ComfyJobError,
+    ConfigError,
+    DependencyMissing,
+    MVDError,
+)
+from mvdirector.llm.check import LLMCheckResult, run_llm_check
+from mvdirector.llm.factory import PROVIDERS, build_llm
+from mvdirector.models import ProjectMode, VideoStyle
+from mvdirector.project import Project
 from mvdirector.store import atomic_write
 from mvdirector.tuning import (
     format_yaml_scalar,
@@ -46,6 +60,34 @@ from mvdirector.tuning import (
 DEFAULT_COMFY_URL = "http://127.0.0.1:8188"
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 DEFAULT_PROBE_TIMEOUT = 5.0
+_SAFE_OLLAMA_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+
+PROVIDER_ALIASES: dict[str, str] = {
+    "chatgpt": "openai",
+    "gpt": "openai",
+    "claude": "anthropic",
+    "google": "gemini",
+    "local": "ollama",
+}
+
+PROVIDER_MODEL_EXAMPLES: dict[str, str] = {
+    "openai": "gpt-4o",
+    "anthropic": "claude-sonnet-4-5",
+    "gemini": "gemini-2.5-flash",
+}
+
+
+def normalize_llm_provider(raw: str) -> str:
+    """Normalize user input (including friendly aliases like ``chatgpt`` or ``claude``)."""
+    cleaned = raw.strip().lower()
+    return PROVIDER_ALIASES.get(cleaned, cleaned)
+
+
+def provider_key_env(provider: str) -> str | None:
+    """Return the default API key env var for ``provider``, or None if none is required."""
+    info = PROVIDERS.get(provider)
+    return info.key_env if info is not None else None
+
 
 _VISION_MODEL_PREFIXES = (
     "gemma3",
@@ -148,7 +190,25 @@ class ComfyProbe:
     vram_total_gb: float | None = None
     vram_free_gb: float | None = None
     comfy_version: str | None = None
+    node_count: int | None = None
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class ComfyWiringReport:
+    """Summary of ComfyUI reachability, node registry, and local workflow wiring checks."""
+
+    url: str
+    reachable: bool
+    node_count: int | None = None
+    comfy_error: str | None = None
+    workflows_ok: list[str] = field(default_factory=list)
+    missing_exports: list[str] = field(default_factory=list)
+    issues: list[tuple[str, str]] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return self.reachable and not self.issues
 
 
 @dataclass(frozen=True)
@@ -181,6 +241,7 @@ class SetupOptions:
     llm_provider: str | None = None
     llm_model: str | None = None
     llm_base_url: str | None = None
+    llm_api_key_env: str | None = None
     qc_on_missing_dependency: str | None = None
     qc_vision_enabled: bool | None = None
     video_preset: str | None = None
@@ -215,11 +276,14 @@ def validate_comfy_token_env(name: str) -> str:
     return cleaned
 
 
-def _comfy_probe_headers(token_env: str | None) -> dict[str, str]:
+def _comfy_probe_headers(
+    token_env: str | None, *, environ: Mapping[str, str] | None = None
+) -> dict[str, str]:
     if not token_env:
         return {}
     validated = validate_comfy_token_env(token_env)
-    if not os.environ.get(validated, "").strip():
+    env = os.environ if environ is None else environ
+    if not env.get(validated, "").strip():
         return {}
     return {"Authorization": f"Bearer ${{{validated}}}"}
 
@@ -297,6 +361,8 @@ def probe_comfy(
     headers: dict[str, str] | None = None,
     timeout: float = DEFAULT_PROBE_TIMEOUT,
     transport: httpx.BaseTransport | None = None,
+    environ: Mapping[str, str] | None = None,
+    check_nodes: bool = False,
 ) -> ComfyProbe:
     """Check whether ComfyUI is reachable and read GPU/VRAM summary from ``/system_stats``."""
     try:
@@ -304,13 +370,25 @@ def probe_comfy(
     except ConfigError as exc:
         return ComfyProbe(url=base_url, reachable=False, error=str(exc))
 
+    env = os.environ if environ is None else environ
     try:
-        config = ComfyConfig(base_url=normalized, headers=headers or {}, request_timeout=timeout)
+        config = ComfyConfig.model_validate(
+            {"base_url": normalized, "headers": headers or {}, "request_timeout": timeout},
+            context={"environ": env},
+        )
     except (ConfigError, ValidationError) as exc:
         return ComfyProbe(url=normalized, reachable=False, error=str(exc))
+    node_count: int | None = None
     try:
         with ComfyClient(config, transport=transport) as client:
             stats = client.ping()
+            if check_nodes:
+                try:
+                    info = client.object_info()
+                except (ComfyConnectionError, ComfyJobError, ValueError):
+                    info = None
+                if isinstance(info, dict) and info:
+                    node_count = len(info)
     except (ComfyConnectionError, ComfyJobError, ValueError) as exc:
         return ComfyProbe(url=normalized, reachable=False, error=str(exc))
 
@@ -357,6 +435,7 @@ def probe_comfy(
         vram_total_gb=max_total,
         vram_free_gb=max_free,
         comfy_version=comfy_version,
+        node_count=node_count,
     )
 
 
@@ -367,13 +446,22 @@ def inspect_environment(
     ollama_url: str | None = None,
     comfy_transport: httpx.BaseTransport | None = None,
     ollama_transport: httpx.BaseTransport | None = None,
+    environ: Mapping[str, str] | None = None,
+    project_dir: Path | None = None,
+    check_nodes: bool = False,
 ) -> EnvironmentReport:
     """Inspect local tools, Python extras, Ollama, and ComfyUI readiness."""
-    resolved_comfy = comfy_url or os.environ.get("COMFY_URL", "").strip() or DEFAULT_COMFY_URL
-    resolved_ollama = ollama_url or os.environ.get("MVD_LLM_URL", "").strip() or DEFAULT_OLLAMA_URL
+    if environ is not None:
+        env: Mapping[str, str] = environ
+    elif project_dir is not None and project_dir.is_dir():
+        env = merged_project_environ(project_dir)
+    else:
+        env = os.environ
+    resolved_comfy = comfy_url or env.get("COMFY_URL", "").strip() or DEFAULT_COMFY_URL
+    resolved_ollama = ollama_url or env.get("MVD_LLM_URL", "").strip() or DEFAULT_OLLAMA_URL
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     plat = f"{platform.system()} {platform.machine()}".strip()
-    comfy_headers = _comfy_probe_headers(comfy_token_env)
+    comfy_headers = _comfy_probe_headers(comfy_token_env, environ=env)
     return EnvironmentReport(
         python_version=py_ver,
         platform_label=plat,
@@ -381,7 +469,252 @@ def inspect_environment(
         ffprobe_ok=shutil.which("ffprobe") is not None,
         extras=check_extras(),
         ollama=probe_ollama(resolved_ollama, transport=ollama_transport),
-        comfy=probe_comfy(resolved_comfy, headers=comfy_headers, transport=comfy_transport),
+        comfy=probe_comfy(
+            resolved_comfy,
+            headers=comfy_headers,
+            transport=comfy_transport,
+            environ=env,
+            check_nodes=check_nodes,
+        ),
+    )
+
+
+def is_ollama_installed() -> bool:
+    """Return True when the ``ollama`` CLI is on ``PATH``."""
+    return shutil.which("ollama") is not None
+
+
+def ollama_install_command(system: str | None = None) -> list[str] | None:
+    """Return a safe argv-list install command for the host OS package manager, or None."""
+    sys_name = system or platform.system()
+    if sys_name == "Darwin" and shutil.which("brew"):
+        return ["brew", "install", "ollama"]
+    if sys_name == "Windows" and shutil.which("winget"):
+        return [
+            "winget",
+            "install",
+            "--id",
+            "Ollama.Ollama",
+            "-e",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+        ]
+    return None
+
+
+def install_ollama(*, command: Sequence[str] | None = None) -> tuple[bool, str]:
+    """Run the OS package manager to install Ollama (no shell execution)."""
+    cmd = list(command) if command is not None else ollama_install_command()
+    if not cmd:
+        return (
+            False,
+            "No supported automatic installer found for this OS. "
+            "Install Ollama from https://ollama.com/download and re-run `mvd setup`.",
+        )
+    try:
+        proc = subprocess.run(cmd, check=False)
+    except OSError as exc:
+        return False, f"Failed to run {' '.join(cmd)}: {exc}"
+    if proc.returncode != 0:
+        return False, f"`{' '.join(cmd)}` exited with status {proc.returncode}."
+    return True, f"Installed Ollama via `{' '.join(cmd)}`."
+
+
+def start_ollama_server(
+    base_url: str = DEFAULT_OLLAMA_URL,
+    *,
+    wait_seconds: float = 10.0,
+    transport: httpx.BaseTransport | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> OllamaProbe:
+    """Start local ``ollama serve`` in the background and wait until ``/api/tags`` responds."""
+    try:
+        normalized = validate_http_url(base_url, "Ollama URL")
+    except ConfigError as exc:
+        return OllamaProbe(url=base_url, reachable=False, error=str(exc))
+    if not is_loopback_url(normalized):
+        return OllamaProbe(
+            url=normalized,
+            reachable=False,
+            error="Cannot auto-start a remote Ollama server; start it on that host.",
+        )
+    ollama_bin = shutil.which("ollama")
+    if not ollama_bin:
+        return OllamaProbe(
+            url=normalized, reachable=False, error="Ollama binary not found on PATH."
+        )
+    try:
+        subprocess.Popen(
+            [ollama_bin, "serve"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        return OllamaProbe(url=normalized, reachable=False, error=f"Failed to start Ollama: {exc}")
+
+    deadline = time.monotonic() + max(0.5, wait_seconds)
+    last_probe = OllamaProbe(url=normalized, reachable=False, error="Timed out starting Ollama")
+    while True:
+        last_probe = probe_ollama(normalized, timeout=2.0, transport=transport)
+        if last_probe.reachable or time.monotonic() >= deadline:
+            return last_probe
+        sleep(0.5)
+
+
+def pull_ollama_model(
+    model: str,
+    *,
+    base_url: str = DEFAULT_OLLAMA_URL,
+    transport: httpx.BaseTransport | None = None,
+) -> tuple[bool, str]:
+    """Pull an Ollama model tag safely via the local CLI or remote ``/api/pull`` endpoint."""
+    cleaned = model.strip()
+    if not _SAFE_OLLAMA_MODEL_RE.match(cleaned):
+        return False, f"Invalid Ollama model name: {model!r}"
+    try:
+        normalized = validate_http_url(base_url, "Ollama URL")
+    except ConfigError as exc:
+        return False, str(exc)
+
+    ollama_bin = shutil.which("ollama")
+    if is_loopback_url(normalized) and ollama_bin and transport is None:
+        try:
+            proc = subprocess.run([ollama_bin, "pull", cleaned], check=False)
+        except OSError as exc:
+            return False, f"Failed to run `ollama pull {cleaned}`: {exc}"
+        if proc.returncode != 0:
+            return False, f"`ollama pull {cleaned}` exited with status {proc.returncode}."
+        return True, f"Pulled Ollama model '{cleaned}'."
+
+    try:
+        with httpx.Client(timeout=600.0, transport=transport) as client:
+            resp = client.post(
+                f"{normalized}/api/pull",
+                json={"name": cleaned, "stream": False},
+            )
+    except httpx.HTTPError as exc:
+        return False, f"Could not pull '{cleaned}' from {normalized}: {exc}"
+    if resp.status_code >= 400:
+        return False, f"Ollama /api/pull returned HTTP {resp.status_code}: {resp.text[:200]}"
+    return True, f"Pulled Ollama model '{cleaned}' on {normalized}."
+
+
+def verify_llm_config(
+    config: LLMConfig,
+    *,
+    check_vision: bool = True,
+    environ: Mapping[str, str] | None = None,
+    transport: httpx.BaseTransport | None = None,
+    sleep: Callable[[float], None] | None = None,
+) -> LLMCheckResult:
+    """Run a live JSON (+ optional vision) sanity check against ``config``."""
+    if not config.enabled:
+        return LLMCheckResult(json_ok=True, vision="skipped")
+    try:
+        client = build_llm(config, environ=environ, transport=transport, sleep=sleep)
+    except (ConfigError, DependencyMissing) as exc:
+        msg = str(exc)
+        kind = "auth" if "api key" in msg.lower() else "error"
+        return LLMCheckResult(json_ok=False, json_detail=msg, json_error_kind=kind)  # type: ignore[arg-type]
+    if client is None:
+        return LLMCheckResult(json_ok=True, vision="skipped")
+    try:
+        return run_llm_check(client, check_vision=check_vision)
+    finally:
+        closer = getattr(client, "close", None)
+        if callable(closer):
+            closer()
+
+
+def _active_workflow_names(project: Project) -> list[str]:
+    if project.config.mode is ProjectMode.MIX:
+        return ["t2i"] if project.config.mix.visual_source == "stills" else ["t2i", "i2v"]
+    if project.config.planning.video_style is VideoStyle.VISUAL:
+        return ["t2i", "i2v"]
+    if project.config.planning.video_style is VideoStyle.NARRATIVE:
+        return ["t2i", "still", "i2v"]
+    return list(project.config.comfy.workflows)
+
+
+def check_comfy_wiring(
+    project_dir: Path,
+    *,
+    comfy_transport: httpx.BaseTransport | None = None,
+) -> ComfyWiringReport:
+    """Verify ComfyUI reachability, ``/object_info``, and any exported workflow bindings."""
+    project = Project.open(project_dir)
+    comfy_cfg = project.config.comfy
+    url = comfy_cfg.base_url
+    env = project.environ()
+
+    workflows_ok: list[str] = []
+    missing_exports: list[str] = []
+    issues: list[tuple[str, str]] = []
+    loaded_templates: dict[str, WorkflowTemplate] = {}
+
+    for name in _active_workflow_names(project):
+        if name not in comfy_cfg.workflows:
+            issues.append((f"workflow '{name}'", f"comfy.workflows has no entry for '{name}'"))
+            continue
+        bindings_path = project.path(Path(comfy_cfg.workflows_dir) / comfy_cfg.workflows[name])
+        if not bindings_path.is_file():
+            issues.append((f"workflow '{name}'", f"Bindings file not found: {bindings_path}"))
+            continue
+        try:
+            tpl = WorkflowTemplate.load(name, bindings_path, root=project.root, environ=env)
+        except MVDError as exc:
+            msg = str(exc)
+            if "which does not exist" in msg:
+                missing_exports.append(name)
+            else:
+                issues.append((f"workflow '{name}'", msg))
+        else:
+            loaded_templates[name] = tpl
+            workflows_ok.append(name)
+
+    reachable = False
+    node_count: int | None = None
+    comfy_error: str | None = None
+    try:
+        with ComfyClient(
+            comfy_cfg, transport=comfy_transport, upload_subfolder=project.comfy_subfolder
+        ) as comfy:
+            comfy.ping()
+            reachable = True
+            try:
+                info = comfy.object_info()
+            except MVDError:
+                info = {}
+            if isinstance(info, dict) and info:
+                node_count = len(info)
+                for wf_name, tpl in loaded_templates.items():
+                    bound_targets = {
+                        (str(t.node), t.field)
+                        for targets in tpl.bindings.inputs.values()
+                        for t in targets
+                    }
+                    live_issues = comfy.validate_graph_live(
+                        tpl.graph, object_info=info, skip_inputs=bound_targets
+                    )
+                    if live_issues:
+                        if wf_name in workflows_ok:
+                            workflows_ok.remove(wf_name)
+                        issues.append(
+                            (f"ComfyUI dependencies for '{wf_name}'", "; ".join(live_issues[:5]))
+                        )
+    except MVDError as exc:
+        comfy_error = str(exc)
+
+    return ComfyWiringReport(
+        url=url,
+        reachable=reachable,
+        node_count=node_count,
+        comfy_error=comfy_error,
+        workflows_ok=workflows_ok,
+        missing_exports=missing_exports,
+        issues=issues,
     )
 
 
@@ -410,6 +743,11 @@ def validate_setup_options(options: SetupOptions) -> None:
         raise ConfigError("llm.model must not be empty.")
     if options.llm_base_url:
         validate_http_url(options.llm_base_url, "LLM base URL")
+    if options.llm_api_key_env and not is_allowed_api_key_env(options.llm_api_key_env):
+        raise ConfigError(
+            f"llm.api_key_env {options.llm_api_key_env!r} is not allowed. "
+            "Use a standard provider key name, an MVD_* name, or list it in MVD_ALLOWED_ENV_VARS."
+        )
     if options.video_preset is not None and options.video_preset not in VIDEO_PRESETS:
         valid = ", ".join(VIDEO_PRESETS)
         raise ConfigError(f"Unknown video preset {options.video_preset!r}. Choose from: {valid}")
@@ -463,11 +801,6 @@ def _replace_section_field_block(
                 return "".join(lines)
 
     return update_yaml_scalar(text, section, field_name, formatted_val)
-
-
-def _mask_unset_allowed_env_refs(value: Any) -> Any:
-    """Replace unset allowed ``${VAR}`` placeholders so validation works pre-export."""
-    return mask_unset_allowed_env_refs(value)
 
 
 def apply_setup_config(project_dir: Path, options: SetupOptions) -> Path:
@@ -527,6 +860,13 @@ def apply_setup_config(project_dir: Path, options: SetupOptions) -> Path:
         else:
             normalized_llm = validate_http_url(options.llm_base_url, "LLM base URL")
             formatted_updates.append(("llm", "base_url", format_yaml_scalar(normalized_llm), False))
+    if options.llm_api_key_env is not None:
+        if options.llm_api_key_env == "":
+            formatted_updates.append(("llm", "api_key_env", format_yaml_scalar(None), False))
+        else:
+            formatted_updates.append(
+                ("llm", "api_key_env", format_yaml_scalar(options.llm_api_key_env.strip()), False)
+            )
 
     if options.qc_on_missing_dependency is not None:
         formatted_updates.append(
@@ -586,9 +926,10 @@ def apply_setup_config(project_dir: Path, options: SetupOptions) -> Path:
     if not isinstance(parsed_after, dict):
         raise ConfigError(f"Updated {yaml_path} must hold a YAML mapping at top level.")
 
-    to_validate = _mask_unset_allowed_env_refs(parsed_after)
+    effective_env = merged_project_environ(project_dir)
+    to_validate = mask_unset_allowed_env_refs(parsed_after, environ=effective_env)
     try:
-        ProjectConfig.model_validate(to_validate)
+        ProjectConfig.model_validate(to_validate, context={"environ": effective_env})
     except ValidationError as exc:
         raise ConfigError(f"Invalid configuration after setup in {yaml_path}:\n{exc}") from exc
 
@@ -658,6 +999,8 @@ def render_environment_report(report: EnvironmentReport) -> str:
                 details.append(f"VRAM {vram_free:.1f}/{vram_total:.1f} GiB free")
             else:
                 details.append(f"VRAM {report.comfy.vram_total_gb:.1f} GiB")
+        if report.comfy.node_count is not None:
+            details.append(f"{report.comfy.node_count} nodes")
         suffix = f" ({', '.join(details)})" if details else ""
         lines.append(f"  OK   ComfyUI at {report.comfy.url}{suffix}")
     else:
@@ -675,22 +1018,35 @@ __all__ = [
     "DEFAULT_LLM_MODEL",
     "DEFAULT_LLM_PROVIDER",
     "DEFAULT_OLLAMA_URL",
+    "PROVIDER_ALIASES",
+    "PROVIDER_MODEL_EXAMPLES",
     "VIDEO_PRESETS",
     "ComfyProbe",
+    "ComfyWiringReport",
     "EnvironmentReport",
     "ExtraStatus",
     "OllamaProbe",
     "SetupOptions",
     "VideoPreset",
     "apply_setup_config",
+    "check_comfy_wiring",
     "check_extras",
     "inspect_environment",
+    "install_ollama",
     "is_loopback_url",
+    "is_ollama_installed",
+    "normalize_llm_provider",
+    "ollama_install_command",
     "pick_default_ollama_model",
     "probe_comfy",
     "probe_ollama",
+    "provider_key_env",
+    "pull_ollama_model",
     "render_environment_report",
+    "start_ollama_server",
     "validate_comfy_token_env",
     "validate_http_url",
     "validate_setup_options",
+    "verify_llm_config",
+    "write_project_dotenv_var",
 ]

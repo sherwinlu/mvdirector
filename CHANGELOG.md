@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+- **Guided `mvd setup` Onboarding, Live Sanity Checks & Project-Scoped `.env`:**
+  - Interactive `mvd setup` now supports provider-first LLM setup (accepting aliases like `chatgpt` and `claude`): when `ollama` is chosen and not running locally, it offers to install Ollama (via Homebrew on macOS or winget on Windows), start `ollama serve`, and pull the chosen model; when a cloud LLM is chosen, it skips Ollama, prompts (masked) for the API key if unset, and offers to save secrets to an owner-only (`0600`), gitignored `<project>/.env` file (or keep them shell-only).
+  - Project-scoped `.env` loading (`mvdirector.dotenv`) reads only allowlisted LLM/ComfyUI secret keys with `O_NOFOLLOW` symlink checks and a 64 KiB cap without mutating `os.environ`, and shell exports always take precedence.
+  - Added `LLMQuotaError` (`LLMUnavailableError` subclass) to fail fast without wasted retries when a provider reports billing/quota exhaustion (`insufficient_quota`, `credit balance is too low`, HTTP `402`, etc.) and trip the vision QC circuit breaker cleanly.
+  - Interactive `mvd setup` (and `--non-interactive --verify`) now runs a live LLM JSON + vision sanity check (distinguishing invalid keys, quota limits, unknown models, and text-only models with interactive retry/switch recovery) and a ComfyUI `/object_info` + workflow wiring check (`api.check_comfy_wiring`).
+
 ## [0.8.0b1] - 2026-11-22
 
 First public **Beta** release, verified end-to-end both locally and with ComfyUI running on a remote host.

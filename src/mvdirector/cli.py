@@ -17,9 +17,16 @@ import typer
 
 from mvdirector import api, mix_assemble
 from mvdirector import setup as setup_mod
-from mvdirector.config import CONFIG_FILENAME, ReviewMode, load_config
+from mvdirector.config import CONFIG_FILENAME, LLMConfig, ReviewMode, load_config
+from mvdirector.dotenv import (
+    DOTENV_FILENAME,
+    is_allowed_dotenv_var,
+    merged_project_environ,
+    write_project_dotenv_var,
+)
 from mvdirector.errors import MVDError
 from mvdirector.generation.runner import RunEvent
+from mvdirector.llm.check import LLMCheckResult
 from mvdirector.models import AssetKind, Character, Manifest, ProjectMode, VideoStyle
 from mvdirector.project import Project
 from mvdirector.review import policy as review_policy
@@ -132,7 +139,7 @@ def init(
     typer.echo(f"Created {mode.value} project in {directory}. Next: {next_hint}")
 
 
-_VALID_SETUP_PROVIDERS = ("ollama", "openai_compatible", "anthropic", "openai", "gemini", "none")
+_VALID_SETUP_PROVIDERS = ("ollama", "openai", "anthropic", "gemini", "openai_compatible", "none")
 _CLOUD_KEY_HINTS = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
@@ -152,6 +159,149 @@ def _default_project_title(directory: Path) -> str:
     return cleaned.title() if cleaned and cleaned != "." else "My Song"
 
 
+def _has_provider_key(provider: str, key_env: str | None, env: dict[str, str]) -> bool:
+    if key_env and env.get(key_env, "").strip():
+        return True
+    return provider == "gemini" and bool(env.get("GOOGLE_API_KEY", "").strip())
+
+
+def _report_llm_check(result: LLMCheckResult) -> bool:
+    """Print live LLM sanity-check outcome; return True when JSON passed (vision ok or skipped)."""
+    if not result.json_ok:
+        kind = getattr(result, "json_error_kind", "")
+        headline = {
+            "auth": "Invalid or rejected API key",
+            "quota": "Usage or billing quota limit reached",
+            "rate_limit": "Provider rate limit reached",
+            "not_found": "Model or endpoint not found",
+            "unreachable": "Could not reach LLM server",
+        }.get(kind, "LLM sanity check failed")
+        typer.secho(f"  FAIL {headline}: {result.json_detail}", fg=typer.colors.RED)
+        if kind == "quota":
+            _yellow(
+                "       -> Top up/check billing limits on this account, enter a different key, "
+                "or switch to another provider or local Ollama."
+            )
+        elif kind == "auth":
+            _yellow("       -> Double-check your API key and permissions, then try again.")
+        return False
+
+    typer.secho(f"  OK   LLM JSON check passed ({result.json_seconds:.1f}s)", fg=typer.colors.GREEN)
+    if result.vision == "ok":
+        typer.secho(
+            f"  OK   LLM vision check passed ({result.vision_seconds:.1f}s)", fg=typer.colors.GREEN
+        )
+        return True
+    if result.vision == "skipped":
+        return True
+    if result.vision in ("unsupported", "wrong"):
+        _yellow(f"  WARN LLM vision check ({result.vision}): {result.vision_detail}")
+        return True
+    kind = getattr(result, "vision_error_kind", "")
+    prefix = (
+        "Usage/quota limit hit during vision check" if kind == "quota" else "Vision check failed"
+    )
+    typer.secho(f"  FAIL {prefix}: {result.vision_detail}", fg=typer.colors.RED)
+    return False
+
+
+def _report_comfy_wiring(wiring: setup_mod.ComfyWiringReport) -> None:
+    """Print ComfyUI connectivity, node registry, and exported workflow wiring results."""
+    typer.echo("\nComfyUI sanity check:")
+    if wiring.reachable:
+        nodes_note = f" ({wiring.node_count} node classes available)" if wiring.node_count else ""
+        typer.secho(f"  OK   ComfyUI reachable at {wiring.url}{nodes_note}", fg=typer.colors.GREEN)
+    else:
+        typer.secho(
+            f"  FAIL ComfyUI unreachable at {wiring.url}: {wiring.comfy_error}",
+            fg=typer.colors.RED,
+        )
+    for wf_name in wiring.workflows_ok:
+        typer.secho(
+            f"  OK   workflow '{wf_name}' bindings and ComfyUI nodes verified",
+            fg=typer.colors.GREEN,
+        )
+    for label, problem in wiring.issues:
+        typer.secho(f"  FAIL {label}: {problem}", fg=typer.colors.RED)
+    if wiring.missing_exports:
+        names = ", ".join(wiring.missing_exports)
+        _yellow(
+            f"  INFO Workflows not exported yet ({names}) — export .api.json from ComfyUI into "
+            "workflows/ and run `mvd validate` to verify node wiring."
+        )
+
+
+def _configure_ollama_interactive(
+    initial_probe: setup_mod.OllamaProbe,
+    ollama_url: str | None,
+    chosen_model: str | None,
+) -> tuple[setup_mod.OllamaProbe, str, str]:
+    """Ensure local or remote Ollama is running and select/pull a model."""
+    probe = initial_probe
+    resolved_url = (ollama_url or probe.url).rstrip("/")
+
+    if not probe.reachable and setup_mod.is_loopback_url(resolved_url):
+        if not setup_mod.is_ollama_installed():
+            install_cmd = setup_mod.ollama_install_command()
+            cmd_hint = f" via `{' '.join(install_cmd)}`" if install_cmd else ""
+            if typer.confirm(
+                f"Ollama is not running and not installed locally. Install Ollama now{cmd_hint}?",
+                default=bool(install_cmd),
+            ):
+                ok, msg = setup_mod.install_ollama(command=install_cmd)
+                if ok:
+                    typer.secho(f"  OK   {msg}", fg=typer.colors.GREEN)
+                    probe = setup_mod.start_ollama_server(resolved_url)
+                    if probe.reachable:
+                        typer.secho(
+                            f"  OK   Ollama is running at {probe.url}", fg=typer.colors.GREEN
+                        )
+                    else:
+                        _yellow(f"  WARN Ollama did not respond yet: {probe.error}")
+                else:
+                    _yellow(f"  WARN {msg}")
+            else:
+                alt_url = typer.prompt(
+                    "Ollama URL (press Enter to keep default or enter a remote Ollama URL)",
+                    default=resolved_url,
+                ).strip()
+                if alt_url and alt_url.rstrip("/") != resolved_url:
+                    resolved_url = setup_mod.validate_http_url(alt_url, "Ollama URL")
+                    probe = setup_mod.probe_ollama(resolved_url)
+        else:
+            if typer.confirm(
+                "Ollama is installed but not running. Start `ollama serve` now?", default=True
+            ):
+                probe = setup_mod.start_ollama_server(resolved_url)
+                if probe.reachable:
+                    typer.secho(f"  OK   Ollama is running at {probe.url}", fg=typer.colors.GREEN)
+                else:
+                    _yellow(f"  WARN Could not start Ollama: {probe.error}")
+
+    default_model = chosen_model or setup_mod.pick_default_ollama_model(probe.models)
+    if probe.models:
+        typer.echo(f"  Installed Ollama models: {', '.join(probe.models[:8])}")
+    selected_model = typer.prompt("Ollama model", default=default_model).strip()
+
+    if (
+        probe.reachable
+        and selected_model
+        and selected_model not in probe.models
+        and typer.confirm(
+            f"Model '{selected_model}' is not pulled in Ollama yet. Pull it now?", default=True
+        )
+    ):
+        ok, msg = setup_mod.pull_ollama_model(selected_model, base_url=resolved_url)
+        if ok:
+            typer.secho(f"  OK   {msg}", fg=typer.colors.GREEN)
+            probe = setup_mod.probe_ollama(resolved_url)
+        else:
+            _yellow(f"  WARN {msg}")
+
+    base_url_value = resolved_url if resolved_url != setup_mod.DEFAULT_OLLAMA_URL else ""
+    return probe, selected_model, base_url_value
+
+
 @app.command()
 def setup(
     directory: Path = typer.Argument(Path("."), help="Project folder to create or configure."),
@@ -164,7 +314,7 @@ def setup(
     comfy_url: str | None = typer.Option(
         None,
         "--comfy-url",
-        help="ComfyUI server URL — local or remote (default: COMFY_URL or http://127.0.0.1:8188).",
+        help="ComfyUI server URL — local, home LAN, or cloud (default: COMFY_URL or http://127.0.0.1:8188).",
     ),
     comfy_token_env: str | None = typer.Option(
         None,
@@ -179,10 +329,13 @@ def setup(
     llm_provider: str | None = typer.Option(
         None,
         "--llm-provider",
-        help="LLM provider: ollama, openai_compatible, anthropic, openai, gemini, or none.",
+        help=(
+            "LLM provider: ollama, openai (chatgpt), anthropic (claude), gemini, "
+            "openai_compatible, or none."
+        ),
     ),
     llm_model: str | None = typer.Option(
-        None, "--llm-model", help="LLM model name (e.g. gemma3:12b)."
+        None, "--llm-model", help="LLM model name (e.g. gemma3:12b, gpt-4o, claude-sonnet-4-5)."
     ),
     llm_base_url: str | None = typer.Option(
         None, "--llm-base-url", help="Custom LLM base URL (required for openai_compatible)."
@@ -197,25 +350,41 @@ def setup(
         "--non-interactive",
         help="Apply detected defaults and flags without prompting.",
     ),
+    verify: bool | None = typer.Option(
+        None,
+        "--verify/--no-verify",
+        help=(
+            "Run live LLM and ComfyUI sanity checks during setup "
+            "(on interactively, off with --non-interactive)."
+        ),
+    ),
     check_only: bool = typer.Option(
         False,
         "--check-only",
         help="Only inspect local tools and services, without creating or editing a project.",
     ),
 ) -> None:
-    """Inspect local prerequisites and interactively configure a project."""
+    """Inspect prerequisites, configure ComfyUI & LLM, and verify connectivity."""
+    session_env: dict[str, str] = (
+        merged_project_environ(directory) if directory.is_dir() else dict(os.environ)
+    )
+    run_verify = (not non_interactive) if verify is None else verify
+
     try:
         report = api.inspect_environment(
             comfy_url=comfy_url,
             comfy_token_env=comfy_token_env,
             ollama_url=ollama_url,
+            project_dir=directory if directory.is_dir() else None,
         )
     except MVDError as exc:
         raise _fail(exc) from exc
     typer.echo(setup_mod.render_environment_report(report))
 
     if check_only:
-        chosen_check_provider = (llm_provider or setup_mod.DEFAULT_LLM_PROVIDER).strip().lower()
+        chosen_check_provider = setup_mod.normalize_llm_provider(
+            llm_provider or setup_mod.DEFAULT_LLM_PROVIDER
+        )
         if chosen_check_provider not in _VALID_SETUP_PROVIDERS:
             valid = ", ".join(_VALID_SETUP_PROVIDERS)
             raise _fail(
@@ -245,7 +414,9 @@ def setup(
     chosen_title = title or _default_project_title(directory)
     chosen_comfy = comfy_url or report.comfy.url
     chosen_comfy_token_env: str | None = comfy_token_env
-    chosen_provider = (llm_provider or setup_mod.DEFAULT_LLM_PROVIDER).strip().lower()
+    chosen_provider = setup_mod.normalize_llm_provider(
+        llm_provider or setup_mod.DEFAULT_LLM_PROVIDER
+    )
     if chosen_provider not in _VALID_SETUP_PROVIDERS:
         valid = ", ".join(_VALID_SETUP_PROVIDERS)
         raise _fail(
@@ -256,6 +427,14 @@ def setup(
     if chosen_preset not in setup_mod.VIDEO_PRESETS:
         valid = ", ".join(setup_mod.VIDEO_PRESETS)
         raise _fail(MVDError(f"Unsupported --video-preset {chosen_preset!r}. Choose from: {valid}"))
+
+    pending_secrets: dict[str, str] = {}
+    ollama_probe = report.ollama
+    chosen_llm_enabled = chosen_provider != "none"
+    chosen_model: str | None = llm_model
+    chosen_llm_base_url: str | None = llm_base_url
+    chosen_llm_api_key_env: str | None = None
+    chosen_vision: bool | None = None
 
     if not non_interactive:
         chosen_title = typer.prompt("Project title", default=chosen_title).strip()
@@ -282,87 +461,234 @@ def setup(
                 except MVDError as exc:
                     _yellow(str(exc))
 
+        token_entered = False
+        if chosen_comfy_token_env and not session_env.get(chosen_comfy_token_env, "").strip():
+            raw_token = typer.prompt(
+                f"Enter Bearer token for {chosen_comfy_token_env} "
+                "(input hidden, leave blank to configure later)",
+                default="",
+                hide_input=True,
+                show_default=False,
+            ).strip()
+            if raw_token:
+                session_env[chosen_comfy_token_env] = raw_token
+                pending_secrets[chosen_comfy_token_env] = raw_token
+                token_entered = True
+
         if (
             chosen_comfy.rstrip("/") != report.comfy.url
             or chosen_comfy_token_env != comfy_token_env
+            or token_entered
         ):
             try:
                 reprobe = api.inspect_environment(
                     comfy_url=chosen_comfy,
                     comfy_token_env=chosen_comfy_token_env,
                     ollama_url=ollama_url,
+                    environ=session_env,
+                    check_nodes=True,
                 ).comfy
             except MVDError as exc:
                 raise _fail(exc) from exc
             if reprobe.reachable:
-                gpu = f" ({reprobe.devices[0]})" if reprobe.devices else ""
+                details: list[str] = []
+                if reprobe.devices:
+                    details.append(reprobe.devices[0])
+                if reprobe.node_count is not None:
+                    details.append(f"{reprobe.node_count} nodes")
+                suffix = f" ({', '.join(details)})" if details else ""
                 typer.secho(
-                    f"  OK   Connected to ComfyUI at {reprobe.url}{gpu}", fg=typer.colors.GREEN
+                    f"  OK   Connected to ComfyUI at {reprobe.url}{suffix}",
+                    fg=typer.colors.GREEN,
                 )
             else:
                 _yellow(f"  WARN Could not reach ComfyUI at {reprobe.url}: {reprobe.error}")
 
+        # Provider-first LLM configuration (with optional Ollama install or cloud API key check).
         providers_label = "/".join(_VALID_SETUP_PROVIDERS)
+        select_provider = True
+        force_key_prompt = False
         while True:
-            raw_provider = (
-                typer.prompt(f"LLM provider ({providers_label})", default=chosen_provider)
-                .strip()
-                .lower()
-            )
-            if raw_provider in _VALID_SETUP_PROVIDERS:
-                chosen_provider = raw_provider
+            if select_provider:
+                while True:
+                    raw_provider = typer.prompt(
+                        f"LLM provider ({providers_label}; aliases: chatgpt, claude)",
+                        default=chosen_provider,
+                    )
+                    normalized_provider = setup_mod.normalize_llm_provider(raw_provider)
+                    if normalized_provider in _VALID_SETUP_PROVIDERS:
+                        chosen_provider = normalized_provider
+                        break
+                    _yellow(f"Choose one of: {', '.join(_VALID_SETUP_PROVIDERS)}")
+                select_provider = False
+
+            chosen_llm_enabled = chosen_provider != "none"
+            chosen_vision = None
+            chosen_llm_api_key_env = None
+            if not chosen_llm_enabled:
+                chosen_provider = setup_mod.DEFAULT_LLM_PROVIDER
+                chosen_model = None
+                chosen_llm_base_url = None
+                chosen_vision = False
                 break
-            _yellow(f"Choose one of: {', '.join(_VALID_SETUP_PROVIDERS)}")
 
-    chosen_llm_enabled = chosen_provider != "none"
-    chosen_model: str | None = llm_model
-    chosen_llm_base_url: str | None = llm_base_url
-    chosen_vision: bool | None = None
-
-    if chosen_llm_enabled:
-        if chosen_provider == "ollama":
-            default_model = chosen_model or setup_mod.pick_default_ollama_model(
-                report.ollama.models
-            )
-            if not non_interactive:
-                if report.ollama.models:
-                    typer.echo(f"  Installed Ollama models: {', '.join(report.ollama.models[:8])}")
-                chosen_model = typer.prompt("Ollama model", default=default_model).strip()
-            else:
-                chosen_model = default_model
-            if chosen_llm_base_url is None:
-                chosen_llm_base_url = ollama_url if ollama_url else ""
-        elif chosen_provider == "openai_compatible":
-            default_base = chosen_llm_base_url or "http://127.0.0.1:1234/v1"
-            if not non_interactive:
+            if chosen_provider == "ollama":
+                ollama_probe, chosen_model, chosen_llm_base_url = _configure_ollama_interactive(
+                    ollama_probe, ollama_url, chosen_model
+                )
+            elif chosen_provider == "openai_compatible":
+                default_base = chosen_llm_base_url or "http://127.0.0.1:1234/v1"
                 chosen_llm_base_url = typer.prompt(
                     "OpenAI-compatible base URL", default=default_base
                 ).strip()
                 chosen_model = typer.prompt(
                     "Model name", default=chosen_model or "local-model"
                 ).strip()
+                raw_key_env = typer.prompt(
+                    "API key env var (blank if none, e.g. MVD_LLM_KEY)",
+                    default=chosen_llm_api_key_env or "",
+                ).strip()
+                if raw_key_env:
+                    chosen_llm_api_key_env = raw_key_env
+                    if force_key_prompt or not session_env.get(raw_key_env, "").strip():
+                        entered = typer.prompt(
+                            f"Enter API key for {raw_key_env} "
+                            "(input hidden, leave blank to configure later)",
+                            default="",
+                            hide_input=True,
+                            show_default=False,
+                        ).strip()
+                        if entered:
+                            session_env[raw_key_env] = entered
+                            if is_allowed_dotenv_var(raw_key_env):
+                                pending_secrets[raw_key_env] = entered
             else:
-                chosen_llm_base_url = default_base
-                chosen_model = chosen_model or "local-model"
-        else:
-            if not non_interactive:
+                if chosen_provider == "anthropic" and not report.extra_installed("anthropic"):
+                    _yellow(
+                        "Note: the 'anthropic' Python extra is not installed. "
+                        'Run: pip install -c constraints.txt -e ".[anthropic]"'
+                    )
+                example = setup_mod.PROVIDER_MODEL_EXAMPLES.get(chosen_provider, "")
+                hint = f" (e.g. {example})" if example else ""
                 chosen_model = typer.prompt(
-                    f"{chosen_provider} model name",
+                    f"{chosen_provider} model name{hint}",
                     default=chosen_model or "",
                 ).strip()
-            elif not chosen_model:
-                raise _fail(
-                    MVDError(
-                        "--llm-model is required with --non-interactive when "
-                        f"--llm-provider={chosen_provider}."
-                    )
-                )
-    else:
-        chosen_provider = setup_mod.DEFAULT_LLM_PROVIDER
-        chosen_model = None
-        chosen_vision = False
+                key_env = setup_mod.provider_key_env(chosen_provider)
+                if key_env and (
+                    force_key_prompt or not _has_provider_key(chosen_provider, key_env, session_env)
+                ):
+                    entered_key = typer.prompt(
+                        f"Enter your {chosen_provider} API key ({key_env}, input hidden; "
+                        "leave blank to configure later)",
+                        default="",
+                        hide_input=True,
+                        show_default=False,
+                    ).strip()
+                    if entered_key:
+                        session_env[key_env] = entered_key
+                        pending_secrets[key_env] = entered_key
 
-    if not non_interactive:
+            force_key_prompt = False
+            if not run_verify:
+                break
+
+            key_env = chosen_llm_api_key_env or setup_mod.provider_key_env(chosen_provider)
+            can_test = (
+                chosen_provider == "ollama"
+                or (
+                    chosen_provider == "openai_compatible"
+                    and (not key_env or bool(session_env.get(key_env, "").strip()))
+                )
+                or _has_provider_key(chosen_provider, key_env, session_env)
+            )
+            if not can_test:
+                _yellow(
+                    f"Skipping live {chosen_provider} check (no {key_env} provided yet). "
+                    "Run `mvd llm-check` after setting the key."
+                )
+                break
+
+            typer.echo(f"Testing {chosen_provider} ({chosen_model})...")
+            try:
+                candidate_llm = LLMConfig.model_validate(
+                    {
+                        "enabled": True,
+                        "provider": chosen_provider,
+                        "model": chosen_model,
+                        "base_url": chosen_llm_base_url or None,
+                        "api_key_env": chosen_llm_api_key_env,
+                    },
+                    context={"environ": session_env},
+                )
+            except ValueError as exc:
+                _yellow(f"Invalid LLM settings: {exc}")
+                action = (
+                    typer.prompt("Proceed with (retry/switch/continue)", default="retry")
+                    .strip()
+                    .lower()
+                )
+                if action == "switch":
+                    select_provider = True
+                    chosen_model = None
+                    chosen_llm_base_url = None
+                    continue
+                if action == "continue":
+                    break
+                continue
+
+            check_res = api.verify_llm_config(candidate_llm, check_vision=True, environ=session_env)
+            passed = _report_llm_check(check_res)
+            if passed:
+                if check_res.vision in ("unsupported", "wrong"):
+                    if typer.confirm(
+                        "Disable vision QC (qc.vision_enabled: false) for this text-only model?",
+                        default=True,
+                    ):
+                        chosen_vision = False
+                        break
+                    action = (
+                        typer.prompt(
+                            "Choose another model or switch provider? (retry/switch/continue)",
+                            default="retry",
+                        )
+                        .strip()
+                        .lower()
+                    )
+                    if action == "switch":
+                        select_provider = True
+                        chosen_model = None
+                        chosen_llm_base_url = None
+                        continue
+                    if action == "retry":
+                        continue
+                break
+
+            # Sanity check failed (bad API key, usage/quota limit, unknown model, etc.).
+            if (
+                key_env
+                and key_env in pending_secrets
+                and check_res.json_error_kind in ("auth", "quota")
+            ):
+                pending_secrets.pop(key_env, None)
+            action = (
+                typer.prompt(
+                    "LLM check failed — how would you like to proceed? (retry/switch/continue)",
+                    default="retry",
+                )
+                .strip()
+                .lower()
+            )
+            if action == "continue":
+                break
+            if action == "switch":
+                select_provider = True
+                chosen_model = None
+                chosen_llm_base_url = None
+                force_key_prompt = False
+                continue
+            force_key_prompt = check_res.json_error_kind in ("auth", "quota")
+
         typer.echo("Video model family presets:")
         for key, preset in setup_mod.VIDEO_PRESETS.items():
             typer.echo(f"  {key:<8} {preset.label}")
@@ -375,6 +701,28 @@ def setup(
                 chosen_preset = raw_preset
                 break
             _yellow(f"Choose one of: {', '.join(setup_mod.VIDEO_PRESETS)}")
+    else:
+        if chosen_llm_enabled:
+            if chosen_provider == "ollama":
+                chosen_model = chosen_model or setup_mod.pick_default_ollama_model(
+                    report.ollama.models
+                )
+                if chosen_llm_base_url is None:
+                    chosen_llm_base_url = ollama_url if ollama_url else ""
+            elif chosen_provider == "openai_compatible":
+                chosen_llm_base_url = chosen_llm_base_url or "http://127.0.0.1:1234/v1"
+                chosen_model = chosen_model or "local-model"
+            elif not chosen_model:
+                raise _fail(
+                    MVDError(
+                        "--llm-model is required with --non-interactive when "
+                        f"--llm-provider={chosen_provider}."
+                    )
+                )
+        else:
+            chosen_provider = setup_mod.DEFAULT_LLM_PROVIDER
+            chosen_model = None
+            chosen_vision = False
 
     qc_missing_policy: str | None = None
     if (
@@ -388,6 +736,15 @@ def setup(
     ):
         qc_missing_policy = "skip"
 
+    save_secrets_to_dotenv = False
+    if pending_secrets and not non_interactive:
+        secret_names = ", ".join(sorted(pending_secrets))
+        save_secrets_to_dotenv = typer.confirm(
+            f"Save {secret_names} to {directory / DOTENV_FILENAME} "
+            "(owner-only 0600, gitignored)? (No = keep in shell only)",
+            default=True,
+        )
+
     options = api.SetupOptions(
         title=chosen_title,
         mode=mode if is_new else None,
@@ -397,6 +754,7 @@ def setup(
         llm_provider=chosen_provider,
         llm_model=chosen_model,
         llm_base_url=chosen_llm_base_url,
+        llm_api_key_env=chosen_llm_api_key_env,
         qc_on_missing_dependency=qc_missing_policy,
         qc_vision_enabled=chosen_vision,
         video_preset=chosen_preset,
@@ -407,10 +765,54 @@ def setup(
     except MVDError as exc:
         raise _fail(exc) from exc
 
+    saved_secret_names: set[str] = set()
+    if save_secrets_to_dotenv and pending_secrets:
+        for secret_name, secret_val in pending_secrets.items():
+            try:
+                write_project_dotenv_var(directory, secret_name, secret_val)
+                saved_secret_names.add(secret_name)
+            except MVDError as exc:
+                _yellow(f"Could not save {secret_name} to {DOTENV_FILENAME}: {exc}")
+        if saved_secret_names:
+            typer.secho(
+                f"Saved {', '.join(sorted(saved_secret_names))} to {directory / DOTENV_FILENAME} "
+                "(mode 0600, added to .gitignore).",
+                fg=typer.colors.GREEN,
+            )
+
     action_word = "Created and configured" if is_new else "Updated"
     typer.secho(f"\n{action_word} {directory / CONFIG_FILENAME}", fg=typer.colors.GREEN)
 
-    if chosen_comfy_token_env and not os.environ.get(chosen_comfy_token_env):
+    # Non-interactive --verify runs live LLM check after writing config.
+    verify_failed = False
+    if non_interactive and run_verify and chosen_llm_enabled:
+        try:
+            proj = api.open_project(directory, pull=False)
+            res = api.verify_llm_config(
+                proj.config.llm,
+                check_vision=proj.config.qc.vision_enabled,
+                environ=proj.environ(),
+            )
+            if not _report_llm_check(res):
+                verify_failed = True
+        except MVDError as exc:
+            typer.secho(f"  FAIL LLM sanity check failed: {exc}", fg=typer.colors.RED)
+            verify_failed = True
+
+    if run_verify:
+        try:
+            wiring = api.check_comfy_wiring(directory)
+        except MVDError as exc:
+            _yellow(f"\nComfyUI wiring check skipped: {exc}")
+        else:
+            _report_comfy_wiring(wiring)
+            if not wiring.ok and non_interactive:
+                verify_failed = True
+
+    if chosen_comfy_token_env and (
+        chosen_comfy_token_env not in saved_secret_names
+        and not os.environ.get(chosen_comfy_token_env)
+    ):
         _yellow(
             f"Note: export {chosen_comfy_token_env}=<your-token> before running `mvd validate`."
         )
@@ -421,15 +823,17 @@ def setup(
 
     if chosen_llm_enabled and chosen_provider in _CLOUD_KEY_HINTS:
         env_var = _CLOUD_KEY_HINTS[chosen_provider]
-        if not os.environ.get(env_var):
+        if env_var not in saved_secret_names and not _has_provider_key(
+            chosen_provider, env_var, dict(os.environ)
+        ):
             _yellow(f"Note: export {env_var}=<your-key> before running `mvd llm-check`.")
 
     if (
         chosen_llm_enabled
         and chosen_provider == "ollama"
         and chosen_model
-        and report.ollama.reachable
-        and chosen_model not in report.ollama.models
+        and ollama_probe.reachable
+        and chosen_model not in ollama_probe.models
     ):
         _yellow(f"Note: '{chosen_model}' was not found in Ollama. Run: ollama pull {chosen_model}")
 
@@ -443,6 +847,9 @@ def setup(
         "  3. Export your ComfyUI workflows (.api.json) into workflows/ (see workflows/README.md)"
     )
     typer.echo("  4. Run `mvd validate` and `mvd llm-check` before `mvd analyze`")
+
+    if verify_failed:
+        raise typer.Exit(code=1)
 
 
 @app.command()

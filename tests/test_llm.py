@@ -917,10 +917,25 @@ def test_plain_text_error_bodies_are_shown():
 
 
 def test_persistent_rate_limiting_is_reported():
-    server = FakeServer(error_reply(429, "quota exceeded"))
-    with pytest.raises(LLMError, match="rate limiting requests \\(quota exceeded\\)"):
+    server = FakeServer(error_reply(429, "rate limit exceeded"))
+    with pytest.raises(LLMError, match="rate limiting requests \\(rate limit exceeded\\)"):
         ask(build(server))
     assert len(server.requests) == 3
+
+
+def test_quota_and_billing_exhaustion_fails_fast_without_retries():
+    from mvdirector.errors import LLMQuotaError, LLMUnavailableError
+
+    for provider, reply in (
+        ("openai", error_reply(429, "You exceeded your current quota (insufficient_quota)")),
+        ("gemini", error_reply(429, "Quota exceeded; please check your plan and billing details")),
+        ("openai_compatible", error_reply(402, "Payment required")),
+    ):
+        server = FakeServer(reply)
+        with pytest.raises(LLMQuotaError, match="usage or quota limit") as exc_info:
+            ask(build(server, provider=provider))
+        assert isinstance(exc_info.value, LLMUnavailableError)
+        assert len(server.requests) == 1
 
 
 def test_a_content_filtered_reply_is_reported():

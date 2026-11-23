@@ -678,12 +678,14 @@ class ShotRunner:
                 if path and template.accepts(param):
                     refs.append((param, self._project.path(path)))
         visible = self._manifest.visible_characters(shot)
-        if len(visible) > 1 and template.accepts("reference_image_2"):
-            _, sec_char, sec_state = visible[1]
+        for idx, (_, sec_char, sec_state) in enumerate(visible[1:], start=2):
+            param = f"reference_image_{idx}"
+            if not template.accepts(param):
+                continue
             sec_ref = sec_char.reference_for(sec_state)
             sec_front = sec_ref.panel("front") if sec_ref else None
             if sec_front is not None:
-                refs.append(("reference_image_2", self._project.path(sec_front)))
+                refs.append((param, self._project.path(sec_front)))
         if plate is not None:
             refs.append(("set_image", plate))
         return refs

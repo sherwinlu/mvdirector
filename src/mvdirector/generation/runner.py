@@ -672,15 +672,15 @@ class ShotRunner:
                 )
             # Single-reference workflows lose facial detail and pull framing too wide on close-ups
             # when given the full-body front panel; prefer the macro face panel when available.
-            primary_panel = (
-                reference.panel("face") or front
-                if (
-                    self._project.config.reference.closeup_face_panel
-                    and shot.framing is Framing.CLOSE_UP
-                    and not template.accepts("reference_face")
-                )
-                else front
+            face_rel = reference.panel("face")
+            use_face = (
+                self._project.config.reference.closeup_face_panel
+                and shot.framing is Framing.CLOSE_UP
+                and not template.accepts("reference_face")
+                and face_rel is not None
+                and self._project.path(face_rel).is_file()
             )
+            primary_panel = face_rel if use_face and face_rel is not None else front
             refs.append(("reference_image", self._project.path(primary_panel)))
         # Extra angles go only to workflows that bind them, so nothing is uploaded for nothing.
         if reference is not None:

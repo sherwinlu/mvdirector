@@ -154,6 +154,8 @@ class OpenAIChat(ChatBackend):
         check_response(
             response, provider=self._provider, key_hint=self._key_hint, had_images=images
         )
+        if events is None:
+            return self._parse(json_body(response, self._provider))
         return self._parse_sse(events)
 
     def _parse_sse(self, events: list[str]) -> Reply:
@@ -167,6 +169,13 @@ class OpenAIChat(ChatBackend):
                 continue
             if not isinstance(chunk, dict):
                 continue
+            err = chunk.get("error")
+            if err is not None:
+                if isinstance(err, dict):
+                    msg = str(err.get("message") or err.get("error") or err)
+                else:
+                    msg = str(err)
+                raise LLMError(f"{self._provider} stream error: {msg}")
             choices = chunk.get("choices")
             if not isinstance(choices, list) or not choices:
                 continue

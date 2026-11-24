@@ -11,6 +11,7 @@ pointing the app at a server of their own.
 
 from __future__ import annotations
 
+import codecs
 import logging
 import math
 import time
@@ -28,6 +29,7 @@ _RETRYABLE = {429, 500, 502, 503, 504}
 IMAGE_WORDS = ("image", "vision", "multimodal", "multi-modal")
 _KEY_WORDS = ("api key", "api_key", "apikey", "authentication", "unauthorized")
 _MAX_RETRY_AFTER = 30.0
+_MAX_SSE_BYTES = 16 * 1024 * 1024  # 16 MiB safety cap per streamed LLM response
 
 
 def _host_port(parts: Any) -> str:
@@ -137,16 +139,19 @@ class HttpJSON:
         *,
         unreachable_hint: str = "",
         no_retry_words: tuple[str, ...] = (),
-    ) -> tuple[httpx.Response, list[str]]:
+    ) -> tuple[httpx.Response, list[str] | None]:
         """POST JSON and collect SSE ``data:`` payloads while keeping reverse proxies alive.
 
         On non-2xx responses the full error body is read onto the returned ``httpx.Response`` so
-        callers can inspect it with ``check_response`` just like :meth:`post`.
+        callers can inspect it with ``check_response`` just like :meth:`post`. If the server
+        ignores ``stream: true`` and returns HTTP 200 ``application/json``, the body is read onto
+        ``response`` and ``None`` is returned for ``events`` so the caller can parse standard JSON.
         """
         last = ""
         for attempt in range(self._retries):
             final = attempt == self._retries - 1
             try:
+                deadline = time.monotonic() + self._timeout
                 with self._client.stream("POST", url, json=payload) as response:
                     if response.status_code != 200:
                         response.read()
@@ -162,15 +167,74 @@ class HttpJSON:
                             self._sleep(delay)
                             continue
                         return response, []
+                    content_type = (
+                        response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                    )
+                    if content_type == "application/json":
+                        raw_json = bytearray()
+                        for chunk in response.iter_bytes():
+                            if time.monotonic() > deadline:
+                                raise LLMUnavailableError(
+                                    f"The request to {origin(url)} timed out after "
+                                    f"{self._timeout:.0f} s. Raise llm.timeout_seconds for a "
+                                    "slow model."
+                                )
+                            if len(raw_json) + len(chunk) > _MAX_SSE_BYTES:
+                                raise LLMError(
+                                    f"Response from {origin(url)} exceeded "
+                                    f"{_MAX_SSE_BYTES} byte limit."
+                                )
+                            raw_json.extend(chunk)
+                        clean_headers = [
+                            (k, v)
+                            for k, v in response.headers.multi_items()
+                            if k.lower() not in ("content-encoding", "content-length")
+                        ]
+                        buffered = httpx.Response(
+                            status_code=response.status_code,
+                            headers=clean_headers,
+                            content=bytes(raw_json),
+                            request=response.request,
+                        )
+                        return buffered, None
                     events: list[str] = []
-                    for line in response.iter_lines():
-                        if not line or not line.startswith("data:"):
-                            continue
-                        data = line[5:].strip()
-                        if data == "[DONE]":
+                    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+                    buf = ""
+                    total_bytes = 0
+                    done = False
+                    for chunk in response.iter_bytes():
+                        if time.monotonic() > deadline:
+                            raise LLMUnavailableError(
+                                f"The request to {origin(url)} timed out after "
+                                f"{self._timeout:.0f} s. Raise llm.timeout_seconds for a slow "
+                                "model."
+                            )
+                        total_bytes += len(chunk)
+                        if total_bytes > _MAX_SSE_BYTES:
+                            raise LLMError(
+                                f"Streamed response from {origin(url)} exceeded "
+                                f"{_MAX_SSE_BYTES} byte limit."
+                            )
+                        buf += decoder.decode(chunk)
+                        while "\n" in buf:
+                            raw_line, buf = buf.split("\n", 1)
+                            line = raw_line.rstrip("\r")
+                            if not line or not line.startswith("data:"):
+                                continue
+                            data = line[5:].strip()
+                            if data == "[DONE]":
+                                done = True
+                                break
+                            if data:
+                                events.append(data)
+                        if done:
                             break
-                        if data:
-                            events.append(data)
+                    if not done:
+                        tail = (buf + decoder.decode(b"", final=True)).rstrip("\r")
+                        if tail.startswith("data:"):
+                            data = tail[5:].strip()
+                            if data and data != "[DONE]":
+                                events.append(data)
                     return response, events
             except httpx.InvalidURL as exc:
                 raise ConfigError(f"Invalid LLM URL: {exc}") from exc

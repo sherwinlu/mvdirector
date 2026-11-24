@@ -243,3 +243,159 @@ def test_openai_compatible_sse_streaming_handles_refusal() -> None:
         client.complete_json(
             system="system", content=[{"type": "text", "text": "user"}], schema=_DummyReply
         )
+
+
+def test_openai_sse_falls_back_to_json_and_surfaces_stream_errors() -> None:
+    cfg = LLMConfig(
+        provider="openai_compatible",
+        model="test-model",
+        base_url="http://127.0.0.1:8000/v1",
+        stream=True,
+    )
+
+    # Server ignores stream=True and returns standard application/json completion.
+    def json_handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={"choices": [{"message": {"content": '{"answer": "json-ok"}'}}]},
+        )
+
+    client = build_llm(cfg, transport=httpx.MockTransport(json_handler))
+    assert client is not None
+    reply = client.complete_json(
+        system="system", content=[{"type": "text", "text": "user"}], schema=_DummyReply
+    )
+    assert reply.answer == "json-ok"
+
+    # Server sends an in-stream error payload over HTTP 200 SSE.
+    def err_handler(_request: httpx.Request) -> httpx.Response:
+        sse = 'data: {"error":{"message":"context length exceeded"}}\n\ndata: [DONE]\n\n'
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=sse.encode("utf-8")
+        )
+
+    err_client = build_llm(cfg, transport=httpx.MockTransport(err_handler))
+    assert err_client is not None
+    with pytest.raises(LLMError, match="context length exceeded"):
+        err_client.complete_json(
+            system="system", content=[{"type": "text", "text": "user"}], schema=_DummyReply
+        )
+
+
+def test_openai_sse_enforces_byte_cap_and_wall_clock_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mvdirector.errors import LLMUnavailableError
+    from mvdirector.llm import http as llm_http
+
+    monkeypatch.setattr(llm_http, "_MAX_SSE_BYTES", 256)
+
+    class _HugeStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"' + b"x" * 512 + b'"}}]}\n\n'
+
+    cfg = LLMConfig(
+        provider="openai_compatible",
+        model="test-model",
+        base_url="http://127.0.0.1:8000/v1",
+        stream=True,
+        timeout_seconds=10,
+    )
+    client = build_llm(
+        cfg,
+        transport=httpx.MockTransport(
+            lambda _r: httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=_HugeStream()
+            )
+        ),
+    )
+    assert client is not None
+    with pytest.raises(LLMError, match="byte limit"):
+        client.complete_json(
+            system="system", content=[{"type": "text", "text": "user"}], schema=_DummyReply
+        )
+
+    # Trickle stream exceeding total wall-clock timeout raises LLMUnavailableError.
+    monkeypatch.setattr(llm_http, "_MAX_SSE_BYTES", 1024 * 1024)
+    times = iter([0.0, 100.0])
+    monkeypatch.setattr(llm_http.time, "monotonic", lambda: next(times, 100.0))
+
+    class _TrickleStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b": keep-alive\n\n"
+            yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+
+    slow_client = build_llm(
+        cfg,
+        transport=httpx.MockTransport(
+            lambda _r: httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=_TrickleStream()
+            )
+        ),
+    )
+    assert slow_client is not None
+    with pytest.raises(LLMUnavailableError, match="timed out"):
+        slow_client.complete_json(
+            system="system", content=[{"type": "text", "text": "user"}], schema=_DummyReply
+        )
+
+
+def test_closeup_face_panel_falls_back_to_front_when_face_file_missing(tmp_path: Path) -> None:
+    root = tmp_path / "proj"
+    (root / "assets" / "reference").mkdir(parents=True)
+    front_file = root / "assets" / "reference" / "front.png"
+    front_file.write_bytes(b"front")
+
+    wf_dir = root / "workflows"
+    wf_dir.mkdir(parents=True)
+    (wf_dir / "still.api.json").write_text(
+        json.dumps({"1": {"class_type": "LoadImage", "inputs": {"image": "x.png"}}})
+    )
+    (wf_dir / "still.bindings.json").write_text(
+        json.dumps(
+            {
+                "workflow": "still.api.json",
+                "inputs": {"reference_image": [{"node": "1", "field": "image"}]},
+                "required": ["reference_image"],
+                "output": {"node": "1", "extensions": [".png"]},
+            }
+        )
+    )
+
+    cfg = ProjectConfig()
+    cfg.reference.closeup_face_panel = True
+    project = Project(root, cfg)
+    ref = ReferenceSet(
+        panels={
+            "front": "assets/reference/front.png",
+            "face": "assets/reference/missing_face.png",
+        }
+    )
+    manifest = Manifest(
+        title="Test",
+        duration=4.0,
+        fps=24,
+        character=Character(references={"base": ref}),
+        shots=[],
+    )
+    runner = ShotRunner.__new__(ShotRunner)
+    runner._project = project
+    runner._manifest = manifest
+    from mvdirector.comfy.workflow import WorkflowTemplate
+
+    runner._templates = {
+        "still": WorkflowTemplate.load(wf_dir / "still.api.json", wf_dir / "still.bindings.json")
+    }
+    cu_shot = Shot(
+        id="s001",
+        index=0,
+        start=0.0,
+        end=2.0,
+        type=ShotType.LIPSYNC,
+        framing=Framing.CLOSE_UP,
+        wardrobe="base",
+        audio_slice=AudioSlice(path="assets/audio/s001.wav", start=0.0, end=2.0, head_handle=0.0),
+        num_frames=49,
+    )
+    assert runner._still_reference_paths(cu_shot, None) == [("reference_image", front_file)]

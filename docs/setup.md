@@ -94,7 +94,10 @@ llm:
   timeout_seconds: 600       # a local model can be slow when the GPU is busy
   json_mode: auto            # auto | off | object | schema
   context_tokens: null       # ollama: context window to request (default 16384)
+  stream: false              # openai / openai_compatible: stream the reply over SSE
 ```
+
+Set `llm.stream: true` when an `openai` or `openai_compatible` server sits behind a reverse proxy that drops idle connections (for example Cloudflare's 100-second HTTP 524 in front of RunPod vLLM): the reply then arrives in chunks that keep the connection alive. The whole reply is still bounded by `llm.timeout_seconds` and capped at 16 MiB, and a server that ignores `stream: true` and answers with plain JSON is handled too. Other providers ignore the setting.
 
 | Provider | For | Key variable | Default address |
 |---|---|---|---|

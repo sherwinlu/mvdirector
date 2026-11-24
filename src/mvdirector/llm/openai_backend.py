@@ -162,6 +162,7 @@ class OpenAIChat(ChatBackend):
         parts: list[str] = []
         refusal_parts: list[str] = []
         finish: str | None = None
+        saw_choice = False
         for raw in events:
             try:
                 chunk = json.loads(raw)
@@ -182,6 +183,7 @@ class OpenAIChat(ChatBackend):
             choice = choices[0]
             if not isinstance(choice, dict):
                 continue
+            saw_choice = True
             delta = choice.get("delta")
             if isinstance(delta, dict):
                 content = delta.get("content")
@@ -192,6 +194,10 @@ class OpenAIChat(ChatBackend):
                     refusal_parts.append(refusal)
             if isinstance(choice.get("finish_reason"), str):
                 finish = choice["finish_reason"]
+        if not saw_choice:
+            # Same contract as _parse(): an empty or non-SSE 200 body (an HTML proxy page, a
+            # stream closed before the first chunk) is an error, not a silently empty reply.
+            raise LLMError(f"{self._provider} returned no choices in its streamed reply.")
         text = "".join(parts)
         refusal_text = "".join(refusal_parts)
         if not text and refusal_text:

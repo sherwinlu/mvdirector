@@ -612,9 +612,10 @@ class PlanningConfig(_Section):
     vocals: Literal["auto", "solo", "multi"] = Field(
         default="auto",
         description=(
-            "How many vocalists sing on camera: 'auto' infers solo vs. duet from lyrics and "
-            "diarized vocal turns; 'solo' locks all singing shots to the primary protagonist so "
-            "secondary story characters never lip-sync; 'multi' allows duet/ensemble mapping."
+            "How many vocalists sing on camera: 'auto' (and 'multi', which currently behaves "
+            "the same) maps solo, duet and ensemble singers from lyrics and diarized vocal "
+            "turns; 'solo' locks all singing shots to the primary protagonist so secondary story "
+            "characters never lip-sync."
         ),
     )
     wardrobe_monotonic: bool = Field(

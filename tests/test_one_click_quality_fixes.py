@@ -283,6 +283,31 @@ def test_openai_sse_falls_back_to_json_and_surfaces_stream_errors() -> None:
         )
 
 
+def test_openai_sse_without_any_choice_chunk_raises_instead_of_empty_reply() -> None:
+    """A 200 body with no completion chunks must fail like the non-streaming 'no choices' path."""
+    cfg = LLMConfig(
+        provider="openai_compatible",
+        model="test-model",
+        base_url="http://127.0.0.1:8000/v1",
+        stream=True,
+    )
+    bodies = {
+        "text/html": b"<html><body>Gateway placeholder</body></html>",
+        "text/event-stream": b": keep-alive\n\ndata: [DONE]\n\n",
+    }
+    for content_type, body in bodies.items():
+
+        def handler(_request: httpx.Request, ct: str = content_type, b: bytes = body) -> Any:
+            return httpx.Response(200, headers={"content-type": ct}, content=b)
+
+        backend_client = build_llm(cfg, transport=httpx.MockTransport(handler))
+        assert backend_client is not None
+        with pytest.raises(LLMError, match="no choices"):
+            backend_client.complete_json(
+                system="system", content=[{"type": "text", "text": "user"}], schema=_DummyReply
+            )
+
+
 def test_openai_sse_enforces_byte_cap_and_wall_clock_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

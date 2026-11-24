@@ -14,7 +14,7 @@ The orchestrator runs on macOS, Linux, or Windows and is **setup-, model-, and C
 - **Automated test suite:** Extensive unit, integration, security, and pipeline tests cover audio analysis, shot timing, single- and multi-character direction, workflow templating and bindings, `ComfyClient` version compatibility, LLM backends, QC scoring and lip-sync maths, retry/review policies, MCP server hardening, path containment, safe identifier and env-var validation, schema migration, stale-lock recovery, and FFmpeg assembly.
 - **You must supply the workflows:** Export your own ComfyUI API workflows (`.api.json`) and map their inputs in `<name>.bindings.json` (see [Workflows & Model Bindings](docs/workflows.md)).
 - **QC thresholds are starting points:** Calibrate thresholds on 20 to 30 of your own clips with `mvd calibrate`, and inspect `mvd qc-report` before trusting the gates. The lip-sync check is advisory by default: on sung vocals it did not reliably separate in-sync clips from out-of-sync ones, so a weak score sends the clip to review instead of rejecting it, and a singing shot that runs out of attempts falls back to a performance shot (or optional Smart Cutaway rescue). See [Pipeline, Assets, Quality Checks & Review](docs/pipeline-and-qc.md).
-- **Duets:** the lead gets all four reference panels and the second singer gets only the front panel, so the second singer can drift more. Pin hair and signature details in `characters.<id>.invariants` for every character; they are written into every still prompt.
+- **Duets & bands:** the lead gets all four reference panels while secondary visible members bind their front panel (`reference_image_2`, `reference_image_3`, … when declared by the `still` workflow), so secondary members can drift more. Pin hair and signature details in `characters.<id>.invariants` for every character; they are written into every still prompt.
 
 ## How it works
 
@@ -51,15 +51,31 @@ Everything revolves around one file, `manifest.json`. Each stage reads it, does 
 
 > Getting started locally or with a remote ComfyUI server? Follow the step-by-step [Quickstart Guide](docs/local-quickstart.md) or run `mvd setup` to inspect your environment and configure a project interactively.
 
+**macOS / Linux:**
+
 ```bash
-brew install ffmpeg
-python -m venv .venv && source .venv/bin/activate
+brew install ffmpeg                                         # or: sudo apt-get install ffmpeg
+python3 -m venv .venv && source .venv/bin/activate
 pip install -c constraints.txt -e ".[qc,align,ui,dev]"      # add "anthropic" to use Claude
 ollama pull gemma3:12b                                      # default local LLM; or use any Ollama/cloud/OpenAI-compatible model (docs/setup.md)
 export COMFY_URL=http://127.0.0.1:8188                      # local, home LAN/Tailscale (http://192.168.x.x:8188), or remote cloud HTTPS URL
 
 mvd setup projects/my-song                   # or `mvd init projects/my-song` (add `--mode mix` for 30-90+ min mixes)
 cd projects/my-song
+```
+
+**Windows (PowerShell):**
+
+```powershell
+winget install Python.Python.3.12 Gyan.FFmpeg               # restart terminal after installing
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1                                # if blocked, run: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+pip install -c constraints.txt -e ".[qc,align,ui,dev]"      # add "anthropic" to use Claude
+ollama pull gemma3:12b                                      # default local LLM; or use any Ollama/cloud/OpenAI-compatible model (docs/setup.md)
+$env:COMFY_URL = "http://127.0.0.1:8188"                    # local, home LAN/Tailscale (http://192.168.x.x:8188), or remote cloud HTTPS URL
+
+mvd setup projects\my-song                                  # or `mvd init projects\my-song` (add `--mode mix` for 30-90+ min mixes)
+cd projects\my-song
 ```
 
 1. Put your song files in `inputs/`: `mix.wav`, `vocals.wav` (optionally a drum stem or DAW/Suno stem pack in `inputs/stems/`), `inputs/lyrics.txt` (`[Section]` tags and `(adlibs)`), and `inputs/style.md` — or start from a single `.mp3`/`.wav` file with `mvd prepare /path/to/song.mp3` (requires the `stems` and `align` extras), or draft lyrics and a brief first with `mvd brief --idea "..."`. For `mode: mix`, supply `inputs/mix.wav` and an optional `inputs/tracklist.json` (`.yaml`, `.cue`, `.csv`, or `.txt`).

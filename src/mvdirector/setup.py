@@ -16,7 +16,7 @@ import shutil
 import sys
 import urllib.parse
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -177,12 +177,18 @@ class SetupOptions:
     mode: ProjectMode | None = None
     comfy_url: str | None = None
     comfy_token_env: str | None = None
+    comfy_cache_enabled: bool | None = None
+    comfy_dedup_uploads: bool | None = None
+    comfy_sort_batch_for_cache: bool | None = None
+    comfy_min_free_vram_gb: float | None = None
     llm_enabled: bool | None = None
     llm_provider: str | None = None
     llm_model: str | None = None
     llm_base_url: str | None = None
     qc_on_missing_dependency: str | None = None
     qc_vision_enabled: bool | None = None
+    qc_vision_blind_observer: bool | None = None
+    retry_in_place_repair: bool | None = None
     video_preset: str | None = None
 
 
@@ -191,14 +197,24 @@ _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "host.docker.inter
 
 def is_loopback_url(url: str) -> bool:
     """Return True when ``url`` points to the local host (not a separate remote server)."""
-    parsed = urllib.parse.urlparse(url.strip())
-    host = (parsed.hostname or "").lower()
+    try:
+        parsed = urllib.parse.urlparse(url.strip())
+        host = (parsed.hostname or "").rstrip(".").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
     if host in _LOOPBACK_HOSTS:
         return True
     try:
-        return ipaddress.ip_address(host).is_loopback
+        addr = ipaddress.ip_address(host)
     except ValueError:
         return False
+    if addr.is_loopback:
+        return True
+    return isinstance(addr, ipaddress.IPv6Address) and (
+        addr.ipv4_mapped is not None and addr.ipv4_mapped.is_loopback
+    )
 
 
 def validate_comfy_token_env(name: str) -> str:
@@ -231,9 +247,16 @@ def validate_http_url(url: str, label: str = "URL") -> str:
         raise ConfigError(f"{label} must not be empty.")
     if any(ord(ch) < 32 or ord(ch) == 127 or ch.isspace() for ch in cleaned):
         raise ConfigError(f"{label} contains invalid whitespace or control characters.")
-    parsed = urllib.parse.urlparse(cleaned)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+    try:
+        parsed = urllib.parse.urlparse(cleaned)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise ConfigError(f"{label} is not a valid URL (got {url!r}): {exc}") from exc
+    if parsed.scheme not in ("http", "https") or not hostname:
         raise ConfigError(f"{label} must be an http:// or https:// URL with a host (got {url!r}).")
+    if port is not None and not (1 <= port <= 65535):
+        raise ConfigError(f"{label} port must be between 1 and 65535 (got {port}).")
     return cleaned.rstrip("/")
 
 
@@ -311,7 +334,7 @@ def probe_comfy(
     try:
         with ComfyClient(config, transport=transport) as client:
             stats = client.ping()
-    except (ComfyConnectionError, ComfyJobError, ValueError) as exc:
+    except (ComfyConnectionError, ComfyJobError, ConfigError, ValueError) as exc:
         return ComfyProbe(url=normalized, reachable=False, error=str(exc))
 
     devices: list[str] = []
@@ -364,6 +387,7 @@ def inspect_environment(
     *,
     comfy_url: str | None = None,
     comfy_token_env: str | None = None,
+    comfy_headers: dict[str, str] | None = None,
     ollama_url: str | None = None,
     comfy_transport: httpx.BaseTransport | None = None,
     ollama_transport: httpx.BaseTransport | None = None,
@@ -373,7 +397,11 @@ def inspect_environment(
     resolved_ollama = ollama_url or os.environ.get("MVD_LLM_URL", "").strip() or DEFAULT_OLLAMA_URL
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     plat = f"{platform.system()} {platform.machine()}".strip()
-    comfy_headers = _comfy_probe_headers(comfy_token_env)
+    merged_headers = dict(_comfy_probe_headers(comfy_token_env) or {})
+    if comfy_headers:
+        override_keys = {k.lower() for k in comfy_headers}
+        merged_headers = {k: v for k, v in merged_headers.items() if k.lower() not in override_keys}
+        merged_headers.update(comfy_headers)
     return EnvironmentReport(
         python_version=py_ver,
         platform_label=plat,
@@ -381,7 +409,9 @@ def inspect_environment(
         ffprobe_ok=shutil.which("ffprobe") is not None,
         extras=check_extras(),
         ollama=probe_ollama(resolved_ollama, transport=ollama_transport),
-        comfy=probe_comfy(resolved_comfy, headers=comfy_headers, transport=comfy_transport),
+        comfy=probe_comfy(
+            resolved_comfy, headers=merged_headers or None, transport=comfy_transport
+        ),
     )
 
 
@@ -398,6 +428,104 @@ def pick_default_ollama_model(
     return preferred
 
 
+def _recommended_min_free_vram_gb(comfy_probe: ComfyProbe | None) -> float | None:
+    """Return a conservative free-VRAM guard floor (GiB) for probed GPUs >= 8 GiB."""
+    if comfy_probe is None or not comfy_probe.reachable:
+        return None
+    total = comfy_probe.vram_total_gb
+    if total is None or isinstance(total, bool) or not math.isfinite(total) or total < 8.0:
+        return None
+    return round(min(6.0, max(2.0, total * 0.25)), 1)
+
+
+def read_project_yaml(project_dir: Path) -> dict[str, Any] | None:
+    """Parse an existing ``project.yaml`` mapping, or None if absent, symlinked or invalid."""
+    yaml_path = project_dir / CONFIG_FILENAME
+    if yaml_path.is_symlink() or not yaml_path.is_file():
+        return None
+    try:
+        raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError, RecursionError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def detect_project_mode(project_dir: Path) -> ProjectMode | None:
+    """Read the configured ``mode`` from an existing ``project.yaml``, or None if absent/invalid."""
+    raw = read_project_yaml(project_dir)
+    if raw is not None and isinstance(raw.get("mode"), str):
+        try:
+            return ProjectMode(raw["mode"].strip().lower())
+        except ValueError:
+            return None
+    return None
+
+
+# Auto-tuned SetupOptions fields -> the (section, key) they write in project.yaml. When a
+# project already sets one of these keys, re-running setup keeps the user's value.
+_TUNED_FIELD_KEYS: dict[str, tuple[str, str]] = {
+    "comfy_dedup_uploads": ("comfy", "dedup_uploads"),
+    "comfy_cache_enabled": ("comfy", "cache_enabled"),
+    "comfy_sort_batch_for_cache": ("comfy", "sort_batch_for_cache"),
+    "comfy_min_free_vram_gb": ("comfy", "min_free_vram_gb"),
+    "qc_vision_blind_observer": ("qc", "vision_blind_observer"),
+    "retry_in_place_repair": ("retry", "in_place_repair"),
+}
+
+
+def optimize_setup_options(
+    options: SetupOptions,
+    *,
+    comfy_probe: ComfyProbe | None = None,
+    project_mode: ProjectMode | None = None,
+    existing_config: dict[str, Any] | None = None,
+) -> SetupOptions:
+    """Pre-fill unset pipeline-tuning fields in ``options`` for the detected setup.
+
+    Explicit caller-provided values (anything other than ``None``) are always preserved, and
+    so are tuning keys an existing ``project.yaml`` (``existing_config``) already sets.
+    """
+    updates: dict[str, Any] = {}
+
+    if options.comfy_url is not None:
+        is_local = is_loopback_url(options.comfy_url)
+        if options.comfy_dedup_uploads is None:
+            updates["comfy_dedup_uploads"] = not is_local
+        if options.comfy_cache_enabled is None:
+            updates["comfy_cache_enabled"] = True
+        if options.comfy_sort_batch_for_cache is None:
+            updates["comfy_sort_batch_for_cache"] = True
+
+    if options.comfy_min_free_vram_gb is None:
+        recommended_vram = _recommended_min_free_vram_gb(comfy_probe)
+        if recommended_vram is not None:
+            updates["comfy_min_free_vram_gb"] = recommended_vram
+
+    if options.llm_enabled is False:
+        if options.qc_vision_enabled is None:
+            updates["qc_vision_enabled"] = False
+        if options.qc_vision_blind_observer is None:
+            updates["qc_vision_blind_observer"] = False
+    elif options.llm_enabled is True and options.qc_vision_blind_observer is None:
+        updates["qc_vision_blind_observer"] = False
+
+    effective_mode = options.mode if options.mode is not None else project_mode
+    if options.retry_in_place_repair is None:
+        updates["retry_in_place_repair"] = effective_mode is not ProjectMode.MIX
+
+    if existing_config:
+        for field_name, (section, key) in _TUNED_FIELD_KEYS.items():
+            current = existing_config.get(section)
+            if field_name in updates and isinstance(current, dict) and key in current:
+                del updates[field_name]
+
+    return replace(options, **updates) if updates else options
+
+
+_VALID_LLM_PROVIDERS = frozenset({"anthropic", "openai", "gemini", "ollama", "openai_compatible"})
+_VALID_MISSING_DEP_POLICIES = frozenset({"skip", "fail"})
+
+
 def validate_setup_options(options: SetupOptions) -> None:
     """Validate ``SetupOptions`` before creating or modifying any files on disk."""
     if options.title is not None and not options.title.strip():
@@ -406,10 +534,28 @@ def validate_setup_options(options: SetupOptions) -> None:
         validate_http_url(options.comfy_url, "ComfyUI URL")
     if options.comfy_token_env:
         validate_comfy_token_env(options.comfy_token_env)
+    if options.comfy_min_free_vram_gb is not None:
+        vram = options.comfy_min_free_vram_gb
+        if isinstance(vram, bool) or not math.isfinite(vram) or vram < 0.5 or vram > 256.0:
+            raise ConfigError("comfy.min_free_vram_gb must be a finite number between 0.5 and 256.")
+    if options.llm_provider is not None and options.llm_provider not in _VALID_LLM_PROVIDERS:
+        valid_providers = ", ".join(sorted(_VALID_LLM_PROVIDERS))
+        raise ConfigError(
+            f"Invalid configuration: unknown llm.provider {options.llm_provider!r}. "
+            f"Choose from: {valid_providers}"
+        )
     if options.llm_model is not None and not options.llm_model.strip():
         raise ConfigError("llm.model must not be empty.")
     if options.llm_base_url:
         validate_http_url(options.llm_base_url, "LLM base URL")
+    if (
+        options.qc_on_missing_dependency is not None
+        and options.qc_on_missing_dependency not in _VALID_MISSING_DEP_POLICIES
+    ):
+        raise ConfigError(
+            f"Invalid configuration: unknown qc.on_missing_dependency "
+            f"{options.qc_on_missing_dependency!r}. Choose from: fail, skip"
+        )
     if options.video_preset is not None and options.video_preset not in VIDEO_PRESETS:
         valid = ", ".join(VIDEO_PRESETS)
         raise ConfigError(f"Unknown video preset {options.video_preset!r}. Choose from: {valid}")
@@ -510,6 +656,32 @@ def apply_setup_config(project_dir: Path, options: SetupOptions) -> Path:
             formatted_updates.append(
                 ("comfy", "headers", f'{{Authorization: "Bearer ${{{token_env}}}"}}', True)
             )
+    if options.comfy_cache_enabled is not None:
+        formatted_updates.append(
+            ("comfy", "cache_enabled", format_yaml_scalar(options.comfy_cache_enabled), False)
+        )
+    if options.comfy_dedup_uploads is not None:
+        formatted_updates.append(
+            ("comfy", "dedup_uploads", format_yaml_scalar(options.comfy_dedup_uploads), False)
+        )
+    if options.comfy_sort_batch_for_cache is not None:
+        formatted_updates.append(
+            (
+                "comfy",
+                "sort_batch_for_cache",
+                format_yaml_scalar(options.comfy_sort_batch_for_cache),
+                False,
+            )
+        )
+    if options.comfy_min_free_vram_gb is not None:
+        formatted_updates.append(
+            (
+                "comfy",
+                "min_free_vram_gb",
+                format_yaml_scalar(options.comfy_min_free_vram_gb),
+                False,
+            )
+        )
 
     if options.llm_enabled is not None:
         formatted_updates.append(("llm", "enabled", format_yaml_scalar(options.llm_enabled), False))
@@ -540,6 +712,19 @@ def apply_setup_config(project_dir: Path, options: SetupOptions) -> Path:
     if options.qc_vision_enabled is not None:
         formatted_updates.append(
             ("qc", "vision_enabled", format_yaml_scalar(options.qc_vision_enabled), False)
+        )
+    if options.qc_vision_blind_observer is not None:
+        formatted_updates.append(
+            (
+                "qc",
+                "vision_blind_observer",
+                format_yaml_scalar(options.qc_vision_blind_observer),
+                False,
+            )
+        )
+    if options.retry_in_place_repair is not None:
+        formatted_updates.append(
+            ("retry", "in_place_repair", format_yaml_scalar(options.retry_in_place_repair), False)
         )
 
     if options.video_preset is not None:
@@ -686,9 +871,11 @@ __all__ = [
     "check_extras",
     "inspect_environment",
     "is_loopback_url",
+    "optimize_setup_options",
     "pick_default_ollama_model",
     "probe_comfy",
     "probe_ollama",
+    "read_project_yaml",
     "render_environment_report",
     "validate_comfy_token_env",
     "validate_http_url",

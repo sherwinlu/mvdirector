@@ -265,12 +265,14 @@ def inspect_environment(
     *,
     comfy_url: str | None = None,
     comfy_token_env: str | None = None,
+    comfy_headers: dict[str, str] | None = None,
     ollama_url: str | None = None,
 ) -> EnvironmentReport:
     """Inspect local tools, Python extras, Ollama, and ComfyUI readiness."""
     return setup_mod.inspect_environment(
         comfy_url=comfy_url,
         comfy_token_env=comfy_token_env,
+        comfy_headers=comfy_headers,
         ollama_url=ollama_url,
     )
 

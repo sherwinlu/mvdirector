@@ -732,6 +732,28 @@ _STILL_REF_ROLES = {
 }
 
 
+_EXTRA_STILL_REF_RE = re.compile(r"^reference_image_([1-9][0-9]*)\Z")
+
+
+def _extra_reference_index(name: str) -> int | None:
+    """Map ``reference_image_<N>`` (N >= 2) to its 0-based index in ``visible`` (N - 1)."""
+    match = _EXTRA_STILL_REF_RE.match(name)
+    if match is None:
+        return None
+    slot = int(match.group(1))
+    return slot - 1 if slot >= 2 else None
+
+
+def _still_ref_role(name: str) -> str | None:
+    role = _STILL_REF_ROLES.get(name)
+    if role is not None:
+        return role
+    extra_idx = _extra_reference_index(name)
+    if extra_idx is not None:
+        return f"performer #{extra_idx + 1}: keep their face, hair and costume"
+    return None
+
+
 def _still_reference_note(
     plate_attached: bool,
     reference_notation: str,
@@ -747,23 +769,25 @@ def _still_reference_note(
                 "layout, lighting and color grade exactly)."
             )
         return PLATE_NOTE
-    active = [name for name in bound_references if name in _STILL_REF_ROLES]
+    active: list[tuple[str, str]] = []
+    for name in bound_references:
+        role = _still_ref_role(name)
+        if role is not None:
+            active.append((name, role))
     if not active:
         return None
+    has_extra_char = any(_extra_reference_index(name) is not None for name, _ in active)
     if reference_notation == "prose":
-        if plate_attached and "reference_image_2" not in active:
+        if plate_attached and not has_extra_char:
             return PLATE_NOTE
-        if "reference_image_2" not in active:
+        if not has_extra_char:
             return None
         clauses = []
-        for index, name in enumerate(active):
-            role = _STILL_REF_ROLES[name]
+        for index, (_, role) in enumerate(active):
             ordinal = _ORDINALS[index] if index < len(_ORDINALS) else f"#{index + 1}"
             clauses.append(f"The {ordinal} reference image shows {role}.")
         return " ".join(clauses)
-    clauses = [
-        f"@image{index + 1} shows {_STILL_REF_ROLES[name]}." for index, name in enumerate(active)
-    ]
+    clauses = [f"@image{index + 1} shows {role}." for index, (_, role) in enumerate(active)]
     return " ".join(clauses)
 
 
@@ -1060,7 +1084,10 @@ def compose_still_prompt(
         if (
             bound_references
             and len(visible) >= 1
-            and ("reference_image_2" in bound_references or "set_image" in bound_references)
+            and (
+                any(_extra_reference_index(param) is not None for param in bound_references)
+                or "set_image" in bound_references
+            )
             and reference_notation != "tags"
         ):
             # Explicit Picture N identity disambiguation (clean-room concept inspired by
@@ -1070,8 +1097,13 @@ def compose_still_prompt(
                 if param == "reference_image":
                     p_label = visible[0][1].name or visible[0][0] or "the primary singer"
                     slot_notes.append(f"Picture {slot_idx} defines {p_label}'s appearance")
-                elif param == "reference_image_2" and len(visible) > 1:
-                    s_label = visible[1][1].name or visible[1][0] or "the second performer"
+                elif (char_idx := _extra_reference_index(param)) is not None and char_idx < len(
+                    visible
+                ):
+                    default_label = (
+                        "the second performer" if char_idx == 1 else f"performer {char_idx + 1}"
+                    )
+                    s_label = visible[char_idx][1].name or visible[char_idx][0] or default_label
                     slot_notes.append(f"Picture {slot_idx} defines {s_label}'s appearance")
                 elif param == "set_image":
                     slot_notes.append(f"Picture {slot_idx} defines only the empty location")

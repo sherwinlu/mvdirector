@@ -284,3 +284,46 @@ def test_vision_system_prompt_flags_overlaid_title_cards_and_credits(manifest, p
     artifacts = next(c for c in report.checks if c.name == "vision_artifacts")
     assert artifacts.status is CheckStatus.FAILED and artifacts.hard
     assert not report.passed
+
+
+def test_vision_video_scope_and_scoring_calibration(manifest, png):
+    verdict = VisionVerdict(spec_match=0.9, artifact_free=0.9, character_match=0.9)
+
+    still_llm = FakeLLM(verdict)
+    VisionJudge(still_llm).judge([png], _shot(), manifest, AssetKind.STILL, reference_image=png)
+    assert "Scoring calibration:" in still_llm.system
+    assert "Video scope:" not in still_llm.system
+
+    video_llm = FakeLLM(verdict)
+    frames = [np.zeros((16, 16, 3), dtype=np.uint8) for _ in range(3)]
+    VisionJudge(video_llm).judge(frames, _shot(), manifest, AssetKind.VIDEO, reference_image=png)
+    assert "Scoring calibration:" in video_llm.system
+    assert "Video scope:" in video_llm.system
+    assert "already-approved first frame" in video_llm.system
+
+    # Blind-observer mode applies the same video scope and calibration on Pass 2.
+    from mvdirector.qc.vision import _BlindObservation
+
+    class _BlindFakeLLM:
+        def __init__(self) -> None:
+            self.systems: list[str] = []
+
+        def complete_json(self, *, system, content, schema):
+            self.systems.append(system)
+            if schema is _BlindObservation:
+                return _BlindObservation(people_count=1, framing="close_up")
+            return verdict
+
+    blind_still = _BlindFakeLLM()
+    VisionJudge(blind_still, blind_observer=True).judge(  # type: ignore[arg-type]
+        [png], _shot(), manifest, AssetKind.STILL
+    )
+    assert "Scoring calibration:" in blind_still.systems[1]
+    assert "Video scope:" not in blind_still.systems[1]
+
+    blind_video = _BlindFakeLLM()
+    VisionJudge(blind_video, blind_observer=True).judge(  # type: ignore[arg-type]
+        frames, _shot(), manifest, AssetKind.VIDEO
+    )
+    assert "Scoring calibration:" in blind_video.systems[1]
+    assert "Video scope:" in blind_video.systems[1]

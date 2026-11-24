@@ -210,9 +210,11 @@ as id='sakura' with name='さくら').
     'bare shoulders, no cape'). Only add a new state when clothing actually changes—never for
     poses, props, or rooms. Use one state if their costume never changes.
   - invariants: optional short phrase listing signature accessories or visual details that must
-    survive across every costume change (e.g. 'glowing cyan hoop earrings in both ears'). It is
-    added to every still of this character, so never put anything here that a costume change
-    would alter (sleeves, jacket, shoes).
+    survive across every costume change (e.g. 'glowing cyan hoop earrings in both ears'). Prefer
+    symmetric accessories over tiny single-sided jewelry pinned to anatomical left or right unless
+    the user's style brief explicitly specifies an asymmetric mark (image-edit models often mirror
+    small single-sided accessories). It is added to every still of this character, so never put
+    anything here that a costume change would alter (sleeves, jacket, shoes).
 - appearance: copy the primary/lead singer's permanent appearance paragraph here as well.
 - invariants: copy the primary/lead singer's invariants here as well.
 - wardrobe: copy the primary/lead singer's wardrobe states here as well.
@@ -337,10 +339,13 @@ Rules:
 - motion_prompt: in English, what happens in the clip: performance, body movement, and physical
   camera operation (describe handheld physics such as subtle operator breathing sway, small weight
   shifts, and soft starts and stops rather than bare labels). Keep camera moves gentle and stable
-  on lipsync shots so the singing mouth stays clearly tracked. Every shot MUST remain a single
-  continuous take with no internal cuts and no subtitles or on-screen text. For shots 4.0 seconds
-  or longer with distinct movement beats or camera shifts, you may structure motion_prompt as
-  timestamped sub-beats covering the shot duration (e.g. '0-2.0s: ... 2.0-4.0s: ...')."""
+  on lipsync shots so the singing mouth stays clearly tracked. On 'broll' and 'performance' clips,
+  keep motion physically steady—one continuous camera move plus smooth ambient or body motion—and
+  avoid sudden violent impacts, collapses, or multi-stage chaotic events that trigger video-model
+  flicker or unintended scene cuts. Every shot MUST remain a single continuous take with no
+  internal cuts and no subtitles or on-screen text. For shots 4.0 seconds or longer with distinct
+  movement beats or camera shifts, you may structure motion_prompt as timestamped sub-beats
+  covering the shot duration (e.g. '0-2.0s: ... 2.0-4.0s: ...')."""
 
 NARRATIVE_BIBLE_ADDENDUM = """VIDEO STYLE — NARRATIVE / NON-LIPSYNC PERFORMANCE:
 - This video has NO on-camera lip-sync. Characters NEVER sing or mouth lyrics to the camera.

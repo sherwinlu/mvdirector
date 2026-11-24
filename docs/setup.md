@@ -91,6 +91,8 @@ docker compose run --rm mvd validate -p /workspace/projects/my-song
 
 **Remote ComfyUI & proxy notes.** Some hosted HTTP proxies reject Python's default HTTP library `User-Agent` (`python-httpx/...` / `Python-urllib/...`) with 403. `ComfyClient` automatically sends `User-Agent: mvdirector/<version>` by default and respects any custom `User-Agent` header configured in `comfy.headers` (if a specific proxy requires a custom string, set it there). Fresh cloud container disks also start without your model files or symlinks, so run `mvd validate` before a long job.
 
+**Comfy.org paid API nodes.** Workflows that use ComfyUI's paid cloud API nodes need a Comfy.org API key, which `mvdirector` forwards in `POST /prompt` `extra_data` only when the project opts in with `comfy.api_key_comfy_org: ${COMFY_ORG_API_KEY}`. An exported `COMFY_ORG_API_KEY` alone is never sent, so the key cannot leak to a shared or third-party ComfyUI host you did not mean to give it to.
+
 ---
 
 ## Choosing the Language Model

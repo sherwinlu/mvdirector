@@ -824,7 +824,7 @@ def test_setup_project_fails_atomically_on_invalid_provider_or_policy(tmp_path: 
     assert not bad_dir.exists()
 
 
-def test_probe_comfy_returns_unreachable_on_invalid_env_api_key(
+def test_probe_comfy_ignores_ambient_env_api_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("COMFY_ORG_API_KEY", "bad\r\nkey")
@@ -832,8 +832,35 @@ def test_probe_comfy_returns_unreachable_on_invalid_env_api_key(
         "http://127.0.0.1:8188",
         transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={"devices": []})),
     )
-    assert probe.reachable is False
-    assert "control characters" in (probe.error or "")
+    assert probe.reachable is True
+
+
+def test_rerunning_setup_keeps_existing_tuning_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(api, "inspect_environment", lambda **_kw: _fake_report(healthy=True))
+    project_dir = tmp_path / "tuned"
+    args = ["setup", str(project_dir), "--non-interactive", "--comfy-url", "http://127.0.0.1:8188"]
+    assert runner.invoke(app, args).exit_code == 0
+
+    yaml_path = project_dir / CONFIG_FILENAME
+    text = yaml_path.read_text(encoding="utf-8")
+    text = text.replace("cache_enabled: true", "cache_enabled: false")
+    text = text.replace("in_place_repair: true", "in_place_repair: false")
+    text = text.replace("vision_blind_observer: false", "vision_blind_observer: true")
+    yaml_path.write_text(text, encoding="utf-8")
+    before = load_config(yaml_path)
+    assert before.comfy.cache_enabled is False
+    assert before.retry.in_place_repair is False
+    assert before.qc.vision_blind_observer is True
+
+    res = runner.invoke(app, args)
+    assert res.exit_code == 0, res.output
+    after = load_config(yaml_path)
+    assert after.comfy.cache_enabled is False
+    assert after.retry.in_place_repair is False
+    assert after.qc.vision_blind_observer is True
+    assert "cache_enabled=" not in res.stdout
 
 
 def test_detect_project_mode_ignores_symlinked_project_yaml(tmp_path: Path) -> None:

@@ -13,6 +13,7 @@ import threading
 import time
 from contextlib import suppress
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import httpx
@@ -26,7 +27,6 @@ from mvdirector.comfy.client import (
 )
 from mvdirector.comfy.workflow import OutputSpec
 from mvdirector.config import ComfyConfig
-from mvdirector.errors import ConfigError
 
 
 def test_parse_comfy_ws_progress_event() -> None:
@@ -335,9 +335,32 @@ def test_comfy_client_rejects_control_chars_in_env_api_key_comfy_org(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("COMFY_ORG_API_KEY", "bad\r\nkey")
-    cfg = ComfyConfig(base_url="http://127.0.0.1:8188")
-    with pytest.raises(ConfigError, match="control characters"):
-        ComfyClient(cfg, transport=httpx.MockTransport(lambda _r: httpx.Response(200)))
+    with pytest.raises(ValueError, match="control characters"):
+        ComfyConfig(base_url="http://127.0.0.1:8188", api_key_comfy_org="${COMFY_ORG_API_KEY}")
+
+
+def test_comfy_client_never_forwards_ambient_comfy_org_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exported COMFY_ORG_API_KEY must not leak to a host the project never opted in for."""
+    monkeypatch.setenv("COMFY_ORG_API_KEY", "ambient-secret")
+    captured: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json={"prompt_id": "p1"})
+
+    cfg = ComfyConfig(base_url="https://shared-gpu.example.com")
+    with ComfyClient(cfg, transport=httpx.MockTransport(handler)) as client:
+        client.queue({"1": {"class_type": "X", "inputs": {}}})
+    assert "extra_data" not in captured[0]
+
+    opted_in = ComfyConfig(
+        base_url="https://shared-gpu.example.com", api_key_comfy_org="${COMFY_ORG_API_KEY}"
+    )
+    with ComfyClient(opted_in, transport=httpx.MockTransport(handler)) as client:
+        client.queue({"1": {"class_type": "X", "inputs": {}}})
+    assert captured[1]["extra_data"] == {"api_key_comfy_org": "ambient-secret"}
 
 
 def test_ws_listener_closes_raw_socket_on_tls_error_and_caps_fragment_size() -> None:

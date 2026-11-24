@@ -390,6 +390,7 @@ def setup(
     ):
         qc_missing_policy = "skip"
 
+    existing_config = None if is_new else setup_mod.read_project_yaml(directory)
     existing_mode = None if is_new else setup_mod.detect_project_mode(directory)
 
     options = setup_mod.optimize_setup_options(
@@ -408,6 +409,7 @@ def setup(
         ),
         comfy_probe=active_comfy_probe,
         project_mode=existing_mode,
+        existing_config=existing_config,
     )
 
     try:
@@ -418,14 +420,19 @@ def setup(
     action_word = "Created and configured" if is_new else "Updated"
     typer.secho(f"\n{action_word} {directory / CONFIG_FILENAME}", fg=typer.colors.GREEN)
     comfy_scope = "local" if setup_mod.is_loopback_url(chosen_comfy) else "remote"
-    tuned_parts = [
-        f"dedup_uploads={str(bool(options.comfy_dedup_uploads)).lower()}",
-        f"cache_enabled={str(bool(options.comfy_cache_enabled)).lower()}",
-        f"sort_batch_for_cache={str(bool(options.comfy_sort_batch_for_cache)).lower()}",
+    tuned_values: list[tuple[str, bool | float | None]] = [
+        ("dedup_uploads", options.comfy_dedup_uploads),
+        ("cache_enabled", options.comfy_cache_enabled),
+        ("sort_batch_for_cache", options.comfy_sort_batch_for_cache),
+        ("min_free_vram_gb", options.comfy_min_free_vram_gb),
     ]
-    if options.comfy_min_free_vram_gb is not None:
-        tuned_parts.append(f"min_free_vram_gb={options.comfy_min_free_vram_gb}")
-    typer.echo(f"Optimized for {comfy_scope} ComfyUI: {', '.join(tuned_parts)}")
+    tuned_parts = [
+        f"{name}={str(value).lower() if isinstance(value, bool) else value}"
+        for name, value in tuned_values
+        if value is not None
+    ]
+    if tuned_parts:
+        typer.echo(f"Optimized for {comfy_scope} ComfyUI: {', '.join(tuned_parts)}")
 
     if chosen_comfy_token_env and not os.environ.get(chosen_comfy_token_env):
         _yellow(

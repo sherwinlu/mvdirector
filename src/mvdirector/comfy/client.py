@@ -550,9 +550,9 @@ class ComfyClient:
         if not any(key.lower() == "user-agent" for key in headers):
             headers["User-Agent"] = f"mvdirector/{__version__}"
         self._headers = headers
-        raw_api_key = (
-            config.api_key_comfy_org or os.environ.get("COMFY_ORG_API_KEY") or ""
-        ).strip()
+        # Opt-in only (``comfy.api_key_comfy_org: ${COMFY_ORG_API_KEY}``): never forward a
+        # paid Comfy.org credential from the ambient environment to whatever host is configured.
+        raw_api_key = (config.api_key_comfy_org or "").strip()
         if raw_api_key and _has_control_chars(raw_api_key):
             raise ConfigError("comfy.api_key_comfy_org must not contain control characters.")
         self._api_key_comfy_org = raw_api_key or None

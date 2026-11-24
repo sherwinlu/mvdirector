@@ -438,8 +438,8 @@ def _recommended_min_free_vram_gb(comfy_probe: ComfyProbe | None) -> float | Non
     return round(min(6.0, max(2.0, total * 0.25)), 1)
 
 
-def detect_project_mode(project_dir: Path) -> ProjectMode | None:
-    """Read the configured ``mode`` from an existing ``project.yaml``, or None if absent/invalid."""
+def read_project_yaml(project_dir: Path) -> dict[str, Any] | None:
+    """Parse an existing ``project.yaml`` mapping, or None if absent, symlinked or invalid."""
     yaml_path = project_dir / CONFIG_FILENAME
     if yaml_path.is_symlink() or not yaml_path.is_file():
         return None
@@ -447,7 +447,13 @@ def detect_project_mode(project_dir: Path) -> ProjectMode | None:
         raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, yaml.YAMLError, RecursionError):
         return None
-    if isinstance(raw, dict) and isinstance(raw.get("mode"), str):
+    return raw if isinstance(raw, dict) else None
+
+
+def detect_project_mode(project_dir: Path) -> ProjectMode | None:
+    """Read the configured ``mode`` from an existing ``project.yaml``, or None if absent/invalid."""
+    raw = read_project_yaml(project_dir)
+    if raw is not None and isinstance(raw.get("mode"), str):
         try:
             return ProjectMode(raw["mode"].strip().lower())
         except ValueError:
@@ -455,15 +461,29 @@ def detect_project_mode(project_dir: Path) -> ProjectMode | None:
     return None
 
 
+# Auto-tuned SetupOptions fields -> the (section, key) they write in project.yaml. When a
+# project already sets one of these keys, re-running setup keeps the user's value.
+_TUNED_FIELD_KEYS: dict[str, tuple[str, str]] = {
+    "comfy_dedup_uploads": ("comfy", "dedup_uploads"),
+    "comfy_cache_enabled": ("comfy", "cache_enabled"),
+    "comfy_sort_batch_for_cache": ("comfy", "sort_batch_for_cache"),
+    "comfy_min_free_vram_gb": ("comfy", "min_free_vram_gb"),
+    "qc_vision_blind_observer": ("qc", "vision_blind_observer"),
+    "retry_in_place_repair": ("retry", "in_place_repair"),
+}
+
+
 def optimize_setup_options(
     options: SetupOptions,
     *,
     comfy_probe: ComfyProbe | None = None,
     project_mode: ProjectMode | None = None,
+    existing_config: dict[str, Any] | None = None,
 ) -> SetupOptions:
     """Pre-fill unset pipeline-tuning fields in ``options`` for the detected setup.
 
-    Explicit caller-provided values (anything other than ``None``) are always preserved.
+    Explicit caller-provided values (anything other than ``None``) are always preserved, and
+    so are tuning keys an existing ``project.yaml`` (``existing_config``) already sets.
     """
     updates: dict[str, Any] = {}
 
@@ -492,6 +512,12 @@ def optimize_setup_options(
     effective_mode = options.mode if options.mode is not None else project_mode
     if options.retry_in_place_repair is None:
         updates["retry_in_place_repair"] = effective_mode is not ProjectMode.MIX
+
+    if existing_config:
+        for field_name, (section, key) in _TUNED_FIELD_KEYS.items():
+            current = existing_config.get(section)
+            if field_name in updates and isinstance(current, dict) and key in current:
+                del updates[field_name]
 
     return replace(options, **updates) if updates else options
 
@@ -849,6 +875,7 @@ __all__ = [
     "pick_default_ollama_model",
     "probe_comfy",
     "probe_ollama",
+    "read_project_yaml",
     "render_environment_report",
     "validate_comfy_token_env",
     "validate_http_url",

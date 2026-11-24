@@ -26,7 +26,7 @@ from typing import Any
 from mvdirector import assemble, media
 from mvdirector.comfy.cache import ComfyRenderCache, canonical_graph_key, file_sha256
 from mvdirector.comfy.client import ComfyClient
-from mvdirector.comfy.provider import ComfyEndpointProvider
+from mvdirector.comfy.provider import ComfyEndpointProvider, StaticComfyProvider
 from mvdirector.comfy.workflow import OutputSpec, WorkflowTemplate
 from mvdirector.config import validate_max_concurrency
 from mvdirector.errors import BudgetExceeded, ComfyJobError, ConfigError, MediaToolError
@@ -316,7 +316,13 @@ class ShotRunner:
         self,
     ) -> tuple[ComfyClient, AbstractContextManager[ComfyClient] | str | None]:
         """Claim the primary client if idle, else lease an extra client from ``comfy_provider``."""
-        if self._comfy_provider is None:
+        if self._comfy_provider is None or isinstance(self._comfy_provider, StaticComfyProvider):
+            # A static lease only re-opens the primary's own server, so share the primary
+            # (httpx.Client is thread-safe; its VRAM floor check runs once per phase under a
+            # lock). A fresh client per shot would re-upload every reference, and its own first
+            # VRAM floor check would see the phase model held by another worker's running job
+            # and call /free, unloading that model mid-phase or aborting with
+            # ComfyResourceError when VRAM stays occupied.
             return self._comfy, None
         with self._client_pool_lock:
             if not self._primary_busy:

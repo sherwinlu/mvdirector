@@ -19,6 +19,7 @@ from pydantic import ValidationError
 
 from mvdirector import api
 from mvdirector.comfy.client import ComfyClient
+from mvdirector.comfy.provider import StaticComfyProvider
 from mvdirector.comfy.workflow import OutputSpec
 from mvdirector.config import ComfyConfig
 from mvdirector.errors import BudgetExceeded, ComfyConnectionError, ComfyJobError, ConfigError
@@ -615,6 +616,31 @@ def test_sequential_and_single_pending_shot_never_lease_extra_clients(planned_si
     runner_resume.run([AssetKind.STILL])
     assert comfy.runs == 6
     assert all(s.still.status is AssetStatus.PASSED for s in manifest.shots)
+
+
+def test_static_provider_shares_primary_client_instead_of_leasing_per_shot(planned_six, sample_png):
+    """Leasing fresh clients to the same server would redo the VRAM floor check (and /free)
+    under another worker's running job; static endpoints share the primary client instead."""
+    project, manifest = planned_six
+
+    class NoLeaseStaticProvider(StaticComfyProvider):
+        def lease(self, proj):  # type: ignore[override]
+            raise AssertionError("static provider must not lease extra per-shot clients")
+
+    comfy = _ConcurrentStubComfy("pod0", sample_png, delay=0.02)
+    runner = _make_runner(
+        project,
+        manifest,
+        comfy,
+        _StrictSerialGate(),
+        _StrictSerialGate(),
+        max_concurrency=4,
+        comfy_provider=NoLeaseStaticProvider(),
+    )
+    runner.run([AssetKind.STILL])
+    assert all(s.still.status is AssetStatus.PASSED for s in manifest.shots)
+    assert comfy.runs == len(manifest.shots)
+    assert comfy.peak_active > 1  # still concurrent, just over one shared client
 
 
 def test_concurrency_validation_and_api_generate_integration(planned_six, sample_png, monkeypatch):

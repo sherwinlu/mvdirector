@@ -142,6 +142,12 @@ Each candidate persists its `.plan.json` alongside the `.mp4` so `mvd previz ref
 
 ---
 
+## Parallel Generation (`comfy.max_concurrency`)
+
+By default shots render one at a time. Set `comfy.max_concurrency` (1–64) in `project.yaml`, or pass `--concurrency N` / `-j N` to `mvd stills`, `mvd videos` or `mvd run`, to render up to N shots of a dependency wave at once. Chained one-take shots (`continuity: continue` / `reframe`) still wait for the shot they continue from, and the run budget, manifest writes and quality checks stay serialized.
+
+It pays off when the endpoint can actually run jobs side by side: a serverless ComfyUI endpoint that fans requests out to several workers, or a custom `ComfyEndpointProvider` (library API) that leases a different GPU pod per shot. Against a single local ComfyUI, which executes one prompt at a time, it only overlaps uploads and quality checks with rendering. With the built-in single-endpoint setup all workers share one client, so reference images upload once and the `comfy.min_free_vram_gb` check runs once per phase. Stopping a parallel run with Ctrl-C waits for the renders already queued on ComfyUI to finish.
+
 ## Quality Checks & Automatic Regeneration
 
 A failed **hard** check rejects the attempt outright. Otherwise the attempt passes when the weighted average of its scores reaches `qc.pass_score`.

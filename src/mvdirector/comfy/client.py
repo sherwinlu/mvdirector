@@ -267,6 +267,7 @@ class _ComfyWsProgressListener:
             sock = raw_sock
             if use_tls:
                 ctx = ssl.create_default_context()
+                ctx.minimum_version = ssl.TLSVersion.TLSv1_2
                 sock = ctx.wrap_socket(raw_sock, server_hostname=parsed.hostname)
             if not self._register_socket(sock):
                 return

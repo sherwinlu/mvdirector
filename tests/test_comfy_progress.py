@@ -344,6 +344,7 @@ def test_ws_listener_closes_raw_socket_on_tls_error_and_caps_fragment_size() -> 
     import ssl
 
     closed = {"raw": False}
+    seen_min_version: list[ssl.TLSVersion] = []
 
     class DummySock:
         def close(self) -> None:
@@ -352,9 +353,13 @@ def test_ws_listener_closes_raw_socket_on_tls_error_and_caps_fragment_size() -> 
         def shutdown(self, _how: int) -> None:
             pass
 
+    def fake_wrap(self: ssl.SSLContext, _sock: object, **_kw: object) -> object:
+        seen_min_version.append(self.minimum_version)
+        raise ssl.SSLError("tls failure")
+
     with (
         patch("mvdirector.comfy.client.socket.create_connection", return_value=DummySock()),
-        patch.object(ssl.SSLContext, "wrap_socket", side_effect=ssl.SSLError("tls failure")),
+        patch.object(ssl.SSLContext, "wrap_socket", autospec=True, side_effect=fake_wrap),
     ):
         listener = _ComfyWsProgressListener(
             "https://gpu.example.com:8188", "cid", {}, "p-tls", time.monotonic(), lambda _: None
@@ -362,6 +367,7 @@ def test_ws_listener_closes_raw_socket_on_tls_error_and_caps_fragment_size() -> 
         listener.start()
         listener.stop()
     assert closed["raw"] is True
+    assert seen_min_version == [ssl.TLSVersion.TLSv1_2]
 
     # Fragmented messages exceeding _MAX_WS_FRAME_BYTES abort cleanly.
     seen: list[ComfyProgress] = []

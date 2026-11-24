@@ -17,10 +17,39 @@ from typing import Literal
 import numpy as np
 from pydantic import BaseModel
 
-from mvdirector.errors import ImagesNotSupportedError, LLMError
+from mvdirector.errors import ImagesNotSupportedError, LLMError, LLMQuotaError, LLMUnavailableError
 from mvdirector.llm.base import LLMClient, image_block, text_block
 
 VisionStatus = Literal["ok", "unsupported", "wrong", "skipped", "error"]
+ErrorKind = Literal["", "auth", "quota", "rate_limit", "not_found", "unreachable", "error"]
+
+
+def classify_llm_error(exc: LLMError) -> ErrorKind:
+    """Classify an ``LLMError`` for actionable setup/diagnostic reporting."""
+    if isinstance(exc, LLMQuotaError):
+        return "quota"
+    text = str(exc).lower()
+    if "rate limiting" in text or "rate limit" in text:
+        return "rate_limit"
+    if isinstance(exc, LLMUnavailableError):
+        if any(
+            word in text
+            for word in (
+                "credentials",
+                "authentication",
+                "unauthorized",
+                "permission",
+                "api key",
+                "invalid_api_key",
+                "401",
+                "403",
+            )
+        ):
+            return "auth"
+        if any(word in text for word in ("could not find", "not found", "404", "does not exist")):
+            return "not_found"
+        return "unreachable"
+    return "error"
 
 
 class _JsonReply(BaseModel):
@@ -36,9 +65,11 @@ class _ColorReply(BaseModel):
 class LLMCheckResult:
     json_ok: bool = False
     json_detail: str = ""
+    json_error_kind: ErrorKind = ""
     json_seconds: float = 0.0
     vision: VisionStatus = "skipped"
     vision_detail: str = ""
+    vision_error_kind: ErrorKind = ""
     vision_seconds: float = 0.0
 
 
@@ -75,9 +106,11 @@ def run_llm_check(client: LLMClient, check_vision: bool = True) -> LLMCheckResul
         )
     except LLMError as exc:
         result.json_detail = str(exc)
+        result.json_error_kind = classify_llm_error(exc)
     else:
         result.json_ok = reply.ok
         result.json_detail = "" if reply.ok else f"unexpected reply: ok={reply.ok}"
+        result.json_error_kind = "" if reply.ok else "error"
     result.json_seconds = time.perf_counter() - started
     if not check_vision:
         return result
@@ -102,6 +135,7 @@ def run_llm_check(client: LLMClient, check_vision: bool = True) -> LLMCheckResul
         result.vision, result.vision_detail = "unsupported", str(exc)
     except LLMError as exc:
         result.vision, result.vision_detail = "error", str(exc)
+        result.vision_error_kind = classify_llm_error(exc)
     else:
         if "blue" in answer.color.lower():
             result.vision = "ok"

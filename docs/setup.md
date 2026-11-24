@@ -18,12 +18,25 @@ Because `mvdirector` uploads reference images and audio slices over HTTP (`POST 
 
 Requires Python 3.11+ and `ffmpeg`. Installing the `mvdirector` package provides the `mvd` command-line tool.
 
+**macOS / Linux:**
+
 ```bash
-brew install ffmpeg
-python -m venv .venv && source .venv/bin/activate
+brew install ffmpeg                                         # or: sudo apt-get install ffmpeg
+python3 -m venv .venv && source .venv/bin/activate
 pip install -c constraints.txt -e ".[qc,align,ui,dev]"      # add "anthropic" to use llm.provider: anthropic
 ollama pull gemma3:12b                                      # default local LLM; or use any Ollama/OpenAI-compatible/cloud model
 export COMFY_URL=http://127.0.0.1:8188                      # local, home LAN/Tailscale, or remote cloud HTTPS URL
+```
+
+**Windows (PowerShell):**
+
+```powershell
+winget install Python.Python.3.12 Gyan.FFmpeg               # restart terminal after installing
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1                                # if blocked, run: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+pip install -c constraints.txt -e ".[qc,align,ui,dev]"      # add "anthropic" to use llm.provider: anthropic
+ollama pull gemma3:12b                                      # default local LLM; or use any Ollama/OpenAI-compatible/cloud model
+$env:COMFY_URL = "http://127.0.0.1:8188"                    # local, home LAN/Tailscale, or remote cloud HTTPS URL
 ```
 
 The extras let you install only what you use; by default `qc.on_missing_dependency` is `fail` so missing `qc` packages never downgrade checks silently (set `qc.on_missing_dependency: skip` in `project.yaml` to opt out):
@@ -70,11 +83,15 @@ COMFY_URL=http://comfy-cpu:8188 \
 docker compose run --rm mvd validate -p /workspace/projects/my-song
 ```
 
+*(On Windows PowerShell, set environment variables before running `docker compose`, e.g. `$env:COMFY_URL = "http://comfy-gpu:8188"; $env:MVD_LLM_URL = "http://ollama-gpu:11434"; docker compose --profile comfy-gpu --profile llm-gpu --profile ui up -d`.)*
+
 **Pinning, ComfyUI version-agnosticism & loopback binding:** The optional Dockerfiles pin tested upstream tags (`COMFYUI_REF=v0.45.4`, `OLLAMA_VERSION=0.40.16`, `CURL_IMAGE_TAG=8.23.0`) for reproducible container builds (override at build time with `--build-arg COMFYUI_REF=<tag>`), and `Dockerfile.mvd` uses `constraints.txt`. `mvdirector` itself is **ComfyUI version-agnostic** and works against any local, home-LAN, or cloud ComfyUI installation using standard API-format workflow exports (see [ComfyUI Version Compatibility](workflows.md#comfyui-version-compatibility)). `docker-compose.yml` binds all published ports (`8188`, `11434`, `8501`) to `127.0.0.1` by default; override `MVD_BIND_ADDR` (for example on a trusted private network) only if you intentionally want LAN access.
 
 **Apple Silicon (M1–M4) MacBooks:** Docker Desktop on macOS runs containers inside a Linux VM without Apple Metal/MPS GPU passthrough. To use your Mac's GPU for local open-weight models (`qwen2.5vl:7b`, `gemma3:12b`), run Ollama and ComfyUI natively on macOS and point the `mvd` container at `COMFY_URL=http://host.docker.internal:8188` and `MVD_LLM_URL=http://host.docker.internal:11434`.
 
 **Remote ComfyUI & proxy notes.** Some hosted HTTP proxies reject Python's default HTTP library `User-Agent` (`python-httpx/...` / `Python-urllib/...`) with 403. `ComfyClient` automatically sends `User-Agent: mvdirector/<version>` by default and respects any custom `User-Agent` header configured in `comfy.headers` (if a specific proxy requires a custom string, set it there). Fresh cloud container disks also start without your model files or symlinks, so run `mvd validate` before a long job.
+
+**Comfy.org paid API nodes.** Workflows that use ComfyUI's paid cloud API nodes need a Comfy.org API key, which `mvdirector` forwards in `POST /prompt` `extra_data` only when the project opts in with `comfy.api_key_comfy_org: ${COMFY_ORG_API_KEY}`. An exported `COMFY_ORG_API_KEY` alone is never sent, so the key cannot leak to a shared or third-party ComfyUI host you did not mean to give it to.
 
 ---
 
@@ -94,7 +111,10 @@ llm:
   timeout_seconds: 600       # a local model can be slow when the GPU is busy
   json_mode: auto            # auto | off | object | schema
   context_tokens: null       # ollama: context window to request (default 16384)
+  stream: false              # openai / openai_compatible: stream the reply over SSE
 ```
+
+Set `llm.stream: true` when an `openai` or `openai_compatible` server sits behind a reverse proxy that drops idle connections (for example Cloudflare's 100-second HTTP 524 in front of RunPod vLLM): the reply then arrives in chunks that keep the connection alive. The whole reply is still bounded by `llm.timeout_seconds` and capped at 16 MiB, and a server that ignores `stream: true` and answers with plain JSON is handled too. Other providers ignore the setting.
 
 | Provider | For | Key variable | Default address |
 |---|---|---|---|
@@ -142,7 +162,9 @@ llm: {provider: openai_compatible, base_url: "http://localhost:1234/v1", model: 
 - Invalid JSON: the model is asked once to correct it, quoting the error.
 - A reply cut off at `max_tokens`: an error that tells you to raise `llm.max_tokens` or lower `llm.shots_per_request`. It is not retried, since another try would be cut off the same way.
 - A shot batch the model cannot direct: those shots get rule-based direction and a warning, and planning continues. A failed visual bible stops planning, because everything depends on it.
-- Rate limits and server errors are retried three times, except a server error that says the model cannot read images, which is recognised at once and not retried. A missing key stops the command at the start and names the variable to set.
+- **API keys & project-local `.env`:** Never put API keys in `project.yaml`. You can either export them in your shell (`export OPENAI_API_KEY=...`) or let interactive `mvd setup` save them into `<project>/.env` (created atomically with `0600` owner-only permissions and added to `<project>/.gitignore`). Project `.env` files are loaded per-project (without mutating `os.environ`), accept only standard LLM key names, `COMFY_*`, and safe `MVD_*` variables, and shell exports always take precedence over `.env`.
+- **Quota & billing limits vs. transient rate limits:** Temporary per-minute rate limits (`429`) are retried three times with `Retry-After` backoff. Hard account quota or billing exhaustion (such as `insufficient_quota`, `credit balance is too low`, `exceeded your current quota`, or HTTP `402`) fails immediately without wasted retries (`LLMQuotaError`) and counts toward the unavailable circuit breaker so long runs do not hammer an exhausted account.
+- **Rate limits and server errors** (other than hard quota exhaustion or image-unsupported errors) are retried three times. A missing key stops the command at the start and names the variable to set.
 - **Before a generation run** the app sends the model one tiny request. If the server is unreachable, the key is rejected or the model does not exist, `mvd stills` and `mvd run` stop before any GPU time is spent, and say how to fix it or to set `llm.enabled: false`.
 - **During a run**, if the model is unavailable three times in a row (unreachable, key rejected, model not found, or a timeout), the vision checks turn off for the rest of the run with one warning, and the affected attempts are recorded with those checks skipped. An invalid reply from a working model never counts toward that: the next request may be fine. Generate the affected shots again once the model is fixed.
 - A server that rejects `response_format` is asked again without it, once, and the app remembers.

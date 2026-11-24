@@ -210,9 +210,11 @@ as id='sakura' with name='さくら').
     'bare shoulders, no cape'). Only add a new state when clothing actually changes—never for
     poses, props, or rooms. Use one state if their costume never changes.
   - invariants: optional short phrase listing signature accessories or visual details that must
-    survive across every costume change (e.g. 'glowing cyan hoop earrings in both ears'). It is
-    added to every still of this character, so never put anything here that a costume change
-    would alter (sleeves, jacket, shoes).
+    survive across every costume change (e.g. 'glowing cyan hoop earrings in both ears'). Prefer
+    symmetric accessories over tiny single-sided jewelry pinned to anatomical left or right unless
+    the user's style brief explicitly specifies an asymmetric mark (image-edit models often mirror
+    small single-sided accessories). It is added to every still of this character, so never put
+    anything here that a costume change would alter (sleeves, jacket, shoes).
 - appearance: copy the primary/lead singer's permanent appearance paragraph here as well.
 - invariants: copy the primary/lead singer's invariants here as well.
 - wardrobe: copy the primary/lead singer's wardrobe states here as well.
@@ -263,7 +265,13 @@ Rules:
   Never return to an earlier state. Use null on 'broll'.
 - 'lipsync' shots show the active singer singing the given lyrics. Use framing close_up or
   medium_close (never medium or wide) so the singer's mouth is clearly visible and unobstructed
-  (no hands, microphones, hair or foreground objects across the mouth).
+  (no hands, microphones, hair or foreground objects across the mouth). In still_prompt for
+  'lipsync' shots, keep the singer's mouth relaxed, softly closed, or barely parted (never
+  wide-open mid-scream) so audio-driven lip-sync models animate naturally from the vocal track
+  and performance fallbacks stay consistent.
+- Character close_up framing: frame head-and-shoulders or the full face (forehead to chin) with
+  both eyes and mouth clearly inside the frame. Never ask for extreme mouth-only or eye-only
+  macros on character shots, which crop off the head and break face framing checks.
 - Shots given as 'performance' have no vocals. Keep them as 'performance' (performer visibly on
   camera, not singing) or change them to 'broll' (no performer) where a cutaway serves the song,
   without putting more than two 'broll' shots in a row. Never leave type as 'performance' if
@@ -311,6 +319,12 @@ Rules:
   something in the room while keeping their face and mouth clearly visible to the lens. Save a
   look straight into the lens for the pre-chorus build and the chorus hook.
 - Use at least three distinct looks across the video (different sets or lighting), not one setup.
+  Hold one primary set across each musical section rather than ping-ponging between sets every
+  1-2 shots, unless a deliberate cross-cut is called for in a later verse or bridge.
+- Reliable camera motion: prefer movements that image-to-video models execute cleanly (slow
+  push-in, slow pull-back, gentle handheld drift, subtle pan, subject expression/performance,
+  and ambient motion like fire, snow, embers, or light shifts). Avoid complex 360-degree orbits
+  or long multi-room tracking shots that models tend to render static.
 - Something should visibly change every 2 to 4 seconds without a cut: light shifting, a flame or
   curtain moving, a background element, the performer's posture. Do not use camera moves for this
   on lipsync shots.
@@ -325,10 +339,13 @@ Rules:
 - motion_prompt: in English, what happens in the clip: performance, body movement, and physical
   camera operation (describe handheld physics such as subtle operator breathing sway, small weight
   shifts, and soft starts and stops rather than bare labels). Keep camera moves gentle and stable
-  on lipsync shots so the singing mouth stays clearly tracked. Every shot MUST remain a single
-  continuous take with no internal cuts and no subtitles or on-screen text. For shots 4.0 seconds
-  or longer with distinct movement beats or camera shifts, you may structure motion_prompt as
-  timestamped sub-beats covering the shot duration (e.g. '0-2.0s: ... 2.0-4.0s: ...')."""
+  on lipsync shots so the singing mouth stays clearly tracked. On 'broll' and 'performance' clips,
+  keep motion physically steady—one continuous camera move plus smooth ambient or body motion—and
+  avoid sudden violent impacts, collapses, or multi-stage chaotic events that trigger video-model
+  flicker or unintended scene cuts. Every shot MUST remain a single continuous take with no
+  internal cuts and no subtitles or on-screen text. For shots 4.0 seconds or longer with distinct
+  movement beats or camera shifts, you may structure motion_prompt as timestamped sub-beats
+  covering the shot duration (e.g. '0-2.0s: ... 2.0-4.0s: ...')."""
 
 NARRATIVE_BIBLE_ADDENDUM = """VIDEO STYLE — NARRATIVE / NON-LIPSYNC PERFORMANCE:
 - This video has NO on-camera lip-sync. Characters NEVER sing or mouth lyrics to the camera.
@@ -551,7 +568,7 @@ _SHEET_BODY_REALISM = (
 )
 SHEET_STUDIO = (
     f"{_SHEET_BACKGROUNDS['white']} {_SHEET_BODY_REALISM} "
-    "One small label per panel: FRONT / SIDE / 3-QUARTER / FACE DETAIL."
+    "No text, no labels, no captions, no watermarks anywhere in or around the panels."
 )
 # The first sheet is built from a written description.
 SHEET_TEMPLATE = (
@@ -732,6 +749,28 @@ _STILL_REF_ROLES = {
 }
 
 
+_EXTRA_STILL_REF_RE = re.compile(r"^reference_image_([1-9][0-9]*)\Z")
+
+
+def _extra_reference_index(name: str) -> int | None:
+    """Map ``reference_image_<N>`` (N >= 2) to its 0-based index in ``visible`` (N - 1)."""
+    match = _EXTRA_STILL_REF_RE.match(name)
+    if match is None:
+        return None
+    slot = int(match.group(1))
+    return slot - 1 if slot >= 2 else None
+
+
+def _still_ref_role(name: str) -> str | None:
+    role = _STILL_REF_ROLES.get(name)
+    if role is not None:
+        return role
+    extra_idx = _extra_reference_index(name)
+    if extra_idx is not None:
+        return f"performer #{extra_idx + 1}: keep their face, hair and costume"
+    return None
+
+
 def _still_reference_note(
     plate_attached: bool,
     reference_notation: str,
@@ -747,23 +786,25 @@ def _still_reference_note(
                 "layout, lighting and color grade exactly)."
             )
         return PLATE_NOTE
-    active = [name for name in bound_references if name in _STILL_REF_ROLES]
+    active: list[tuple[str, str]] = []
+    for name in bound_references:
+        role = _still_ref_role(name)
+        if role is not None:
+            active.append((name, role))
     if not active:
         return None
+    has_extra_char = any(_extra_reference_index(name) is not None for name, _ in active)
     if reference_notation == "prose":
-        if plate_attached and "reference_image_2" not in active:
+        if plate_attached and not has_extra_char:
             return PLATE_NOTE
-        if "reference_image_2" not in active:
+        if not has_extra_char:
             return None
         clauses = []
-        for index, name in enumerate(active):
-            role = _STILL_REF_ROLES[name]
+        for index, (_, role) in enumerate(active):
             ordinal = _ORDINALS[index] if index < len(_ORDINALS) else f"#{index + 1}"
             clauses.append(f"The {ordinal} reference image shows {role}.")
         return " ".join(clauses)
-    clauses = [
-        f"@image{index + 1} shows {_STILL_REF_ROLES[name]}." for index, name in enumerate(active)
-    ]
+    clauses = [f"@image{index + 1} shows {role}." for index, (_, role) in enumerate(active)]
     return " ".join(clauses)
 
 
@@ -772,13 +813,12 @@ def _sheet_panels(layout: str) -> str:
 
 
 def _sheet_studio(layout: str, background: str) -> str:
+    del layout  # panel layout is already described by _sheet_panels(); omit text labels
     bg = _SHEET_BACKGROUNDS.get(background, _SHEET_BACKGROUNDS["white"])
-    labels = (
-        "FRONTAL / PROFILE / FULL FRONT / FULL BACK."
-        if layout == "columns"
-        else "FRONT / SIDE / 3-QUARTER / FACE DETAIL."
+    return (
+        f"{bg} {_SHEET_BODY_REALISM} "
+        "No text, no labels, no captions, no watermarks anywhere in or around the panels."
     )
-    return f"{bg} {_SHEET_BODY_REALISM} One small label per panel: {labels}"
 
 
 def _format_character_sheet(
@@ -1013,7 +1053,14 @@ def compose_still_prompt(
     if ref_note is not None:
         parts.append(ref_note)
     if not plate_attached and scene is not None and scene.description:
-        parts.append(f"Setting: {scene.description}")
+        if shot.framing is Framing.CLOSE_UP and shot.type is ShotType.BROLL:
+            if shot.setting:
+                parts.append(
+                    f"Setting: {shot.setting} "
+                    "(tight close-up; keep distant room elements out of frame)."
+                )
+        else:
+            parts.append(f"Setting: {scene.description}")
     resolved_props = bible.resolve_props(shot.props)
     if resolved_props:
         if props_attached:
@@ -1060,7 +1107,10 @@ def compose_still_prompt(
         if (
             bound_references
             and len(visible) >= 1
-            and ("reference_image_2" in bound_references or "set_image" in bound_references)
+            and (
+                any(_extra_reference_index(param) is not None for param in bound_references)
+                or "set_image" in bound_references
+            )
             and reference_notation != "tags"
         ):
             # Explicit Picture N identity disambiguation (clean-room concept inspired by
@@ -1070,8 +1120,13 @@ def compose_still_prompt(
                 if param == "reference_image":
                     p_label = visible[0][1].name or visible[0][0] or "the primary singer"
                     slot_notes.append(f"Picture {slot_idx} defines {p_label}'s appearance")
-                elif param == "reference_image_2" and len(visible) > 1:
-                    s_label = visible[1][1].name or visible[1][0] or "the second performer"
+                elif (char_idx := _extra_reference_index(param)) is not None and char_idx < len(
+                    visible
+                ):
+                    default_label = (
+                        "the second performer" if char_idx == 1 else f"performer {char_idx + 1}"
+                    )
+                    s_label = visible[char_idx][1].name or visible[char_idx][0] or default_label
                     slot_notes.append(f"Picture {slot_idx} defines {s_label}'s appearance")
                 elif param == "set_image":
                     slot_notes.append(f"Picture {slot_idx} defines only the empty location")

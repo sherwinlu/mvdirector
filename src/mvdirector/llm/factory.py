@@ -184,4 +184,5 @@ def build_llm(
         token_param="max_completion_tokens" if config.provider == "openai" else "max_tokens",
         key_hint=key_hint,
         context_tokens=config.context_tokens,
+        stream=config.stream,
     )

@@ -14,6 +14,8 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +46,17 @@ OPTIONAL_FILE_PARAMS = frozenset(
         "previous_frame",
     }
 )
+
+
+_EXTRA_REF_IMAGE_RE = re.compile(r"^reference_image_([1-9][0-9]*)\Z")
+
+
+def is_optional_file_param(name: str) -> bool:
+    """True when ``name`` is an optional per-shot file input whose unused loader should drop."""
+    if name in OPTIONAL_FILE_PARAMS:
+        return True
+    match = _EXTRA_REF_IMAGE_RE.match(name)
+    return match is not None and int(match.group(1)) >= 2
 
 
 class Binding(BaseModel):
@@ -77,7 +90,14 @@ class WorkflowTemplate:
         self._graph = graph
 
     @classmethod
-    def load(cls, name: str, bindings_path: Path, root: Path | None = None) -> WorkflowTemplate:
+    def load(
+        cls,
+        name: str,
+        bindings_path: Path,
+        root: Path | None = None,
+        *,
+        environ: Mapping[str, str] | None = None,
+    ) -> WorkflowTemplate:
         if not bindings_path.is_file():
             raise WorkflowBindingError(
                 f"Bindings file for workflow '{name}' not found: {bindings_path}"
@@ -89,7 +109,7 @@ class WorkflowTemplate:
             )
         try:
             bindings = WorkflowBindings.model_validate_json(bindings_path.read_text("utf-8"))
-            bindings.defaults = expand_env(bindings.defaults)
+            bindings.defaults = expand_env(bindings.defaults, environ=environ)
         except (ValidationError, ConfigError, OSError, UnicodeDecodeError) as exc:
             raise WorkflowBindingError(f"Invalid bindings file {bindings_path}:\n{exc}") from exc
         raw_workflow = Path(bindings.workflow)
@@ -184,8 +204,8 @@ class WorkflowTemplate:
                 continue
             for target in targets:
                 graph[target.node]["inputs"][target.field] = value
-        for param in OPTIONAL_FILE_PARAMS - values.keys():
-            if param in self.bindings.inputs and param not in self.bindings.required:
+        for param in self.bindings.inputs.keys() - values.keys():
+            if is_optional_file_param(param) and param not in self.bindings.required:
                 for target in self.bindings.inputs[param]:
                     _drop_loader(graph, target.node)
         return prune_switch_branches(graph, output_node=self.bindings.output.node)

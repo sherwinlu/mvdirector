@@ -17,7 +17,7 @@ import shutil
 import sys
 import unicodedata
 from collections import Counter
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from functools import partial
@@ -39,7 +39,7 @@ from mvdirector.audio.stems import StemSeparator
 from mvdirector.cleanup import CleanupPlan, apply_cleanup, plan_cleanup
 from mvdirector.comfy.client import ComfyClient
 from mvdirector.comfy.provider import ComfyEndpointProvider, StaticComfyProvider
-from mvdirector.config import CONFIG_FILENAME, ReviewMode, validate_max_concurrency
+from mvdirector.config import CONFIG_FILENAME, LLMConfig, ReviewMode, validate_max_concurrency
 from mvdirector.errors import BudgetExceeded, ConfigError, LLMError, MVDError
 from mvdirector.generation import plates as plates_mod
 from mvdirector.generation import previz as previz_mod
@@ -75,6 +75,7 @@ __all__ = [
     "BriefResult",
     "BroadcastAudioReport",
     "CleanupPlan",
+    "ComfyWiringReport",
     "EnvironmentReport",
     "GenerateResult",
     "LLMCheckOutcome",
@@ -91,6 +92,7 @@ __all__ = [
     "audio_qc",
     "brief",
     "calibrate",
+    "check_comfy_wiring",
     "check_llm",
     "clean",
     "export_schemas",
@@ -119,6 +121,7 @@ __all__ = [
     "tune",
     "upscale",
     "validate_project",
+    "verify_llm_config",
 ]
 
 log = logging.getLogger(__name__)
@@ -144,6 +147,13 @@ def _close_llm(llm: LLMClient | None) -> Iterator[LLMClient | None]:
             closer()
 
 
+def _build_project_llm(project: Project, config: LLMConfig | None = None) -> LLMClient | None:
+    target = config or project.config.llm
+    if project._dotenv:
+        return build_llm(target, environ=project.environ())
+    return build_llm(target)
+
+
 def open_project(
     project_dir: ProjectRef, review_mode: ReviewMode | None = None, *, pull: bool = True
 ) -> Project:
@@ -160,7 +170,13 @@ def open_project(
     if review_mode is not None and project.config.review.mode != review_mode:
         config = project.config.model_copy(deep=True)
         config.review.mode = review_mode
-        project = Project(project.root, config, state=project.state, storage=project.storage)
+        project = Project(
+            project.root,
+            config,
+            state=project.state,
+            storage=project.storage,
+            dotenv=project._dotenv,
+        )
     return project
 
 
@@ -168,7 +184,13 @@ def _with_mode(project: Project, mode: ProjectMode | None) -> Project:
     if mode is not None and project.config.mode != mode:
         config = project.config.model_copy(deep=True)
         config.mode = mode
-        return Project(project.root, config, state=project.state, storage=project.storage)
+        return Project(
+            project.root,
+            config,
+            state=project.state,
+            storage=project.storage,
+            dotenv=project._dotenv,
+        )
     return project
 
 
@@ -257,6 +279,7 @@ def init_project(directory: Path, *, mode: ProjectMode = ProjectMode.STANDARD) -
     return directory
 
 
+ComfyWiringReport = setup_mod.ComfyWiringReport
 EnvironmentReport = setup_mod.EnvironmentReport
 SetupOptions = setup_mod.SetupOptions
 
@@ -265,14 +288,37 @@ def inspect_environment(
     *,
     comfy_url: str | None = None,
     comfy_token_env: str | None = None,
+    comfy_headers: dict[str, str] | None = None,
     ollama_url: str | None = None,
+    environ: Mapping[str, str] | None = None,
+    project_dir: Path | None = None,
+    check_nodes: bool = False,
 ) -> EnvironmentReport:
     """Inspect local tools, Python extras, Ollama, and ComfyUI readiness."""
     return setup_mod.inspect_environment(
         comfy_url=comfy_url,
         comfy_token_env=comfy_token_env,
+        comfy_headers=comfy_headers,
         ollama_url=ollama_url,
+        environ=environ,
+        project_dir=project_dir,
+        check_nodes=check_nodes,
     )
+
+
+def verify_llm_config(
+    config: LLMConfig,
+    *,
+    check_vision: bool = True,
+    environ: Mapping[str, str] | None = None,
+) -> LLMCheckResult:
+    """Run a live JSON (+ optional vision) sanity check against an ``LLMConfig``."""
+    return setup_mod.verify_llm_config(config, check_vision=check_vision, environ=environ)
+
+
+def check_comfy_wiring(project_dir: Path) -> ComfyWiringReport:
+    """Verify ComfyUI reachability, node registry, and exported workflow bindings."""
+    return setup_mod.check_comfy_wiring(project_dir)
 
 
 def setup_project(
@@ -370,7 +416,7 @@ def validate_project(
     if llm_config.enabled:
 
         def _check_llm_config() -> None:
-            with _close_llm(build_llm(llm_config)):
+            with _close_llm(_build_project_llm(project, llm_config)):
                 pass
 
         attempt(
@@ -408,7 +454,7 @@ def check_llm(project_dir: ProjectRef, skip_image: bool = False) -> LLMCheckOutc
     outcome = LLMCheckOutcome(config.provider, config.model, config.enabled)
     if not config.enabled:
         return outcome
-    with _close_llm(build_llm(config)) as client:
+    with _close_llm(_build_project_llm(project, config)) as client:
         if client is None:  # build_llm returns None only for a disabled model, handled above
             raise MVDError("No language model is configured.")
         # The image test only matters when vision checks are switched on.
@@ -435,7 +481,7 @@ def prepare(
     """Prepare a project from audio files or Suno/DAW stem packs (.zip, folders, or loose stems)."""
     project = open_project(project_dir)
     if llm is _UNSET:
-        with _close_llm(build_llm(project.config.llm)) as owned_llm:
+        with _close_llm(_build_project_llm(project)) as owned_llm:
             return prepare_project(
                 project,
                 audio=audio,
@@ -553,7 +599,7 @@ def brief(
     """Draft Suno-ready lyrics.txt and style.md from a concept."""
     project = open_project(project_dir)
     ensure_writable(project, overwrite=overwrite)
-    with _close_llm(build_llm(project.config.llm)) as llm:
+    with _close_llm(_build_project_llm(project)) as llm:
         generated = generate_brief(idea, llm=llm, duration_seconds=duration, vibe=vibe)
     with project.run_lock():
         ensure_writable(project, overwrite=overwrite)  # re-check: another job may have written
@@ -597,7 +643,7 @@ def plan(
                 style_path = project.path(inputs.style)
                 if style_path.is_file():
                     style_text = _read_text_input(style_path, "style")
-            with _close_llm(build_llm(project.config.llm)) as llm:
+            with _close_llm(_build_project_llm(project)) as llm:
                 manifest = build_mix_manifest(
                     project.config,
                     analysis,
@@ -626,7 +672,7 @@ def plan(
                     if lyrics_candidate is not None and lyrics_candidate.is_file()
                     else ""
                 )
-            with _close_llm(build_llm(plan_config.llm)) as llm:
+            with _close_llm(_build_project_llm(project, plan_config.llm)) as llm:
                 manifest = build_manifest(
                     plan_config,
                     project.load_analysis(),
@@ -809,7 +855,7 @@ def generate_previz(
 ) -> list[Path]:
     """Plan and render flat-shaded 3D blocking previz MP4s for selected shots."""
     project = open_project(project_dir)
-    with _close_llm(build_llm(project.config.llm)) as llm, project.edit_manifest() as manifest:
+    with _close_llm(_build_project_llm(project)) as llm, project.edit_manifest() as manifest:
         return previz_mod.generate_previz(
             project, manifest, llm, shot_ids=shot_ids, overwrite=overwrite
         )
@@ -827,7 +873,7 @@ def lock_previz(
 def refine_previz(project_dir: ProjectRef, shot_id: str, feedback: str) -> Path:
     """Refine a shot's 3D blocking plan with LLM feedback and re-render its previz MP4."""
     project = open_project(project_dir)
-    with _close_llm(build_llm(project.config.llm)) as llm, project.edit_manifest() as manifest:
+    with _close_llm(_build_project_llm(project)) as llm, project.edit_manifest() as manifest:
         return previz_mod.refine_previz_shot(project, manifest, llm, shot_id, feedback)
 
 
@@ -907,7 +953,7 @@ def generate(
             )
         effective_kinds = [k for k in effective_kinds if k is not AssetKind.VIDEO]
 
-    with _close_llm(build_llm(project.config.llm)) as llm:
+    with _close_llm(_build_project_llm(project)) as llm:
         if manifest.mode is ProjectMode.MIX:
             names = ["t2i"] if AssetKind.STILL in effective_kinds else []
             names += ["i2v"] if AssetKind.VIDEO in effective_kinds else []

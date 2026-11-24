@@ -166,6 +166,39 @@ def test_anthropic_errors_map_onto_the_same_taxonomy():
         ask(anthropic_backend(FakeAnthropic(status_error(anthropic.BadRequestError, 400))))
     assert not isinstance(raised.value, LLMUnavailableError)
 
+    from mvdirector.errors import LLMQuotaError
+
+    low_credit = anthropic.BadRequestError(
+        "Your credit balance is too low to access the Anthropic API.",
+        response=httpx.Response(400, request=REQUEST),
+        body=None,
+    )
+    with pytest.raises(LLMQuotaError):
+        ask(anthropic_backend(FakeAnthropic(low_credit)))
+
+
+def test_run_llm_check_classifies_auth_quota_and_rate_limit_errors():
+    from mvdirector.errors import LLMQuotaError
+    from mvdirector.llm.check import run_llm_check
+
+    res_auth = run_llm_check(
+        ScriptedLLM(LLMUnavailableError("OpenAI rejected the credentials (invalid_api_key).")),
+        check_vision=True,
+    )
+    assert not res_auth.json_ok and res_auth.json_error_kind == "auth"
+
+    res_quota = run_llm_check(
+        ScriptedLLM(LLMQuotaError("OpenAI usage or quota limit reached (insufficient_quota).")),
+        check_vision=True,
+    )
+    assert not res_quota.json_ok and res_quota.json_error_kind == "quota"
+
+    res_rate = run_llm_check(
+        ScriptedLLM(LLMError("OpenAI is rate limiting requests (slow down).")),
+        check_vision=False,
+    )
+    assert not res_rate.json_ok and res_rate.json_error_kind == "rate_limit"
+
 
 # ---------------------------------------------------- the judge stops asking when it should
 

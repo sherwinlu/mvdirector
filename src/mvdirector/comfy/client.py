@@ -10,13 +10,23 @@ Polling ``/history`` is used instead of the websocket because it survives proxie
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 import logging
 import math
+import os
+import re
+import socket
+import ssl
+import struct
 import threading
 import time
 import urllib.parse
 import uuid
 from collections.abc import Callable
+from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +36,7 @@ from mvdirector import __version__
 from mvdirector.comfy.cache import file_sha256
 from mvdirector.comfy.workflow import OutputSpec
 from mvdirector.config import ComfyConfig
-from mvdirector.errors import ComfyConnectionError, ComfyJobError, ComfyResourceError
+from mvdirector.errors import ComfyConnectionError, ComfyJobError, ComfyResourceError, ConfigError
 from mvdirector.llm.http import redact_url, retry_delay
 
 log = logging.getLogger(__name__)
@@ -40,6 +50,435 @@ _STATUSLESS_GRACE_POLLS = 3
 _VRAM_SETTLE_POLLS = 30
 _VRAM_POLL_SECONDS = 1.0
 _ALLOWED_OUTPUT_TYPES = frozenset({"output", "temp", "input"})
+_MAX_WS_FRAME_BYTES = 4 * 1024 * 1024  # 4 MiB safety cap for ComfyUI WebSocket frames
+_WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+_WS_HANDSHAKE_TIMEOUT_SECONDS = 5.0
+_WS_MAX_HANDSHAKE_BYTES = 16384
+_WS_FORBIDDEN_HEADERS = frozenset(
+    {
+        "host",
+        "upgrade",
+        "connection",
+        "sec-websocket-key",
+        "sec-websocket-version",
+        "sec-websocket-extensions",
+        "sec-websocket-accept",
+    }
+)
+_WS_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+\Z")
+_WS_MAX_CONTROL_FRAME_BYTES = 125
+
+
+def _finite_number(value: Any) -> float | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+        return float(value)
+    return None
+
+
+def _reject_json_constant(token: str) -> Any:
+    raise ValueError(f"Non-standard JSON constant {token!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class ComfyProgress:
+    """Snapshot of a single ComfyUI prompt's live execution progress."""
+
+    prompt_id: str
+    state: str  # "queued" | "running" | "downloading" | "done"
+    step: int | None = None
+    total_steps: int | None = None
+    percent: float | None = None
+    node: str | None = None
+    queue_position: int | None = None
+    elapsed_seconds: float = 0.0
+
+
+def parse_comfy_ws_event(
+    payload: dict[str, Any],
+    prompt_id: str,
+    *,
+    elapsed_seconds: float = 0.0,
+) -> ComfyProgress | None:
+    """Convert a ComfyUI WebSocket JSON message into a ``ComfyProgress`` if it matches."""
+    if not isinstance(payload, dict):
+        return None
+    event_type = payload.get("type")
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None
+    msg_prompt = data.get("prompt_id")
+    if msg_prompt is not None and msg_prompt != prompt_id:
+        return None
+    safe_elapsed_raw = _finite_number(elapsed_seconds)
+    safe_elapsed = round(max(0.0, safe_elapsed_raw), 1) if safe_elapsed_raw is not None else 0.0
+
+    if event_type == "progress":
+        val = _finite_number(data.get("value"))
+        mx = _finite_number(data.get("max"))
+        if val is not None and mx is not None and val >= 0.0 and mx > 0.0:
+            pct = round(min(100.0, max(0.0, (val / mx) * 100.0)), 1)
+            raw_node = data.get("node")
+            return ComfyProgress(
+                prompt_id=prompt_id,
+                state="running",
+                step=int(val),
+                total_steps=int(mx),
+                percent=pct,
+                node=str(raw_node) if raw_node is not None else None,
+                elapsed_seconds=safe_elapsed,
+            )
+        return None
+
+    if event_type == "progress_state":
+        nodes = data.get("nodes")
+        if not isinstance(nodes, dict):
+            return None
+        total_val = 0.0
+        total_max = 0.0
+        active_node: str | None = None
+        for node_id, info in nodes.items():
+            if not isinstance(info, dict):
+                continue
+            v = _finite_number(info.get("value"))
+            m = _finite_number(info.get("max"))
+            if v is not None and m is not None and v >= 0.0 and m > 0.0:
+                total_val += min(m, v)
+                total_max += m
+                if info.get("state") == "running" or active_node is None:
+                    active_node = str(node_id)
+        if math.isfinite(total_val) and math.isfinite(total_max) and total_max > 0.0:
+            pct = round(min(100.0, max(0.0, (total_val / total_max) * 100.0)), 1)
+            return ComfyProgress(
+                prompt_id=prompt_id,
+                state="running",
+                step=int(total_val),
+                total_steps=int(total_max),
+                percent=pct,
+                node=active_node,
+                elapsed_seconds=safe_elapsed,
+            )
+        return None
+
+    if event_type == "executing":
+        raw_node = data.get("node")
+        if raw_node is None:
+            # Require explicit prompt_id so idle/connect broadcasts cannot mark queued jobs done.
+            if msg_prompt != prompt_id:
+                return None
+            return ComfyProgress(
+                prompt_id=prompt_id,
+                state="downloading",
+                percent=99.0,
+                elapsed_seconds=safe_elapsed,
+            )
+        return ComfyProgress(
+            prompt_id=prompt_id,
+            state="running",
+            node=str(raw_node),
+            elapsed_seconds=safe_elapsed,
+        )
+
+    if event_type == "execution_start":
+        if msg_prompt != prompt_id:
+            return None
+        return ComfyProgress(
+            prompt_id=prompt_id,
+            state="running",
+            elapsed_seconds=safe_elapsed,
+        )
+
+    return None
+
+
+class _ComfyWsProgressListener:
+    """Best-effort RFC 6455 WebSocket listener for live ComfyUI step progress.
+
+    Uses only the Python standard library so ``mvdirector`` adds zero runtime dependencies.
+    Any connection or protocol error is silently swallowed so HTTP ``/history`` polling
+    remains the authoritative completion path.
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        client_id: str,
+        headers: dict[str, str],
+        prompt_id: str,
+        started: float,
+        on_progress: Callable[[ComfyProgress], None],
+    ) -> None:
+        self._base_url = base_url
+        self._client_id = client_id
+        self._headers = headers
+        self._prompt_id = prompt_id
+        self._started = started
+        self._on_progress = on_progress
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._sock: socket.socket | None = None
+        self._connected = False
+        self._last_ws_event_at: float | None = None
+        self._thread: threading.Thread | None = None
+
+    @property
+    def connected(self) -> bool:
+        with self._lock:
+            return self._connected
+
+    @property
+    def last_event_at(self) -> float | None:
+        with self._lock:
+            return self._last_ws_event_at
+
+    def start(self) -> None:
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"comfy-ws-{self._prompt_id[:8]}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        with self._lock:
+            self._stop.set()
+            sock = self._sock
+            self._sock = None
+        if sock is not None:
+            with suppress(OSError):
+                sock.shutdown(socket.SHUT_RDWR)
+            with suppress(OSError):
+                sock.close()
+        if self._thread is not None:
+            self._thread.join(timeout=1.5)
+
+    def _register_socket(self, sock: socket.socket) -> bool:
+        with self._lock:
+            if self._stop.is_set():
+                return False
+            self._sock = sock
+            return True
+
+    def _run(self) -> None:
+        sock: socket.socket | None = None
+        try:
+            parsed = urllib.parse.urlparse(self._base_url)
+            if parsed.scheme not in ("http", "https") or not parsed.hostname:
+                return
+            use_tls = parsed.scheme == "https"
+            port = parsed.port or (443 if use_tls else 80)
+            if self._stop.is_set():
+                return
+            raw_sock = socket.create_connection((parsed.hostname, port), timeout=3.0)
+            sock = raw_sock
+            if use_tls:
+                ctx = ssl.create_default_context()
+                ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+                sock = ctx.wrap_socket(raw_sock, server_hostname=parsed.hostname)
+            if not self._register_socket(sock):
+                return
+            sock.settimeout(_WS_HANDSHAKE_TIMEOUT_SECONDS)
+
+            base_path = parsed.path.rstrip("/")
+            ws_path = f"{base_path}/ws?clientId={urllib.parse.quote(self._client_id, safe='')}"
+            host_part = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+            host_header = f"{host_part}:{parsed.port}" if parsed.port else host_part
+            ws_key = base64.b64encode(os.urandom(16)).decode("ascii")
+            req_lines = [
+                f"GET {ws_path} HTTP/1.1",
+                f"Host: {host_header}",
+                "Upgrade: websocket",
+                "Connection: Upgrade",
+                f"Sec-WebSocket-Key: {ws_key}",
+                "Sec-WebSocket-Version: 13",
+            ]
+            for k, v in self._headers.items():
+                if (
+                    not _WS_HEADER_NAME_RE.match(k)
+                    or _has_control_chars(v)
+                    or k.lower() in _WS_FORBIDDEN_HEADERS
+                ):
+                    continue
+                req_lines.append(f"{k}: {v}")
+            req_lines.extend(["", ""])
+            sock.sendall("\r\n".join(req_lines).encode("utf-8"))
+            sock.settimeout(0.1)
+
+            # Read HTTP 101 upgrade response headers (capped at 16 KiB and bounded in time).
+            resp_buf = bytearray()
+            handshake_deadline = time.monotonic() + _WS_HANDSHAKE_TIMEOUT_SECONDS
+            while b"\r\n\r\n" not in resp_buf:
+                if self._stop.is_set() or time.monotonic() > handshake_deadline:
+                    return
+                try:
+                    chunk = sock.recv(1024)
+                except TimeoutError:
+                    continue
+                if not chunk:
+                    return
+                resp_buf.extend(chunk)
+                if len(resp_buf) > _WS_MAX_HANDSHAKE_BYTES:
+                    return
+            header_end = resp_buf.index(b"\r\n\r\n")
+            header_lines = resp_buf[:header_end].split(b"\r\n")
+            status_parts = header_lines[0].split(b" ", 2)
+            if (
+                len(status_parts) < 2
+                or not status_parts[0].startswith(b"HTTP/1.")
+                or status_parts[1] != b"101"
+            ):
+                return
+            expected_accept = base64.b64encode(
+                hashlib.sha1((ws_key + _WS_GUID).encode("ascii")).digest()
+            ).decode("ascii")
+            resp_headers: dict[str, str] = {}
+            for raw_line in header_lines[1:]:
+                if b":" in raw_line:
+                    hk, hv = raw_line.split(b":", 1)
+                    key_lower = hk.decode("latin1").strip().lower()
+                    val = hv.decode("latin1").strip()
+                    if key_lower == "connection" and key_lower in resp_headers:
+                        resp_headers[key_lower] = f"{resp_headers[key_lower]}, {val}"
+                    else:
+                        resp_headers[key_lower] = val
+            conn_tokens = {
+                tok.strip().lower() for tok in resp_headers.get("connection", "").split(",")
+            }
+            if (
+                resp_headers.get("sec-websocket-accept") != expected_accept
+                or resp_headers.get("upgrade", "").lower() != "websocket"
+                or "upgrade" not in conn_tokens
+            ):
+                return
+
+            with self._lock:
+                self._connected = True
+            leftover = bytes(resp_buf[header_end + 4 :])
+            self._read_loop(sock, leftover)
+        except Exception as exc:  # noqa: BLE001 - best-effort progress listener
+            log.debug("ComfyUI WebSocket progress listener unavailable: %s", exc)
+        finally:
+            with self._lock:
+                self._connected = False
+                active = self._sock
+                self._sock = None
+            for handle in (active, sock):
+                if handle is not None:
+                    with suppress(OSError):
+                        handle.close()
+
+    def _emit_text_payload(self, payload: bytes) -> None:
+        if self._stop.is_set():
+            return
+        try:
+            msg = json.loads(payload.decode("utf-8"), parse_constant=_reject_json_constant)
+        except (UnicodeDecodeError, ValueError):
+            return
+        if not isinstance(msg, dict):
+            return
+        progress = parse_comfy_ws_event(
+            msg,
+            self._prompt_id,
+            elapsed_seconds=time.monotonic() - self._started,
+        )
+        if progress is not None and not self._stop.is_set():
+            with self._lock:
+                self._last_ws_event_at = time.monotonic()
+            try:
+                self._on_progress(progress)
+            except Exception:  # noqa: BLE001 - observer errors must not break polling
+                log.debug("Progress callback error ignored", exc_info=True)
+
+    def _read_loop(self, sock: socket.socket, initial: bytes) -> None:
+        buf = bytearray(initial)
+        frag_buf: bytearray | None = None
+
+        def read_bytes(n: int) -> bytes | None:
+            while len(buf) < n:
+                if self._stop.is_set():
+                    return None
+                try:
+                    chunk = sock.recv(max(4096, n - len(buf)))
+                except TimeoutError:
+                    continue
+                if not chunk:
+                    return None
+                buf.extend(chunk)
+            out = bytes(buf[:n])
+            del buf[:n]
+            return out
+
+        while not self._stop.is_set():
+            hdr = read_bytes(2)
+            if hdr is None:
+                return
+            fin = bool(hdr[0] & 0x80)
+            opcode = hdr[0] & 0x0F
+            masked = bool(hdr[1] & 0x80)
+            length = hdr[1] & 0x7F
+            if length == 126:
+                ext = read_bytes(2)
+                if ext is None:
+                    return
+                length = struct.unpack("!H", ext)[0]
+            elif length == 127:
+                ext = read_bytes(8)
+                if ext is None:
+                    return
+                length = struct.unpack("!Q", ext)[0]
+            if length > _MAX_WS_FRAME_BYTES:
+                return
+            # RFC 6455 §5.5: control frames must not be fragmented and have payload <= 125 bytes.
+            if opcode >= 0x8 and (not fin or length > _WS_MAX_CONTROL_FRAME_BYTES):
+                return
+            mask_key = read_bytes(4) if masked else None
+            if masked and mask_key is None:
+                return
+            payload = read_bytes(length) if length > 0 else b""
+            if payload is None:
+                return
+
+            if opcode == 0x8:  # close
+                return
+            if opcode == 0x9:  # ping -> send masked pong (allowed mid-fragment per RFC 6455)
+                if mask_key is not None and payload:
+                    payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload[:125]))
+                else:
+                    payload = payload[:125]
+                pong_mask = os.urandom(4)
+                masked_payload = bytes(b ^ pong_mask[i % 4] for i, b in enumerate(payload))
+                pong = bytes([0x8A, 0x80 | len(masked_payload)]) + pong_mask + masked_payload
+                try:
+                    sock.sendall(pong)
+                except OSError:
+                    return
+                continue
+            if opcode == 0xA:  # pong
+                continue
+            if opcode == 0x1:  # text frame (complete or start of fragmented message)
+                if mask_key is not None and payload:
+                    payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+                if fin:
+                    frag_buf = None
+                    self._emit_text_payload(payload)
+                else:
+                    frag_buf = bytearray(payload)
+                continue
+            if opcode == 0x0:  # continuation frame
+                if frag_buf is None:
+                    continue
+                if len(frag_buf) + len(payload) > _MAX_WS_FRAME_BYTES:
+                    return
+                if mask_key is not None and payload:
+                    payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+                frag_buf.extend(payload)
+                if fin:
+                    assembled = bytes(frag_buf)
+                    frag_buf = None
+                    self._emit_text_payload(assembled)
+                continue
+            # Ignore binary preview frames (0x2) and unknown data opcodes without unmasking.
+            if opcode == 0x2:
+                frag_buf = None
 
 
 def _has_control_chars(value: str) -> bool:
@@ -96,11 +535,14 @@ class ComfyClient:
         transport: httpx.BaseTransport | None = None,
         sleep: Callable[[float], None] = time.sleep,
         upload_subfolder: str = "mvdirector",
+        on_progress: Callable[[ComfyProgress], None] | None = None,
     ) -> None:
         self._config = config
         self._sleep = sleep
         self._upload_subfolder = upload_subfolder
         self._client_id = uuid.uuid4().hex
+        self._on_progress = on_progress
+        self._uses_network = transport is None
         # The VRAM floor is checked once per phase (the first job after a /free), not per job:
         # within a phase ComfyUI keeps the phase's model loaded on purpose.
         self._vram_floor_checked = False
@@ -108,12 +550,23 @@ class ComfyClient:
         headers = dict(config.headers)
         if not any(key.lower() == "user-agent" for key in headers):
             headers["User-Agent"] = f"mvdirector/{__version__}"
+        self._headers = headers
+        # Opt-in only (``comfy.api_key_comfy_org: ${COMFY_ORG_API_KEY}``): never forward a
+        # paid Comfy.org credential from the ambient environment to whatever host is configured.
+        raw_api_key = (config.api_key_comfy_org or "").strip()
+        if raw_api_key and _has_control_chars(raw_api_key):
+            raise ConfigError("comfy.api_key_comfy_org must not contain control characters.")
+        self._api_key_comfy_org = raw_api_key or None
         self._http = httpx.Client(
             base_url=config.base_url.rstrip("/"),
             headers=headers,
             timeout=config.request_timeout,
             transport=transport,
         )
+
+    def set_progress_callback(self, callback: Callable[[ComfyProgress], None] | None) -> None:
+        """Attach or replace the live progress callback for subsequent jobs on this client."""
+        self._on_progress = callback
 
     def close(self) -> None:
         self._http.close()
@@ -349,9 +802,28 @@ class ComfyClient:
             if not self._vram_floor_checked:
                 self.check_vram_floor()
                 self._vram_floor_checked = True
+        started = time.monotonic()
         prompt_id = self.queue(graph, partial_execution_targets=partial_execution_targets)
+        self._emit_progress(ComfyProgress(prompt_id=prompt_id, state="queued", elapsed_seconds=0.0))
         entry = self.wait(prompt_id)
-        return self.download_output(entry, output, destination)
+        self._emit_progress(
+            ComfyProgress(
+                prompt_id=prompt_id,
+                state="downloading",
+                percent=99.0,
+                elapsed_seconds=round(time.monotonic() - started, 1),
+            )
+        )
+        path = self.download_output(entry, output, destination)
+        self._emit_progress(
+            ComfyProgress(
+                prompt_id=prompt_id,
+                state="done",
+                percent=100.0,
+                elapsed_seconds=round(time.monotonic() - started, 1),
+            )
+        )
+        return path
 
     def queue(
         self,
@@ -360,6 +832,8 @@ class ComfyClient:
         partial_execution_targets: list[str] | None = None,
     ) -> str:
         payload: dict[str, Any] = {"prompt": graph, "client_id": self._client_id}
+        if self._api_key_comfy_org:
+            payload["extra_data"] = {"api_key_comfy_org": self._api_key_comfy_org}
         if partial_execution_targets:
             # Partial graph execution targeting specific output nodes (clean-room concept
             # inspired by Edakuban/VocaVid).
@@ -393,32 +867,102 @@ class ComfyClient:
             else max(0.05, self._config.job_timeout / 1000.0)
         )
         statusless_polls = 0
-        while waited <= self._config.job_timeout:
-            history = _json_dict(self._request("GET", f"/history/{encoded_id}"), "GET /history")
-            entry = history.get(prompt_id)
-            if isinstance(entry, dict):
-                status = entry.get("status")
-                if isinstance(status, dict):
-                    if status.get("status_str") == "error":
-                        raise ComfyJobError(f"ComfyUI job failed: {_summarize_failure(status)}")
-                    if status.get("completed", True):
-                        return entry
-                elif status is None:
-                    # Older ComfyUI builds report no status at all. Outputs mean it is done;
-                    # otherwise allow a few more polls in case this build fills them a beat
-                    # later, then hand the entry back so download_output can say "produced no
-                    # output". Waiting out the full job_timeout here (30 minutes by default)
-                    # only to raise a misleading timeout stalls the run and hides the real
-                    # problem. The budget counts polls, not seconds, so it holds whatever
-                    # poll_interval is set to — including 0.0, where the loop never sleeps.
-                    if isinstance(entry.get("outputs"), dict) and entry["outputs"]:
-                        return entry
-                    statusless_polls += 1
-                    if statusless_polls >= _STATUSLESS_GRACE_POLLS:
-                        return entry
-            self._sleep(self._config.poll_interval)
-            waited = max(waited + min_step, time.monotonic() - started)
-        raise ComfyJobError(f"ComfyUI job {prompt_id} timed out after {self._config.job_timeout}s")
+        ws_listener: _ComfyWsProgressListener | None = None
+        if self._on_progress is not None and self._uses_network:
+            ws_listener = _ComfyWsProgressListener(
+                self._config.base_url,
+                self._client_id,
+                self._headers,
+                prompt_id,
+                started,
+                self._on_progress,
+            )
+            ws_listener.start()
+        try:
+            while waited <= self._config.job_timeout:
+                history = _json_dict(self._request("GET", f"/history/{encoded_id}"), "GET /history")
+                entry = history.get(prompt_id)
+                if isinstance(entry, dict):
+                    status = entry.get("status")
+                    if isinstance(status, dict):
+                        if status.get("status_str") == "error":
+                            raise ComfyJobError(f"ComfyUI job failed: {_summarize_failure(status)}")
+                        if status.get("completed", True):
+                            return entry
+                    elif status is None:
+                        # Older ComfyUI builds report no status at all. Outputs mean it is done;
+                        # otherwise allow a few more polls in case this build fills them a beat
+                        # later, then hand the entry back so download_output can say "produced no
+                        # output". Waiting out the full job_timeout here (30 minutes by default)
+                        # only to raise a misleading timeout stalls the run and hides the real
+                        # problem. The budget counts polls, not seconds, so it holds whatever
+                        # poll_interval is set to — including 0.0, where the loop never sleeps.
+                        if isinstance(entry.get("outputs"), dict) and entry["outputs"]:
+                            return entry
+                        statusless_polls += 1
+                        if statusless_polls >= _STATUSLESS_GRACE_POLLS:
+                            return entry
+                if self._on_progress is not None:
+                    now = time.monotonic()
+                    ws_window = max(5.0, self._config.poll_interval * 2.0)
+                    ws_recent = (
+                        ws_listener is not None
+                        and ws_listener.connected
+                        and ws_listener.last_event_at is not None
+                        and (now - ws_listener.last_event_at) < ws_window
+                    )
+                    if not ws_recent:
+                        self._poll_queue_progress(prompt_id, elapsed=now - started)
+                self._sleep(self._config.poll_interval)
+                waited = max(waited + min_step, time.monotonic() - started)
+            raise ComfyJobError(
+                f"ComfyUI job {prompt_id} timed out after {self._config.job_timeout}s"
+            )
+        finally:
+            if ws_listener is not None:
+                ws_listener.stop()
+
+    def _emit_progress(self, progress: ComfyProgress) -> None:
+        if self._on_progress is None:
+            return
+        try:
+            self._on_progress(progress)
+        except Exception:  # noqa: BLE001 - progress observer must never abort generation
+            log.debug("ComfyUI progress callback failed", exc_info=True)
+
+    def _poll_queue_progress(self, prompt_id: str, *, elapsed: float) -> None:
+        """Best-effort HTTP ``/queue`` check when WebSocket step events are unavailable."""
+        state = "running"
+        queue_pos: int | None = None
+        try:
+            resp = self._http.get("/queue", timeout=min(self._config.request_timeout, 5.0))
+            if resp.status_code == 200:
+                body = resp.json()
+                if isinstance(body, dict):
+                    running = body.get("queue_running")
+                    pending = body.get("queue_pending")
+                    in_running = isinstance(running, list) and any(
+                        isinstance(item, list) and len(item) >= 2 and item[1] == prompt_id
+                        for item in running
+                    )
+                    if in_running:
+                        state = "running"
+                    elif isinstance(pending, list):
+                        for idx, item in enumerate(pending, start=1):
+                            if isinstance(item, list) and len(item) >= 2 and item[1] == prompt_id:
+                                state = "queued"
+                                queue_pos = idx
+                                break
+        except Exception:  # noqa: BLE001 - /queue is optional
+            pass
+        self._emit_progress(
+            ComfyProgress(
+                prompt_id=prompt_id,
+                state=state,
+                queue_position=queue_pos,
+                elapsed_seconds=round(elapsed, 1),
+            )
+        )
 
     def download_output(self, entry: dict[str, Any], output: OutputSpec, destination: Path) -> Path:
         raw_outputs = entry.get("outputs")

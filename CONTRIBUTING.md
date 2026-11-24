@@ -6,10 +6,21 @@ Thank you for your interest in contributing to `mvdirector`! This document cover
 
 Requires Python 3.11+ (Python 3.12 recommended) and `ffmpeg` / `ffprobe` on your `PATH`.
 
+**macOS / Linux:**
+
 ```bash
-brew install ffmpeg
-python -m venv .venv
+brew install ffmpeg                       # or: sudo apt-get install ffmpeg
+python3 -m venv .venv
 source .venv/bin/activate
+pip install -e ".[dev,qc,align,ui]"
+```
+
+**Windows (PowerShell):**
+
+```powershell
+winget install Python.Python.3.12 Gyan.FFmpeg
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1              # if blocked, run: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 pip install -e ".[dev,qc,align,ui]"
 ```
 

@@ -1020,7 +1020,7 @@ def _resolve_shot_singers(
     if not characters:
         return []
     if solo_vocals:
-        return [next(iter(characters))]
+        return [next(iter(characters))] if shot.type is ShotType.LIPSYNC else []
     sec_singers = _section_singers_for_shot(shot, characters, voice_map)
     if analysis is None or not analysis.vocal_turns:
         return sec_singers
@@ -1512,7 +1512,7 @@ def _ask_for_batch(
                 singer_hint = f"vocal='together' singers=[{joined}] "
             elif len(resolved_singers) == 1:
                 singer_hint = f"vocal='solo' singer={resolved_singers[0]!r} "
-            else:
+            elif not solo_vocals:
                 sec_chars = _characters_in_text(s.section, manifest.characters)
                 if sec_chars:
                     singer_hint = f"vocal='solo' singer={sec_chars[0]!r} "

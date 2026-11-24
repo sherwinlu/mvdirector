@@ -424,3 +424,92 @@ def test_closeup_face_panel_falls_back_to_front_when_face_file_missing(tmp_path:
         num_frames=49,
     )
     assert runner._still_reference_paths(cu_shot, None) == [("reference_image", front_file)]
+
+
+def test_solo_vocals_does_not_tag_instrumental_or_broll_shots() -> None:
+    from mvdirector.planning.planner import _ask_for_batch
+
+    characters = {
+        "witch_lead": Character(name="The Witch", appearance="female lead"),
+        "hansel": Character(name="Hansel", appearance="male youth"),
+    }
+    lipsync_shot = Shot(
+        id="s001",
+        index=0,
+        start=0.0,
+        end=4.0,
+        type=ShotType.LIPSYNC,
+        section="Verse 1",
+        audio_slice=AudioSlice(path="assets/audio/s001.wav", start=0.0, end=4.0, head_handle=0.0),
+        num_frames=97,
+    )
+    perf_shot = Shot(
+        id="s002",
+        index=1,
+        start=4.0,
+        end=8.0,
+        type=ShotType.PERFORMANCE,
+        section="Bridge: Hansel",
+        audio_slice=AudioSlice(path="assets/audio/s002.wav", start=4.0, end=8.0, head_handle=0.0),
+        num_frames=97,
+    )
+    broll_shot = Shot(
+        id="s003",
+        index=2,
+        start=8.0,
+        end=12.0,
+        type=ShotType.BROLL,
+        section="Verse 1",
+        audio_slice=AudioSlice(path="assets/audio/s003.wav", start=8.0, end=12.0, head_handle=0.0),
+        num_frames=97,
+    )
+
+    assert _resolve_shot_singers(lipsync_shot, None, characters, solo_vocals=True) == ["witch_lead"]
+    assert _resolve_shot_singers(perf_shot, None, characters, solo_vocals=True) == []
+    assert _resolve_shot_singers(broll_shot, None, characters, solo_vocals=True) == []
+
+    captured_prompts: list[str] = []
+
+    class _StubLLM:
+        def complete_json(self, system: str, content: list[Any], schema: Any) -> Any:
+            del system
+            captured_prompts.append(" ".join(str(part.get("text", "")) for part in content))
+            return schema.model_validate({"shots": []})
+
+    manifest = Manifest(
+        title="Test",
+        duration=12.0,
+        fps=24,
+        character=characters["witch_lead"],
+        characters=characters,
+        shots=[lipsync_shot, perf_shot, broll_shot],
+    )
+    _ask_for_batch(
+        manifest,
+        [lipsync_shot, perf_shot, broll_shot],
+        offset=0,
+        current_wardrobe=None,
+        cast_wardrobes=None,
+        llm=_StubLLM(),  # type: ignore[arg-type]
+        solo_vocals=True,
+    )
+    assert len(captured_prompts) == 1
+    prompt_lines = captured_prompts[0].splitlines()
+    s001_line = next(line for line in prompt_lines if "id=s001 " in line)
+    s002_line = next(line for line in prompt_lines if "id=s002 " in line)
+    s003_line = next(line for line in prompt_lines if "id=s003 " in line)
+    assert "vocal='solo' singer='witch_lead'" in s001_line
+    assert "vocal=" not in s002_line
+    assert "vocal=" not in s003_line
+
+    # In rule-based direction (llm=None), a non-singing performance shot in Hansel's section
+    # keeps Hansel on camera while lipsync stays locked to witch_lead.
+    from mvdirector.planning.planner import _direct_shots
+
+    cfg = ProjectConfig()
+    cfg.planning.vocals = "solo"
+    _direct_shots(manifest, cfg, llm=None, analysis=None, voice_map={})
+    assert lipsync_shot.character == "witch_lead"
+    assert lipsync_shot.singers == ["witch_lead"]
+    assert perf_shot.character == "hansel"
+    assert perf_shot.singers == []

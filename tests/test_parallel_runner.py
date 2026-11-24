@@ -728,3 +728,90 @@ def test_shared_comfy_client_vram_floor_check_runs_once_under_concurrency(tmp_pa
     assert free_calls == 1
     assert stats_calls == 2
     client.close()
+
+
+def test_non_weakrefable_clients_avoid_aba_upload_cache_collision(tmp_path: Path) -> None:
+    """Freshly leased slotted clients must not inherit uploads from GC'd clients at reused ids."""
+    import gc
+    import weakref
+    from dataclasses import dataclass
+
+    from mvdirector.generation.runner import _UploadTable
+
+    @dataclass(slots=True)
+    class _SlottedClient:
+        pod_name: str
+        uploaded: list[str]
+
+        def upload(self, path: Path) -> str:
+            self.uploaded.append(path.name)
+            return f"{self.pod_name}/{path.name}"
+
+    runner = ShotRunner.__new__(ShotRunner)
+    runner._comfy = object()  # type: ignore[assignment]
+    runner._primary_upload_table = _UploadTable()
+    runner._upload_tables = weakref.WeakKeyDictionary()
+    runner._unweakref_upload_tables = {}
+    runner._upload_lock = threading.Lock()
+    runner._cache = None
+    runner._file_hashes = {}
+
+    asset = tmp_path / "ref.png"
+    asset.write_bytes(b"png")
+
+    for i in range(40):
+        client = _SlottedClient(f"pod-{i}", [])
+        remote = runner._upload(asset, client=client)  # type: ignore[arg-type]
+        assert client.uploaded == ["ref.png"]
+        assert remote == f"pod-{i}/ref.png"
+        del client
+        gc.collect()
+
+
+def test_policy_prepare_serialized_under_qc_lock_and_refunds_budget_on_error(
+    planned_six, sample_png
+) -> None:
+    """RetryPolicy.prepare runs under _qc_lock and refunds RunBudget if prepare raises."""
+    from mvdirector.generation.runner import load_templates
+    from mvdirector.models import ReferenceSet
+
+    proj, manifest = planned_six
+    ref_file = proj.path("assets/reference/base_front.png")
+    ref_file.parent.mkdir(parents=True, exist_ok=True)
+    ref_file.write_bytes(sample_png)
+    manifest.character.references["base"] = ReferenceSet(
+        sheet="assets/reference/base_front.png",
+        panels={"front": "assets/reference/base_front.png"},
+    )
+    lock_held_during_prepare: list[bool] = []
+
+    class _CheckingPolicy(RetryPolicy):
+        def prepare(self, shot, kind, *, can_repair: bool = False):  # type: ignore[override]
+            lock_held_during_prepare.append(runner._qc_lock.locked())
+            raise RuntimeError("boom during prepare")
+
+    fake = FakeComfy(png=sample_png)
+    comfy = ComfyClient(
+        ComfyConfig(base_url="http://comfy.test", poll_interval=0.0),
+        transport=httpx.MockTransport(fake._handle),
+        sleep=lambda _: None,
+    )
+    budget = RunBudget(limit=5)
+    runner = ShotRunner(
+        project=proj,
+        manifest=manifest,
+        comfy=comfy,
+        gates=QualityGates(image=None, video=None, face_analyzer=None),  # type: ignore[arg-type]
+        policy=_CheckingPolicy(proj.config.retry, proj.config.seed, llm=None),
+        templates=load_templates(proj, ["t2i", "still", "i2v", "lipsync"]),
+        budget=budget,
+        max_concurrency=2,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="boom during prepare"):
+            runner.run([AssetKind.STILL], shot_ids=[manifest.shots[0].id])
+    finally:
+        comfy.close()
+
+    assert lock_held_during_prepare == [True]
+    assert budget.used == 0

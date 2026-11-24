@@ -188,7 +188,9 @@ class ShotRunner:
         self._upload_tables: weakref.WeakKeyDictionary[Any, _UploadTable] = (
             weakref.WeakKeyDictionary()
         )
-        self._unweakref_upload_tables: dict[int, _UploadTable] = {}
+        # Keep a strong reference alongside the table so GC + allocator address reuse cannot
+        # map a newly allocated non-weakrefable client (e.g. a different pod) onto stale uploads.
+        self._unweakref_upload_tables: dict[int, tuple[Any, _UploadTable]] = {}
         with suppress(TypeError):
             self._upload_tables[comfy] = primary_table
 
@@ -638,7 +640,14 @@ class ShotRunner:
                     and still_tpl_key in self._templates
                     and self._templates[still_tpl_key].accepts("reference_image")
                 )
-                plan = self._policy.prepare(shot, kind, can_repair=can_repair)
+                try:
+                    # Serialize RetryPolicy.prepare under _qc_lock so prompt rewrites and Vision QC
+                    # never race on the shared LLMClient instance (_qc_lock -> _manifest_lock).
+                    with self._qc_lock:
+                        plan = self._policy.prepare(shot, kind, can_repair=can_repair)
+                except BaseException:
+                    self._budget.refund()
+                    raise
                 with self._manifest_lock:
                     shot.review = Review()  # any earlier review no longer describes this shot
                 self._emit(
@@ -1522,7 +1531,12 @@ class ShotRunner:
                     self._upload_tables[client] = table
                 return table
             except TypeError:
-                return self._unweakref_upload_tables.setdefault(id(client), _UploadTable())
+                entry = self._unweakref_upload_tables.get(id(client))
+                if entry is None:
+                    table = _UploadTable()
+                    self._unweakref_upload_tables[id(client)] = (client, table)
+                    return table
+                return entry[1]
 
     def _upload(self, path: Path, *, client: ComfyClient | None = None) -> str:
         if not path.is_file():

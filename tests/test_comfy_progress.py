@@ -259,6 +259,10 @@ def test_ws_listener_reassembles_fragments_answers_ping_and_formats_ipv6_host() 
         )
         listener.start()
         srv.join(timeout=2.0)
+        # Let the listener drain to the close frame on its own: stop() right after the server
+        # thread exits can race the final continuation frame on a slow runner.
+        assert listener._thread is not None
+        listener._thread.join(timeout=5.0)
         listener.stop()
 
     assert req_captured
@@ -388,6 +392,9 @@ def test_ws_listener_closes_raw_socket_on_tls_error_and_caps_fragment_size() -> 
             "https://gpu.example.com:8188", "cid", {}, "p-tls", time.monotonic(), lambda _: None
         )
         listener.start()
+        # Join before stop(): stopping first can win the race and skip the TLS wrap entirely.
+        assert listener._thread is not None
+        listener._thread.join(timeout=5.0)
         listener.stop()
     assert closed["raw"] is True
     assert seen_min_version == [ssl.TLSVersion.TLSv1_2]

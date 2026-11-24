@@ -97,15 +97,41 @@ def _unescape_double_quoted(raw: str) -> str:
     return "".join(out)
 
 
+_INLINE_COMMENT_RE = re.compile(r"\s+#")
+
+
+def _closing_quote(text: str, quote: str) -> int:
+    """Index of the quote closing ``text[0]``, skipping backslash escapes in double quotes."""
+    idx = 1
+    while idx < len(text):
+        ch = text[idx]
+        if quote == '"' and ch == "\\":
+            idx += 2
+            continue
+        if ch == quote:
+            return idx
+        idx += 1
+    return -1
+
+
 def _parse_value(raw: str) -> str:
+    """Parse one value the usual dotenv way: quotes end the value, ``#`` after a space comments.
+
+    ``KEY="v" # note`` and ``KEY=v # note`` both yield ``v``; ``KEY=a#b`` keeps ``a#b``.
+    """
     stripped = raw.strip()
     if not stripped:
         return ""
-    if len(stripped) >= 2 and stripped[0] == '"' and stripped[-1] == '"':
-        return _unescape_double_quoted(stripped[1:-1])
-    if len(stripped) >= 2 and stripped[0] == "'" and stripped[-1] == "'":
-        return stripped[1:-1]
-    return stripped
+    if stripped[0] in ('"', "'"):
+        quote = stripped[0]
+        end = _closing_quote(stripped, quote)
+        if end > 0:
+            rest = stripped[end + 1 :].strip()
+            if not rest or rest.startswith("#"):
+                inner = stripped[1:end]
+                return _unescape_double_quoted(inner) if quote == '"' else inner
+    comment = _INLINE_COMMENT_RE.search(stripped)
+    return stripped[: comment.start()] if comment else stripped
 
 
 def parse_dotenv(text: str) -> dict[str, str]:

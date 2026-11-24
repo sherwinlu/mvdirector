@@ -89,6 +89,29 @@ def test_parse_dotenv_filters_disallowed_and_handles_quotes() -> None:
     }
 
 
+def test_parse_dotenv_strips_inline_comments_like_standard_dotenv(tmp_path: Path) -> None:
+    """Hand-edited ``# note`` suffixes must not end up inside keys or URLs."""
+    text = (
+        "OPENAI_API_KEY=sk-abc   # work account\n"
+        'COMFY_URL="http://gpu.lan:8188"  # big box\n'
+        "MVD_LLM_URL='http://127.0.0.1:11434' #local\n"
+        "COMFY_TOKEN=tok#123\n"
+        'MVD_LLM_KEY="has # inside"\n'
+    )
+    assert parse_dotenv(text) == {
+        "OPENAI_API_KEY": "sk-abc",
+        "COMFY_URL": "http://gpu.lan:8188",
+        "MVD_LLM_URL": "http://127.0.0.1:11434",
+        "COMFY_TOKEN": "tok#123",
+        "MVD_LLM_KEY": "has # inside",
+    }
+
+    # Values written by mvd setup round-trip exactly, including quotes, backslashes and " #".
+    tricky = 'p@ss\\word "with" # hash'
+    write_project_dotenv_var(tmp_path, "MVD_LLM_KEY", tricky)
+    assert read_project_dotenv(tmp_path) == {"MVD_LLM_KEY": tricky}
+
+
 def test_write_project_dotenv_sets_0600_gitignores_and_updates_in_place(tmp_path: Path) -> None:
     proj = tmp_path / "song"
     proj.mkdir()

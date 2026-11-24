@@ -46,7 +46,7 @@ from mvdirector.errors import (
     DependencyMissing,
     MVDError,
 )
-from mvdirector.llm.check import LLMCheckResult, run_llm_check
+from mvdirector.llm.check import ErrorKind, LLMCheckResult, run_llm_check
 from mvdirector.llm.factory import PROVIDERS, build_llm
 from mvdirector.llm.http import redact_url
 from mvdirector.models import ProjectMode, VideoStyle
@@ -624,8 +624,8 @@ def verify_llm_config(
         client = build_llm(config, environ=environ, transport=transport, sleep=sleep)
     except (ConfigError, DependencyMissing) as exc:
         msg = str(exc)
-        kind = "auth" if "api key" in msg.lower() else "error"
-        return LLMCheckResult(json_ok=False, json_detail=msg, json_error_kind=kind)  # type: ignore[arg-type]
+        kind: ErrorKind = "auth" if "api key" in msg.lower() else "error"
+        return LLMCheckResult(json_ok=False, json_detail=msg, json_error_kind=kind)
     if client is None:
         return LLMCheckResult(json_ok=True, vision="skipped")
     try:

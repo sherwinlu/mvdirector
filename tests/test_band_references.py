@@ -73,12 +73,12 @@ def test_still_references_bind_three_band_members(project, analysis):
         budget=RunBudget(limit=10),
     )
     refs_3 = runner_3._still_reference_paths(shot, plate=None)
-    assert [name for name, _ in refs_3] == [
+    assert [name for name, _, _ in refs_3] == [
         "reference_image",
         "reference_image_2",
         "reference_image_3",
     ]
-    assert [Path(p).name for _, p in refs_3] == [
+    assert [Path(p).name for _, _, p in refs_3] == [
         "lead_base_sheet.png",
         "guitarist_base_sheet.png",
         "alto_base_sheet.png",
@@ -96,12 +96,12 @@ def test_still_references_bind_three_band_members(project, analysis):
         budget=RunBudget(limit=10),
     )
     refs_2 = runner_2._still_reference_paths(shot, plate=None)
-    assert [name for name, _ in refs_2] == ["reference_image", "reference_image_2"]
+    assert [name for name, _, _ in refs_2] == ["reference_image", "reference_image_2"]
 
     # Missing secondary file on disk is skipped cleanly rather than raising FileNotFoundError
     (ref_dir / "guitarist_base_sheet.png").unlink()
     refs_missing = runner_3._still_reference_paths(shot, plate=None)
-    assert [name for name, _ in refs_missing] == ["reference_image", "reference_image_3"]
+    assert [name for name, _, _ in refs_missing] == ["reference_image", "reference_image_3"]
 
 
 def test_workflow_render_drops_unused_higher_band_reference_loaders() -> None:

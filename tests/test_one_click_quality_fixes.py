@@ -186,8 +186,8 @@ def test_closeup_routes_face_panel_for_single_ref_workflow(tmp_path: Path) -> No
 
     cu_refs = runner._still_reference_paths(cu_shot, None)
     mc_refs = runner._still_reference_paths(mc_shot, None)
-    assert cu_refs == [("reference_image", face_file)]
-    assert mc_refs == [("reference_image", front_file)]
+    assert cu_refs == [("reference_image", "reference_image", face_file)]
+    assert mc_refs == [("reference_image", "reference_image", front_file)]
 
 
 def test_openai_compatible_sse_streaming_assembles_chunks() -> None:
@@ -423,7 +423,9 @@ def test_closeup_face_panel_falls_back_to_front_when_face_file_missing(tmp_path:
         audio_slice=AudioSlice(path="assets/audio/s001.wav", start=0.0, end=2.0, head_handle=0.0),
         num_frames=49,
     )
-    assert runner._still_reference_paths(cu_shot, None) == [("reference_image", front_file)]
+    assert runner._still_reference_paths(cu_shot, None) == [
+        ("reference_image", "reference_image", front_file)
+    ]
 
 
 def test_solo_vocals_does_not_tag_instrumental_or_broll_shots() -> None:

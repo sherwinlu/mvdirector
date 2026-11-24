@@ -7,12 +7,14 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 
 from mvdirector.config import CONFIG_FILENAME, ProjectConfig, load_config
+from mvdirector.dotenv import read_project_dotenv
 from mvdirector.errors import ConfigError
 from mvdirector.models import Analysis, AssetKind, Manifest, Shot, utc_now, validate_safe_id
 from mvdirector.store import (
@@ -46,11 +48,14 @@ class Project:
         config: ProjectConfig,
         state: StateStore | None = None,
         storage: AssetStorage | None = None,
+        *,
+        dotenv: Mapping[str, str] | None = None,
     ) -> None:
         self.root = root.resolve()
         self.config = config
         self.state: StateStore = state or LocalStateStore(self.root)
         self.storage: AssetStorage = storage or LocalAssetStorage()
+        self._dotenv: dict[str, str] = dict(dotenv) if dotenv else {}
 
     @classmethod
     def open(
@@ -60,7 +65,17 @@ class Project:
         storage: AssetStorage | None = None,
     ) -> Project:
         """Open a workspace folder. `state` and `storage` default to the local implementations."""
-        return cls(root, load_config(Path(root) / CONFIG_FILENAME), state, storage)
+        root_path = Path(root)
+        dotenv = read_project_dotenv(root_path)
+        effective_env = {**dotenv, **os.environ}
+        config = load_config(root_path / CONFIG_FILENAME, environ=effective_env)
+        return cls(root_path, config, state, storage, dotenv=dotenv)
+
+    def environ(self) -> dict[str, str]:
+        """Project-scoped ``.env`` variables overlaid with ``os.environ`` (shell always wins)."""
+        if not self._dotenv:
+            return dict(os.environ)
+        return {**self._dotenv, **os.environ}
 
     # ------------------------------------------------------------------ paths
 

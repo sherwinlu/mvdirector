@@ -340,13 +340,33 @@ def test_cli_setup_non_interactive_creates_and_configures(
 
 
 def test_cli_setup_interactive_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from mvdirector.llm.check import LLMCheckResult
+    from mvdirector.setup import ComfyWiringReport
+
     monkeypatch.setattr(api, "inspect_environment", lambda **_kw: _fake_report(healthy=True))
+    monkeypatch.setattr(
+        api,
+        "verify_llm_config",
+        lambda *_a, **_kw: LLMCheckResult(json_ok=True, vision="ok"),
+    )
+    monkeypatch.setattr(
+        api,
+        "check_comfy_wiring",
+        lambda _dir: ComfyWiringReport(
+            url="http://127.0.0.1:8188",
+            reachable=True,
+            node_count=42,
+            missing_exports=["t2i", "still", "lipsync", "i2v"],
+        ),
+    )
     target = tmp_path / "starlight"
 
     # Prompts: confirm create, title, comfy url, llm provider, ollama model, video preset
     answers = "y\nStarlight Echo\nhttp://127.0.0.1:8188\nollama\ngemma3:12b\nltx\n"
     res = runner.invoke(app, ["setup", str(target)], input=answers)
     assert res.exit_code == 0, res.output
+    assert "LLM JSON check passed" in res.stdout
+    assert "42 node classes available" in res.stdout
 
     cfg = load_config(target / CONFIG_FILENAME)
     assert cfg.title == "Starlight Echo"
@@ -471,12 +491,25 @@ def test_cli_setup_remote_comfy_interactive_and_non_interactive(
             ),
         )
 
-    monkeypatch.setattr(api, "inspect_environment", fake_inspect)
+    from mvdirector.llm.check import LLMCheckResult
+    from mvdirector.setup import ComfyWiringReport
 
-    # Interactive: enter remote ComfyUI URL + COMFY_TOKEN -> triggers re-probe and note.
+    monkeypatch.setattr(api, "inspect_environment", fake_inspect)
+    monkeypatch.setattr(
+        api,
+        "verify_llm_config",
+        lambda *_a, **_kw: LLMCheckResult(json_ok=True, vision="ok"),
+    )
+    monkeypatch.setattr(
+        api,
+        "check_comfy_wiring",
+        lambda _dir: ComfyWiringReport(url="https://gpu.example.com:8188", reachable=True),
+    )
+
+    # Interactive: enter remote ComfyUI URL + COMFY_TOKEN (leave token secret blank) -> note shown.
     target = tmp_path / "remote-interactive"
     answers = (
-        "y\nRemote Track\nhttps://gpu.example.com:8188\nCOMFY_TOKEN\nollama\ngemma3:12b\nltx\n"
+        "y\nRemote Track\nhttps://gpu.example.com:8188\nCOMFY_TOKEN\n\nollama\ngemma3:12b\nltx\n"
     )
     res = runner.invoke(app, ["setup", str(target)], input=answers)
     assert res.exit_code == 0, res.output
@@ -617,6 +650,411 @@ def test_setup_exact_preset_and_check_only_non_ollama(
     assert cfg.comfy.dedup_uploads is True
     assert cfg.comfy.cache_enabled is True
     assert cfg.comfy.sort_batch_for_cache is True
+
+
+def test_cli_setup_cloud_llm_skips_ollama_verifies_key_and_saves_dotenv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mvdirector import setup as setup_mod
+    from mvdirector.dotenv import read_project_dotenv
+    from mvdirector.llm.check import LLMCheckResult
+    from mvdirector.setup import ComfyWiringReport
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    report_no_ollama = EnvironmentReport(
+        python_version="3.12.4",
+        platform_label="Darwin arm64",
+        ffmpeg_ok=True,
+        ffprobe_ok=True,
+        extras=[ExtraStatus("qc", True, "MediaPipe QC")],
+        ollama=OllamaProbe("http://127.0.0.1:11434", False, error="Unreachable"),
+        comfy=ComfyProbe("http://127.0.0.1:8188", True, devices=["mps"]),
+    )
+    monkeypatch.setattr(api, "inspect_environment", lambda **_kw: report_no_ollama)
+    install_called = False
+
+    def fail_if_install(**_kw: object) -> tuple[bool, str]:
+        nonlocal install_called
+        install_called = True
+        return True, "installed"
+
+    monkeypatch.setattr(setup_mod, "install_ollama", fail_if_install)
+    seen_keys: list[str | None] = []
+
+    def fake_verify(cfg: object, *, check_vision: bool = True, environ=None) -> LLMCheckResult:
+        seen_keys.append((environ or {}).get("OPENAI_API_KEY"))
+        return LLMCheckResult(json_ok=True, vision="ok")
+
+    monkeypatch.setattr(api, "verify_llm_config", fake_verify)
+    monkeypatch.setattr(
+        api,
+        "check_comfy_wiring",
+        lambda _dir: ComfyWiringReport(url="http://127.0.0.1:8188", reachable=True, node_count=12),
+    )
+
+    target = tmp_path / "cloud-openai"
+    # Prompts: confirm, title, comfy url, provider (alias), model, api key, preset, save .env
+    answers = "y\nCloud Song\nhttp://127.0.0.1:8188\nchatgpt\ngpt-4o\nsk-valid-openai\nexact\ny\n"
+    res = runner.invoke(app, ["setup", str(target)], input=answers)
+    assert res.exit_code == 0, res.output
+    assert install_called is False
+    assert seen_keys == ["sk-valid-openai"]
+    assert "sk-valid-openai" not in (target / CONFIG_FILENAME).read_text(encoding="utf-8")
+    assert read_project_dotenv(target) == {"OPENAI_API_KEY": "sk-valid-openai"}
+    cfg = load_config(target / CONFIG_FILENAME)
+    assert cfg.llm.provider == "openai"
+    assert cfg.llm.model == "gpt-4o"
+
+
+def test_cli_setup_bad_key_retry_and_quota_switch_to_ollama(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mvdirector import setup as setup_mod
+    from mvdirector.dotenv import read_project_dotenv
+    from mvdirector.llm.check import LLMCheckResult
+    from mvdirector.setup import ComfyWiringReport
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(api, "inspect_environment", lambda **_kw: _fake_report(healthy=True))
+    monkeypatch.setattr(
+        api,
+        "check_comfy_wiring",
+        lambda _dir: ComfyWiringReport(url="http://127.0.0.1:8188", reachable=True),
+    )
+
+    # Case 1: Wrong key -> retry -> valid key -> saved to .env.
+    outcomes = iter(
+        [
+            LLMCheckResult(
+                json_ok=False,
+                json_detail="OpenAI rejected the credentials (invalid_api_key).",
+                json_error_kind="auth",
+            ),
+            LLMCheckResult(json_ok=True, vision="ok"),
+        ]
+    )
+    monkeypatch.setattr(api, "verify_llm_config", lambda *_a, **_kw: next(outcomes))
+    target1 = tmp_path / "retry-key"
+    answers1 = (
+        "y\nRetry Key\nhttp://127.0.0.1:8188\nopenai\ngpt-4o\nsk-wrong\n"
+        "retry\ngpt-4o\nsk-good\nltx\ny\n"
+    )
+    res1 = runner.invoke(app, ["setup", str(target1)], input=answers1)
+    assert res1.exit_code == 0, res1.output
+    assert "Invalid or rejected API key" in res1.stdout
+    assert read_project_dotenv(target1) == {"OPENAI_API_KEY": "sk-good"}
+
+    # Case 2: Quota limit reached -> switch to local Ollama (no exhausted key saved).
+    outcomes2 = iter(
+        [
+            LLMCheckResult(
+                json_ok=False,
+                json_detail="OpenAI usage or quota limit reached (insufficient_quota).",
+                json_error_kind="quota",
+            ),
+            LLMCheckResult(json_ok=True, vision="ok"),
+        ]
+    )
+    monkeypatch.setattr(api, "verify_llm_config", lambda *_a, **_kw: next(outcomes2))
+    target2 = tmp_path / "quota-switch"
+    answers2 = (
+        "y\nQuota Switch\nhttp://127.0.0.1:8188\nopenai\ngpt-4o\nsk-empty-quota\n"
+        "switch\nollama\ngemma3:12b\nltx\n"
+    )
+    res2 = runner.invoke(app, ["setup", str(target2)], input=answers2)
+    assert res2.exit_code == 0, res2.output
+    assert "Usage or billing quota limit reached" in res2.stdout
+    assert read_project_dotenv(target2) == {}
+    assert load_config(target2 / CONFIG_FILENAME).llm.provider == "ollama"
+
+    # Case 3: Ollama missing -> installs, starts, pulls model, and verifies.
+    report_missing_ollama = EnvironmentReport(
+        python_version="3.12.4",
+        platform_label="Darwin arm64",
+        ffmpeg_ok=True,
+        ffprobe_ok=True,
+        extras=[ExtraStatus("qc", True, "MediaPipe QC")],
+        ollama=OllamaProbe("http://127.0.0.1:11434", False, error="Unreachable"),
+        comfy=ComfyProbe("http://127.0.0.1:8188", True, devices=["mps"]),
+    )
+    monkeypatch.setattr(api, "inspect_environment", lambda **_kw: report_missing_ollama)
+    monkeypatch.setattr(setup_mod, "is_ollama_installed", lambda: False)
+    monkeypatch.setattr(setup_mod, "ollama_install_command", lambda: ["brew", "install", "ollama"])
+    events: list[str] = []
+    monkeypatch.setattr(
+        setup_mod,
+        "install_ollama",
+        lambda **_kw: (events.append("install") or True, "Installed Ollama"),
+    )
+    monkeypatch.setattr(
+        setup_mod,
+        "start_ollama_server",
+        lambda url, **_kw: events.append("start") or OllamaProbe(url, True, []),
+    )
+    monkeypatch.setattr(
+        setup_mod,
+        "pull_ollama_model",
+        lambda model, **_kw: (events.append(f"pull:{model}") or True, f"Pulled {model}"),
+    )
+    monkeypatch.setattr(
+        setup_mod,
+        "probe_ollama",
+        lambda url, **_kw: OllamaProbe(url, True, ["gemma3:12b"]),
+    )
+    monkeypatch.setattr(
+        api,
+        "verify_llm_config",
+        lambda *_a, **_kw: LLMCheckResult(json_ok=True, vision="ok"),
+    )
+    target3 = tmp_path / "auto-ollama"
+    # confirm, title, comfy url, provider=ollama, install=y, model, pull=y, preset
+    answers3 = "y\nAuto Ollama\nhttp://127.0.0.1:8188\nollama\ny\ngemma3:12b\ny\nltx\n"
+    res3 = runner.invoke(app, ["setup", str(target3)], input=answers3)
+    assert res3.exit_code == 0, res3.output
+    assert events == ["install", "start", "pull:gemma3:12b"]
+
+
+def test_check_comfy_wiring_validates_missing_ok_and_broken_workflows(tmp_path: Path) -> None:
+    import json
+
+    from mvdirector.setup import check_comfy_wiring
+    from tests.conftest import WORKFLOW_GRAPH, write_workflows
+
+    proj = tmp_path / "wiring-song"
+    api.init_project(proj)
+
+    # 1. Fresh project: ComfyUI reachable with /object_info, workflows not exported yet.
+    def handler_ok(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/system_stats":
+            return httpx.Response(
+                200, json={"system": {"comfyui_version": "0.45.4"}, "devices": []}
+            )
+        if request.url.path == "/object_info":
+            return httpx.Response(
+                200,
+                json={
+                    "Prompt": {"input": {"required": {"text": ["STRING"], "negative": ["STRING"]}}},
+                    "Sampler": {"input": {"required": {"seed": ["INT"], "steps": ["INT"]}}},
+                    "Load": {"input": {"required": {"image": ["STRING"], "audio": ["STRING"]}}},
+                    "Save": {"input": {"required": {"images": ["IMAGE"]}}},
+                },
+            )
+        raise AssertionError(f"Unexpected {request.url.path}")
+
+    fresh = check_comfy_wiring(proj, comfy_transport=httpx.MockTransport(handler_ok))
+    assert fresh.reachable is True
+    assert fresh.node_count == 4
+    assert fresh.ok is True
+    assert set(fresh.missing_exports) == {"t2i", "still", "lipsync", "i2v"}
+
+    # 2. Exported workflows matching /object_info pass wiring validation cleanly.
+    wf_dir = proj / "workflows"
+    write_workflows(
+        wf_dir,
+        {
+            "qwen_t2i": ".png",
+            "qwen_edit_still": ".png",
+            "ltx_lipsync": ".mp4",
+            "ltx_i2v": ".mp4",
+        },
+    )
+    wired = check_comfy_wiring(proj, comfy_transport=httpx.MockTransport(handler_ok))
+    assert wired.ok is True
+    assert wired.missing_exports == []
+    assert set(wired.workflows_ok) == {"t2i", "still", "lipsync", "i2v"}
+
+    # 3. Missing custom node in /object_info is caught as a wiring issue.
+    broken_graph = json.loads(json.dumps(WORKFLOW_GRAPH))
+    broken_graph["1"]["class_type"] = "MissingCustomNode"
+    (wf_dir / "graph.api.json").write_text(json.dumps(broken_graph), encoding="utf-8")
+    broken = check_comfy_wiring(proj, comfy_transport=httpx.MockTransport(handler_ok))
+    assert broken.ok is False
+    assert any("MissingCustomNode" in prob for _, prob in broken.issues)
+
+
+def test_cli_setup_non_interactive_verify_exits_nonzero_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mvdirector.llm.check import LLMCheckResult
+    from mvdirector.setup import ComfyWiringReport
+
+    monkeypatch.setattr(api, "inspect_environment", lambda **_kw: _fake_report(healthy=True))
+    monkeypatch.setattr(
+        api,
+        "verify_llm_config",
+        lambda *_a, **_kw: LLMCheckResult(
+            json_ok=False, json_detail="quota exhausted", json_error_kind="quota"
+        ),
+    )
+    monkeypatch.setattr(
+        api,
+        "check_comfy_wiring",
+        lambda _dir: ComfyWiringReport(url="http://127.0.0.1:8188", reachable=True),
+    )
+
+    target = tmp_path / "verify-fail"
+    res = runner.invoke(
+        app,
+        ["setup", str(target), "--non-interactive", "--verify"],
+    )
+    assert res.exit_code == 1
+    assert "Usage or billing quota limit reached" in res.stdout
+
+
+def test_pull_ollama_model_handles_http_200_error_and_redacts_url() -> None:
+    from mvdirector.setup import pull_ollama_model
+
+    ok, msg = pull_ollama_model(
+        "missing:latest",
+        base_url="http://user:supersecret@127.0.0.1:11434",
+        transport=httpx.MockTransport(
+            lambda _r: httpx.Response(
+                200, json={"error": "pull model manifest: file does not exist"}
+            )
+        ),
+    )
+    assert ok is False
+    assert "file does not exist" in msg
+    assert "supersecret" not in msg
+
+    ok2, msg2 = pull_ollama_model(
+        "qwen3:8b",
+        base_url="http://user:supersecret@127.0.0.1:11434",
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={"status": "success"})),
+    )
+    assert ok2 is True
+    assert "supersecret" not in msg2
+
+
+def test_check_comfy_wiring_redacts_userinfo_in_report_url(tmp_path: Path) -> None:
+    from mvdirector.setup import check_comfy_wiring
+
+    proj = tmp_path / "wired-secret"
+    api.setup_project(
+        proj,
+        SetupOptions(
+            comfy_url="http://alice:topsecret@127.0.0.1:8188",
+            llm_enabled=False,
+        ),
+    )
+    report = check_comfy_wiring(
+        proj,
+        comfy_transport=httpx.MockTransport(
+            lambda r: (
+                httpx.Response(200, json={"devices": []})
+                if r.url.path == "/system_stats"
+                else httpx.Response(200, json={})
+            )
+        ),
+    )
+    assert report.reachable is True
+    assert "topsecret" not in report.url
+    assert report.url == "http://127.0.0.1:8188"
+
+
+def test_probe_ollama_and_render_environment_report_redact_userinfo() -> None:
+    from mvdirector.setup import render_environment_report
+
+    ollama_probe = probe_ollama(
+        "http://bob:hunter2@127.0.0.1:11434",
+        transport=httpx.MockTransport(lambda _r: httpx.Response(503)),
+    )
+    assert ollama_probe.reachable is False
+    assert "hunter2" not in ollama_probe.error
+
+    report = EnvironmentReport(
+        python_version="3.12.0",
+        platform_label="Darwin arm64",
+        ffmpeg_ok=True,
+        ffprobe_ok=True,
+        extras=[],
+        ollama=ollama_probe,
+        comfy=ComfyProbe(
+            url="http://carol:s3cr3t@127.0.0.1:8188",
+            reachable=True,
+            devices=["RTX 4090"],
+        ),
+    )
+    rendered = render_environment_report(report)
+    assert "hunter2" not in rendered
+    assert "s3cr3t" not in rendered
+    assert "http://127.0.0.1:11434" in rendered
+    assert "http://127.0.0.1:8188" in rendered
+
+
+def test_cli_setup_drops_abandoned_provider_secret_on_switch_and_respects_existing_dotenv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mvdirector.dotenv import write_project_dotenv_var
+    from mvdirector.llm.check import LLMCheckResult
+    from mvdirector.setup import ComfyWiringReport
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(api, "inspect_environment", lambda **_kw: _fake_report(healthy=True))
+    monkeypatch.setattr(
+        api,
+        "check_comfy_wiring",
+        lambda _dir: ComfyWiringReport(url="http://127.0.0.1:8188", reachable=True),
+    )
+
+    calls = {"n": 0}
+
+    def fake_verify(cfg: object, **_kw: object) -> LLMCheckResult:
+        calls["n"] += 1
+        if getattr(cfg, "provider", None) == "openai":
+            return LLMCheckResult(
+                json_ok=True,
+                vision="error",
+                vision_detail="quota exceeded on vision",
+                vision_error_kind="quota",
+            )
+        return LLMCheckResult(json_ok=True, vision="ok")
+
+    monkeypatch.setattr(api, "verify_llm_config", fake_verify)
+
+    # Interactive: enter OpenAI key, vision fails with quota, user switches to ollama.
+    # The abandoned OPENAI_API_KEY must NOT be prompted to save or written to .env.
+    switched_dir = tmp_path / "switched"
+    answers = "\n".join(
+        [
+            "y",  # confirm creating new project
+            "Switched Song",  # title
+            "http://127.0.0.1:8188",  # comfy url
+            "openai",  # provider
+            "gpt-4o",  # model
+            "sk-abandoned-secret",  # key
+            "switch",  # switch provider after vision quota failure
+            "ollama",  # new provider
+            "gemma3:12b",  # model
+            "ltx",  # video preset
+            "",
+        ]
+    )
+    res = runner.invoke(app, ["setup", str(switched_dir)], input=answers)
+    assert res.exit_code == 0, res.output
+    assert "Save OPENAI_API_KEY" not in res.stdout
+    assert not (switched_dir / ".env").exists()
+
+    # Non-interactive re-run on project that already stores OPENAI_API_KEY in .env
+    # should not emit a misleading "Note: export OPENAI_API_KEY=..." warning.
+    existing_dir = tmp_path / "with-dotenv"
+    api.init_project(existing_dir)
+    write_project_dotenv_var(existing_dir, "OPENAI_API_KEY", "sk-already-saved")
+    res2 = runner.invoke(
+        app,
+        [
+            "setup",
+            str(existing_dir),
+            "--non-interactive",
+            "--no-verify",
+            "--llm-provider",
+            "openai",
+            "--llm-model",
+            "gpt-4o",
+        ],
+    )
+    assert res2.exit_code == 0, res2.output
+    assert "Note: export OPENAI_API_KEY" not in res2.stdout
 
 
 def test_optimize_setup_options_local_vs_remote_and_vram() -> None:

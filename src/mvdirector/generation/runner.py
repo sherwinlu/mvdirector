@@ -101,7 +101,9 @@ def load_templates(project: Project, names: Iterable[str]) -> dict[str, Workflow
         if name not in comfy.workflows:
             raise ConfigError(f"comfy.workflows has no entry for '{name}'")
         bindings_path = project.path(Path(comfy.workflows_dir) / comfy.workflows[name])
-        templates[name] = WorkflowTemplate.load(name, bindings_path, root=project.root)
+        templates[name] = WorkflowTemplate.load(
+            name, bindings_path, root=project.root, environ=project.environ()
+        )
     return templates
 
 

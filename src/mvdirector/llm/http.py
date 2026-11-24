@@ -21,15 +21,39 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from mvdirector.errors import ConfigError, ImagesNotSupportedError, LLMError, LLMUnavailableError
+from mvdirector.errors import (
+    ConfigError,
+    ImagesNotSupportedError,
+    LLMError,
+    LLMQuotaError,
+    LLMUnavailableError,
+)
 
 log = logging.getLogger("mvdirector.llm")
 
 _RETRYABLE = {429, 500, 502, 503, 504}
 IMAGE_WORDS = ("image", "vision", "multimodal", "multi-modal")
 _KEY_WORDS = ("api key", "api_key", "apikey", "authentication", "unauthorized")
+QUOTA_WORDS = (
+    "insufficient_quota",
+    "exceeded your current quota",
+    "quota exceeded",
+    "credit balance is too low",
+    "billing hard limit",
+    "out of credits",
+    "usage limit",
+    "spending limit",
+    "monthly limit",
+    "plan and billing",
+)
 _MAX_RETRY_AFTER = 30.0
 _MAX_SSE_BYTES = 16 * 1024 * 1024  # 16 MiB safety cap per streamed LLM response
+
+
+def is_quota_error(text: str) -> bool:
+    """True when an error body indicates account billing, credit, or usage-quota exhaustion."""
+    lowered = text.lower()
+    return any(word in lowered for word in QUOTA_WORDS)
 
 
 def _host_port(parts: Any) -> str:
@@ -115,7 +139,13 @@ class HttpJSON:
                 last = str(exc) or type(exc).__name__
             else:
                 described = _mentions(response, no_retry_words)
-                if response.status_code in _RETRYABLE and not final and not described:
+                quota_exhausted = response.status_code == 429 and is_quota_error(response.text)
+                if (
+                    response.status_code in _RETRYABLE
+                    and not final
+                    and not described
+                    and not quota_exhausted
+                ):
                     delay = retry_delay(response, attempt)
                     log.warning(
                         "%s returned %d; retrying in %.0f s",
@@ -156,7 +186,15 @@ class HttpJSON:
                     if response.status_code != 200:
                         response.read()
                         described = _mentions(response, no_retry_words)
-                        if response.status_code in _RETRYABLE and not final and not described:
+                        quota_exhausted = response.status_code == 429 and is_quota_error(
+                            response.text
+                        )
+                        if (
+                            response.status_code in _RETRYABLE
+                            and not final
+                            and not described
+                            and not quota_exhausted
+                        ):
                             delay = retry_delay(response, attempt)
                             log.warning(
                                 "%s returned %d; retrying in %.0f s",
@@ -324,6 +362,11 @@ def check_response(
     if status == 404:
         raise LLMUnavailableError(
             f"{provider} could not find the model or endpoint ({message}). {not_found_hint}"
+        )
+    if status == 402 or (status in (400, 429) and is_quota_error(message)):
+        raise LLMQuotaError(
+            f"{provider} usage or quota limit reached ({message}). "
+            "Check your billing/usage limits, or switch to another provider or local Ollama."
         )
     if status == 429:
         raise LLMError(f"{provider} is rate limiting requests ({message}). Try again shortly.")

@@ -146,9 +146,13 @@ mvd setup projects/my-song
 
 `mvd setup` will prompt you for:
 - **Project title**
-- **ComfyUI URL** (local `http://127.0.0.1:8188`, another computer on your home LAN/Tailscale, or a cloud HTTPS URL; for non-local URLs it also offers an optional Bearer auth env var such as `COMFY_TOKEN` and re-probes the server immediately to confirm connectivity)
-- **LLM provider & model** (defaults to `ollama` and automatically picks `gemma3:12b` or another vision model you already pulled; also supports `openai_compatible`, `anthropic`, `openai`, `gemini`, or `none`)
+- **ComfyUI URL** (local `http://127.0.0.1:8188`, another computer on your home LAN/Tailscale, or a cloud HTTPS URL; for remote URLs it also offers a Bearer auth env var such as `COMFY_TOKEN`, masked token entry, and immediate `/system_stats` + `/object_info` connectivity probing)
+- **LLM provider & model** (`ollama`, `openai` / `chatgpt`, `anthropic` / `claude`, `gemini`, `openai_compatible`, or `none`):
+  - Choosing **Ollama** checks whether Ollama is running and offers to install it (via Homebrew on macOS or winget on Windows), start `ollama serve`, and pull your chosen vision model if missing.
+  - Choosing a **cloud LLM** skips Ollama completely, prompts (with hidden input) for your API key if not already set, and lets you save it to an owner-only (`0600`), gitignored `<project>/.env` file (or keep it shell-only via `export`).
+  - Runs a **live LLM sanity check** right away (JSON + vision), clearly flagging invalid API keys, usage/billing quota limits, unknown models, or text-only models so you can retry, switch providers, or disable vision QC on the spot.
 - **Video model family preset** (`ltx`, `wan`, `wan-i2v`, `exact`, or `custom`), which writes the matching `frame_multiple`, `frame_offset`, `size_multiple`, and `max_clip_seconds` into `project.yaml` (`exact` sets `1n+0` frames and `size_multiple: 1` for arbitrary-duration or cloud API models)
+- **ComfyUI wiring sanity check**: confirms ComfyUI is serving nodes (`/object_info`), and whenever `.api.json` workflow files already exist in `workflows/`, validates all bindings and live ComfyUI node/checkpoint availability immediately. Pass `--no-verify` to skip live checks, or `--non-interactive --verify` to run checks headlessly.
 
 You can also run it non-interactively with flags:
 ```bash

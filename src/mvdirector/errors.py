@@ -53,6 +53,14 @@ class LLMUnavailableError(LLMError):
     """
 
 
+class LLMQuotaError(LLMUnavailableError):
+    """The provider account hit its usage, billing, or quota limit.
+
+    Subclasses ``LLMUnavailableError`` so callers fail fast instead of retrying or hammering an
+    exhausted account on every shot.
+    """
+
+
 class ImagesNotSupportedError(LLMError):
     """The configured model or server does not accept image input."""
 

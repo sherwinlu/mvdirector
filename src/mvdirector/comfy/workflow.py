@@ -15,6 +15,7 @@ import copy
 import json
 import logging
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -89,7 +90,14 @@ class WorkflowTemplate:
         self._graph = graph
 
     @classmethod
-    def load(cls, name: str, bindings_path: Path, root: Path | None = None) -> WorkflowTemplate:
+    def load(
+        cls,
+        name: str,
+        bindings_path: Path,
+        root: Path | None = None,
+        *,
+        environ: Mapping[str, str] | None = None,
+    ) -> WorkflowTemplate:
         if not bindings_path.is_file():
             raise WorkflowBindingError(
                 f"Bindings file for workflow '{name}' not found: {bindings_path}"
@@ -101,7 +109,7 @@ class WorkflowTemplate:
             )
         try:
             bindings = WorkflowBindings.model_validate_json(bindings_path.read_text("utf-8"))
-            bindings.defaults = expand_env(bindings.defaults)
+            bindings.defaults = expand_env(bindings.defaults, environ=environ)
         except (ValidationError, ConfigError, OSError, UnicodeDecodeError) as exc:
             raise WorkflowBindingError(f"Invalid bindings file {bindings_path}:\n{exc}") from exc
         raw_workflow = Path(bindings.workflow)

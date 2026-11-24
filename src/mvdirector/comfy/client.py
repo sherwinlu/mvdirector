@@ -546,6 +546,7 @@ class ComfyClient:
         # The VRAM floor is checked once per phase (the first job after a /free), not per job:
         # within a phase ComfyUI keeps the phase's model loaded on purpose.
         self._vram_floor_checked = False
+        self._vram_lock = threading.RLock()
         headers = dict(config.headers)
         if not any(key.lower() == "user-agent" for key in headers):
             headers["User-Agent"] = f"mvdirector/{__version__}"
@@ -726,7 +727,8 @@ class ComfyClient:
 
     def free_memory(self, *, unload_models: bool = True, free_memory: bool = True) -> None:
         """Ask ComfyUI to unload models and free VRAM between workflow phases."""
-        self._vram_floor_checked = False
+        with self._vram_lock:
+            self._vram_floor_checked = False
         try:
             response = self._http.post(
                 "/free",
@@ -796,9 +798,10 @@ class ComfyClient:
         partial_execution_targets: list[str] | None = None,
     ) -> Path:
         """Queue ``graph``, wait for it and download its output to ``destination``."""
-        if not self._vram_floor_checked:
-            self.check_vram_floor()
-            self._vram_floor_checked = True
+        with self._vram_lock:
+            if not self._vram_floor_checked:
+                self.check_vram_floor()
+                self._vram_floor_checked = True
         started = time.monotonic()
         prompt_id = self.queue(graph, partial_execution_targets=partial_execution_targets)
         self._emit_progress(ComfyProgress(prompt_id=prompt_id, state="queued", elapsed_seconds=0.0))

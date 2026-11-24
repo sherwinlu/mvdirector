@@ -39,7 +39,7 @@ from mvdirector.audio.stems import StemSeparator
 from mvdirector.cleanup import CleanupPlan, apply_cleanup, plan_cleanup
 from mvdirector.comfy.client import ComfyClient
 from mvdirector.comfy.provider import ComfyEndpointProvider, StaticComfyProvider
-from mvdirector.config import CONFIG_FILENAME, LLMConfig, ReviewMode
+from mvdirector.config import CONFIG_FILENAME, LLMConfig, ReviewMode, validate_max_concurrency
 from mvdirector.errors import BudgetExceeded, ConfigError, LLMError, MVDError
 from mvdirector.generation import plates as plates_mod
 from mvdirector.generation import previz as previz_mod
@@ -921,6 +921,7 @@ def generate(
     comfy_provider: ComfyEndpointProvider | None = None,
     *,
     chapters: list[str] | None = None,
+    max_concurrency: int | None = None,
 ) -> GenerateResult:
     """Generate and quality-check stills and/or videos, retrying failures automatically.
 
@@ -937,6 +938,9 @@ def generate(
             observer(event)
 
     project = open_project(project_dir, review_mode)
+    effective_concurrency = validate_max_concurrency(
+        project.config.comfy.max_concurrency if max_concurrency is None else max_concurrency
+    )
     manifest = project.load_manifest()
     selected_shots = _resolve_target_shots(manifest, shots, chapters)
 
@@ -1016,7 +1020,8 @@ def generate(
             )
             policy = RetryPolicy(project.config.retry, project.config.seed, llm)
             budget = RunBudget(project.config.retry.max_generations_per_run)
-            with project.run_lock(), _lease(project, comfy_provider) as comfy:
+            effective_provider: ComfyEndpointProvider = comfy_provider or StaticComfyProvider()
+            with project.run_lock(), effective_provider.lease(project) as comfy:
                 manifest = result.manifest = project.load_manifest()
                 locked_shots = _resolve_target_shots(manifest, shots, chapters)
                 comfy.ping()
@@ -1030,6 +1035,8 @@ def generate(
                     budget,
                     observer=observer,
                     draft=draft,
+                    max_concurrency=effective_concurrency,
+                    comfy_provider=effective_provider,
                 )
                 try:
                     runner.run(effective_kinds, locked_shots)

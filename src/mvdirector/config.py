@@ -447,6 +447,24 @@ class VideoConfig(_Section):
         return _snap_size(dw, dh, self.size_multiple)
 
 
+MAX_COMFY_CONCURRENCY = 64
+
+
+def validate_max_concurrency(value: object) -> int:
+    """Validate an integer concurrency cap in ``[1, MAX_COMFY_CONCURRENCY]``."""
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 1
+        or value > MAX_COMFY_CONCURRENCY
+    ):
+        raise ConfigError(
+            f"comfy.max_concurrency must be an integer between 1 and {MAX_COMFY_CONCURRENCY}, "
+            f"got {value!r}."
+        )
+    return value
+
+
 class ComfyConfig(_Section):
     base_url: str = Field(default="${COMFY_URL:-http://127.0.0.1:8188}", validate_default=True)
     headers: dict[str, str] = Field(default_factory=dict)
@@ -489,6 +507,15 @@ class ComfyConfig(_Section):
     request_timeout: float = Field(default=60.0, gt=0.0, allow_inf_nan=False)
     job_timeout: float = Field(default=1800.0, gt=0.0, allow_inf_nan=False)
     poll_interval: float = Field(default=3.0, ge=0.0, allow_inf_nan=False)
+    max_concurrency: int = Field(
+        default=1,
+        ge=1,
+        le=MAX_COMFY_CONCURRENCY,
+        description=(
+            "Maximum shots generated concurrently within each dependency wave "
+            "(1 = sequential; set >1 for RunPod Serverless or multi-pod pools)."
+        ),
+    )
     workflows_dir: str = "workflows"
     reference_notation: Literal["prose", "tags"] = Field(
         default="prose",

@@ -72,6 +72,7 @@ comfy:
   request_timeout: 60
   job_timeout: 1800
   poll_interval: 3
+  max_concurrency: 1             # shots rendered in parallel per wave (>1 for serverless / multi-pod)
   workflows_dir: workflows
   reference_notation: prose      # prose ('first/second reference image') | tags ('@image1', '@video1')
   workflows:                     # starter examples; point these at bindings for any model you prefer

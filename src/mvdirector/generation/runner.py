@@ -13,7 +13,12 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
+import threading
+import weakref
 from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import AbstractContextManager, nullcontext, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -21,7 +26,9 @@ from typing import Any
 from mvdirector import assemble, media
 from mvdirector.comfy.cache import ComfyRenderCache, canonical_graph_key, file_sha256
 from mvdirector.comfy.client import ComfyClient
+from mvdirector.comfy.provider import ComfyEndpointProvider, StaticComfyProvider
 from mvdirector.comfy.workflow import OutputSpec, WorkflowTemplate
+from mvdirector.config import validate_max_concurrency
 from mvdirector.errors import BudgetExceeded, ComfyJobError, ConfigError, MediaToolError
 from mvdirector.generation.candidates import ensure_upload_audio_track
 from mvdirector.models import (
@@ -83,15 +90,44 @@ class RunBudget:
 
     def __init__(self, limit: int) -> None:
         self.limit = limit
-        self.used = 0
+        self._used = 0
+        self._lock = threading.Lock()
 
-    def consume(self) -> None:
-        if self.used >= self.limit:
-            raise BudgetExceeded(
-                f"Reached the limit of {self.limit} generations for this run "
-                "(retry.max_generations_per_run). Progress is saved; run again to continue."
-            )
-        self.used += 1
+    @property
+    def used(self) -> int:
+        with self._lock:
+            return self._used
+
+    @used.setter
+    def used(self, value: int) -> None:
+        with self._lock:
+            self._used = value
+
+    def consume(self) -> int:
+        with self._lock:
+            if self._used >= self.limit:
+                raise BudgetExceeded(
+                    f"Reached the limit of {self.limit} generations for this run "
+                    "(retry.max_generations_per_run). Progress is saved; run again to continue."
+                )
+            self._used += 1
+            return self._used
+
+    def refund(self) -> None:
+        """Return one reserved slot when endpoint acquisition fails before an attempt starts."""
+        with self._lock:
+            if self._used > 0:
+                self._used -= 1
+
+
+@dataclass
+class _UploadTable:
+    """Per-client upload cache and remote-name -> local-file mapping for graph caching."""
+
+    uploads: dict[tuple[Path, int, int], str] = field(default_factory=dict)
+    uploaded_local: dict[str, Path] = field(default_factory=dict)
+    uploaded_digests: dict[str, str] = field(default_factory=dict)
+    in_flight: dict[tuple[Path, int, int], threading.Event] = field(default_factory=dict)
 
 
 def load_templates(project: Project, names: Iterable[str]) -> dict[str, WorkflowTemplate]:
@@ -128,19 +164,39 @@ class ShotRunner:
         budget: RunBudget,
         observer: RunObserver | None = None,
         draft: bool = False,
+        *,
+        max_concurrency: int | None = None,
+        comfy_provider: ComfyEndpointProvider | None = None,
     ) -> None:
+        raw_concurrency = (
+            project.config.comfy.max_concurrency if max_concurrency is None else max_concurrency
+        )
+        self._max_concurrency = validate_max_concurrency(raw_concurrency)
         self._project = project
         self._manifest = manifest
         self._comfy = comfy
+        self._comfy_provider = comfy_provider
         self._gates = gates
         self._policy = policy
         self._templates = templates
         self._budget = budget
         self._observer = observer
         self._draft = draft
-        self._uploads: dict[tuple[Path, int, int], str] = {}
-        self._uploaded_local: dict[str, Path] = {}
-        self._uploaded_digests: dict[str, str] = {}
+
+        primary_table = _UploadTable()
+        self._primary_upload_table = primary_table
+        self._uploads = primary_table.uploads
+        self._uploaded_local = primary_table.uploaded_local
+        self._uploaded_digests = primary_table.uploaded_digests
+        self._upload_tables: weakref.WeakKeyDictionary[Any, _UploadTable] = (
+            weakref.WeakKeyDictionary()
+        )
+        # Keep a strong reference alongside the table so GC + allocator address reuse cannot
+        # map a newly allocated non-weakrefable client (e.g. a different pod) onto stale uploads.
+        self._unweakref_upload_tables: dict[int, tuple[Any, _UploadTable]] = {}
+        with suppress(TypeError):
+            self._upload_tables[comfy] = primary_table
+
         self._file_hashes: dict[tuple[Path, int, int], str] = {}
         self._identities: dict[tuple[str, ...], IdentityReference] = {}
         self._warned: set[str] = set()
@@ -151,10 +207,24 @@ class ShotRunner:
             else None
         )
 
+        # Lock hierarchy (strictly one-way to prevent deadlocks):
+        # _qc_lock -> {_state_lock, _manifest_lock}; all remaining locks are leaves.
+        self._qc_lock = threading.Lock()
+        self._manifest_lock = threading.RLock()
+        self._observer_lock = threading.Lock()
+        self._upload_lock = threading.Lock()
+        self._cache_lock = threading.Lock()
+        self._state_lock = threading.Lock()
+        self._client_pool_lock = threading.Lock()
+        self._media_cache_lock = threading.Lock()
+        self._primary_busy = False
+        self._abort_event = threading.Event()
+
     # ---------------------------------------------------------------- public
 
     def run(self, kinds: list[AssetKind], shot_ids: list[str] | None = None) -> None:
         """Process the given asset kinds for the selected shots (all shots by default)."""
+        self._abort_event.clear()
         shots = [s for s in self._manifest.shots if shot_ids is None or s.id in shot_ids]
         has_chained = any(s.continuity is not ContinuityMode.CUT for s in shots)
         # Chained shots run after the shot they continue from, whichever kinds this run covers:
@@ -173,11 +243,112 @@ class ShotRunner:
                         if (self._project.config.comfy.sort_batch_for_cache and wave_idx == 0)
                         else wave_shots
                     )
-                    for shot in ordered:
-                        self._run_asset(shot, kind)
+                    self._run_wave(ordered, kind)
         finally:
-            self._project.save_manifest(self._manifest)
+            with self._upload_lock:
+                self._unweakref_upload_tables.clear()
+            with self._manifest_lock:
+                self._project.save_manifest(self._manifest)
             self._emit(RunEvent("run_finished", generations_used=self._budget.used))
+
+    @staticmethod
+    def _shot_needs_work(shot: Shot, kind: AssetKind) -> bool:
+        """True when ``shot`` may perform generation work in this phase."""
+        if shot.continuity is ContinuityMode.CONTINUE and shot.still.status is AssetStatus.PENDING:
+            return True
+        state = shot.asset(kind)
+        if state.status is not AssetStatus.PENDING:
+            return False
+        if kind is AssetKind.VIDEO:
+            return shot.still.status is AssetStatus.PASSED
+        return True
+
+    def _run_wave(self, ordered: list[Shot], kind: AssetKind) -> None:
+        """Execute one dependency wave, concurrently when ``max_concurrency > 1``."""
+        if self._max_concurrency <= 1:
+            for shot in ordered:
+                self._run_asset(shot, kind, client=self._comfy)
+            return
+        work_count = sum(1 for shot in ordered if self._shot_needs_work(shot, kind))
+        worker_count = min(self._max_concurrency, work_count)
+        if worker_count <= 1:
+            for shot in ordered:
+                self._run_asset(shot, kind, client=self._comfy)
+            return
+
+        self._abort_event.clear()
+        first_error: BaseException | None = None
+        error_lock = threading.Lock()
+
+        def _record_error(exc: BaseException) -> None:
+            nonlocal first_error
+            with error_lock:
+                if first_error is None or (
+                    isinstance(first_error, BudgetExceeded) and not isinstance(exc, BudgetExceeded)
+                ):
+                    first_error = exc
+            self._abort_event.set()
+
+        def _worker(shot: Shot) -> None:
+            if self._abort_event.is_set():
+                return
+            try:
+                self._run_asset(shot, kind)
+            except BaseException as exc:
+                _record_error(exc)
+
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="mvd-shot") as pool:
+            futures = [pool.submit(_worker, shot) for shot in ordered]
+            try:
+                for fut in as_completed(futures):
+                    if self._abort_event.is_set():
+                        for pending in futures:
+                            pending.cancel()
+                    if not fut.cancelled():
+                        fut.result()
+            except BaseException:
+                self._abort_event.set()
+                for pending in futures:
+                    pending.cancel()
+                raise
+
+        if first_error is not None:
+            raise first_error
+
+    def _acquire_shot_client(
+        self,
+    ) -> tuple[ComfyClient, AbstractContextManager[ComfyClient] | str | None]:
+        """Claim the primary client if idle, else lease an extra client from ``comfy_provider``."""
+        if self._comfy_provider is None or isinstance(self._comfy_provider, StaticComfyProvider):
+            # A static lease only re-opens the primary's own server, so share the primary
+            # (httpx.Client is thread-safe; its VRAM floor check runs once per phase under a
+            # lock). A fresh client per shot would re-upload every reference, and its own first
+            # VRAM floor check would see the phase model held by another worker's running job
+            # and call /free, unloading that model mid-phase or aborting with
+            # ComfyResourceError when VRAM stays occupied.
+            return self._comfy, None
+        with self._client_pool_lock:
+            if not self._primary_busy:
+                self._primary_busy = True
+                return self._comfy, "primary"
+        cm = self._comfy_provider.lease(self._project)
+        client = cm.__enter__()
+        return client, cm
+
+    def _release_shot_client(
+        self,
+        client: ComfyClient,
+        lease_handle: AbstractContextManager[ComfyClient] | str | None,
+        exc_info: tuple[Any, Any, Any] = (None, None, None),
+    ) -> None:
+        if lease_handle is None:
+            return
+        if lease_handle == "primary":
+            with self._client_pool_lock:
+                self._primary_busy = False
+            return
+        assert not isinstance(lease_handle, str)
+        lease_handle.__exit__(*exc_info)
 
     def _chain_waves(self, shots: list[Shot]) -> list[list[Shot]]:
         """Partition shots into dependency waves so CUT shots batch while chains run in order."""
@@ -232,7 +403,8 @@ class ShotRunner:
 
     def _emit(self, event: RunEvent) -> None:
         if self._observer is not None:
-            self._observer(event)
+            with self._observer_lock:
+                self._observer(event)
 
     # --------------------------------------------------------------- private
 
@@ -241,17 +413,17 @@ class ShotRunner:
         character = self._manifest.shot_character(shot)
         reference = character.reference_for(shot.wardrobe)
         warn_key = f"{shot.character or ''}:{shot.wardrobe or ''}"
-        if (
-            reference is not None
-            and shot.wardrobe
-            and shot.wardrobe not in character.references
-            and warn_key not in self._warned
-        ):
-            self._warned.add(warn_key)
-            log.warning(
-                "No reference sheet for wardrobe state '%s'; using the base sheet instead.",
-                shot.wardrobe,
-            )
+        if reference is not None and shot.wardrobe and shot.wardrobe not in character.references:
+            should_warn = False
+            with self._state_lock:
+                if warn_key not in self._warned:
+                    self._warned.add(warn_key)
+                    should_warn = True
+            if should_warn:
+                log.warning(
+                    "No reference sheet for wardrobe state '%s'; using the base sheet instead.",
+                    shot.wardrobe,
+                )
         return reference
 
     def _identity_for(self, shot: Shot) -> IdentityReference | None:
@@ -291,12 +463,17 @@ class ShotRunner:
         return resolved
 
     def _attach_prop_refs(
-        self, params: dict[str, Any], template: WorkflowTemplate, prop_refs: list[tuple[str, Path]]
+        self,
+        params: dict[str, Any],
+        template: WorkflowTemplate,
+        prop_refs: list[tuple[str, Path]],
+        *,
+        client: ComfyClient | None = None,
     ) -> None:
         if prop_refs and template.accepts("prop_image"):
-            params["prop_image"] = self._upload(prop_refs[0][1])
+            params["prop_image"] = self._upload(prop_refs[0][1], client=client)
             if len(prop_refs) > 1 and template.accepts("prop_image_2"):
-                params["prop_image_2"] = self._upload(prop_refs[1][1])
+                params["prop_image_2"] = self._upload(prop_refs[1][1], client=client)
 
     def _previz_for(self, shot: Shot, template: WorkflowTemplate) -> Path | None:
         if not shot.previz_video or not template.accepts("previz_video"):
@@ -410,8 +587,6 @@ class ShotRunner:
         media.extract_frame_at_index(video_path, frame_index, destination)
         # The clip starts directly from the handoff frame: align the audio slice to shot.start
         # (zero head handle) so frame 0 is the handoff boundary and stays locked to the audio.
-        shot.audio_slice.start = round(shot.start, 3)
-        shot.audio_slice.head_handle = 0.0
         attempt = Attempt(
             number=number,
             strategy=RetryStrategy.HANDOFF,
@@ -421,16 +596,21 @@ class ShotRunner:
             path=self._project.rel(destination),
             qc=QCReport(passed=True, score=1.0),
         )
-        state.attempts.append(attempt)
-        state.status = AssetStatus.PASSED
-        state.selected_attempt = number
-        self._project.save_manifest(self._manifest)
+        with self._manifest_lock:
+            shot.audio_slice.start = round(shot.start, 3)
+            shot.audio_slice.head_handle = 0.0
+            state.attempts.append(attempt)
+            state.status = AssetStatus.PASSED
+            state.selected_attempt = number
+            self._project.save_manifest(self._manifest)
         self._emit(
             RunEvent("asset_passed", asset=AssetKind.STILL.value, shot_id=shot.id, attempt=number)
         )
         return True
 
-    def _run_asset(self, shot: Shot, kind: AssetKind) -> None:
+    def _run_asset(self, shot: Shot, kind: AssetKind, *, client: ComfyClient | None = None) -> None:
+        if self._abort_event.is_set():
+            return
         state = shot.asset(kind)
         if shot.continuity is ContinuityMode.CONTINUE and shot.still.status is AssetStatus.PENDING:
             # A one-take continuation's still is the previous clip's last played frame. The video
@@ -442,105 +622,142 @@ class ShotRunner:
             # Never spend video time on a still that has not passed QC or been accepted.
             log.info("%s: still is %s; skipping video", shot.id, shot.still.status.value)
             return
-        while state.status is AssetStatus.PENDING:
-            if len(state.attempts) >= state.attempts_allowed:
-                if kind is AssetKind.VIDEO and self._fall_back_from_lipsync(shot, state):
-                    continue
-                self._mark_exhausted(shot, kind, state)
-                break
-            self._budget.consume()
-            still_tpl_key = "still" if shot.type.shows_singer else "t2i"
-            can_repair = (
-                kind is AssetKind.STILL
-                and still_tpl_key in self._templates
-                and self._templates[still_tpl_key].accepts("reference_image")
-            )
-            plan = self._policy.prepare(shot, kind, can_repair=can_repair)
-            shot.review = Review()  # any earlier review no longer describes this shot
-            self._emit(
-                RunEvent(
-                    "attempt_started",
-                    asset=kind.value,
-                    shot_id=shot.id,
-                    attempt=plan.number,
-                    strategy=plan.strategy.value,
-                    generations_used=self._budget.used,
+        active_client: ComfyClient | None = client
+        lease_handle: AbstractContextManager[ComfyClient] | str | None = None
+        exc_info: tuple[Any, Any, Any] = (None, None, None)
+        try:
+            while state.status is AssetStatus.PENDING:
+                if self._abort_event.is_set():
+                    break
+                if len(state.attempts) >= state.attempts_allowed:
+                    if kind is AssetKind.VIDEO and self._fall_back_from_lipsync(
+                        shot, state, client=active_client
+                    ):
+                        continue
+                    self._mark_exhausted(shot, kind, state)
+                    break
+                generations_used = self._budget.consume()
+                if active_client is None:
+                    try:
+                        active_client, lease_handle = self._acquire_shot_client()
+                    except BaseException:
+                        self._budget.refund()
+                        raise
+                still_tpl_key = "still" if shot.type.shows_singer else "t2i"
+                can_repair = (
+                    kind is AssetKind.STILL
+                    and still_tpl_key in self._templates
+                    and self._templates[still_tpl_key].accepts("reference_image")
                 )
-            )
-            prev_attempt = state.attempts[-1] if state.attempts else None
-            attempt = self._attempt(shot, kind, plan, previous_attempt=prev_attempt)
-            # Anti-regression guard for targeted in-place still repair
-            # (inspired by afj176/open-cinema-studio studio.py:_repair_frame).
-            if (
-                plan.strategy is RetryStrategy.REPAIR_STILL
-                and prev_attempt is not None
-                and prev_attempt.qc is not None
-                and attempt.qc is not None
-                and not attempt.qc.passed
-            ):
-                old_failed = {c.name for c in prev_attempt.qc.failed_checks}
-                new_failed = {c.name for c in attempt.qc.failed_checks}
-                improved = new_failed <= old_failed and len(attempt.qc.issues) < len(
-                    prev_attempt.qc.issues
-                )
-                if not improved:
-                    attempt.regressed = True
-                    log.info(
-                        "%s still repair did not strictly reduce issues (%s -> %s); "
-                        "excluding regressed repair from best_attempt selection",
-                        shot.id,
-                        len(prev_attempt.qc.issues),
-                        len(attempt.qc.issues),
-                    )
-            state.attempts.append(attempt)
-            self._manifest.total_generations += 1
-            self._emit(
-                RunEvent(
-                    "attempt_finished",
-                    asset=kind.value,
-                    shot_id=shot.id,
-                    attempt=attempt.number,
-                    strategy=attempt.strategy.value,
-                    passed=attempt.qc.passed if attempt.qc else None,
-                    score=attempt.qc.score if attempt.qc else None,
-                    issues=attempt.qc.issues if attempt.qc else [],
-                    error=attempt.error,
-                    generations_used=self._budget.used,
-                )
-            )
-            if attempt.qc is not None and attempt.qc.passed:
-                # Smart Cutaway Rescue: if lip-sync correlation is critically low on an advisory
-                # pass and smart_cutaway_rescue is enabled, convert to a b-roll cutaway instead
-                # of keeping a poor mouth-sync clip (inspired by VisualFrisson/ComfyUI-OneShotMV).
-                if (
-                    kind is AssetKind.VIDEO
-                    and self._should_rescue_weak_lipsync(shot, attempt)
-                    and self._convert_lipsync_to_broll(shot, state)
-                ):
-                    continue
-                state.status = AssetStatus.PASSED
-                state.selected_attempt = attempt.number
+                try:
+                    # Serialize RetryPolicy.prepare under _qc_lock so prompt rewrites and Vision QC
+                    # never race on the shared LLMClient instance (_qc_lock -> _manifest_lock).
+                    with self._qc_lock:
+                        plan = self._policy.prepare(shot, kind, can_repair=can_repair)
+                except BaseException:
+                    self._budget.refund()
+                    raise
+                with self._manifest_lock:
+                    shot.review = Review()  # any earlier review no longer describes this shot
                 self._emit(
                     RunEvent(
-                        "asset_passed", asset=kind.value, shot_id=shot.id, attempt=attempt.number
+                        "attempt_started",
+                        asset=kind.value,
+                        shot_id=shot.id,
+                        attempt=plan.number,
+                        strategy=plan.strategy.value,
+                        generations_used=generations_used,
                     )
                 )
-            self._project.save_manifest(self._manifest)
-            if (
-                attempt.error is not None
-                and len(state.attempts) > 1
-                and state.attempts[-2].error == attempt.error
-            ):
-                # A different seed or prompt cannot fix a missing model or a dead network,
-                # so stop here and leave the shot pending for the next run.
-                log.error(
-                    "%s %s: the same error twice in a row, so more attempts would not help. "
-                    "Fix it and run again: %s",
-                    shot.id,
-                    kind.value,
-                    attempt.error,
+                prev_attempt = state.attempts[-1] if state.attempts else None
+                attempt = self._attempt(
+                    shot, kind, plan, previous_attempt=prev_attempt, client=active_client
                 )
-                break
+                # Anti-regression guard for targeted in-place still repair
+                # (inspired by afj176/open-cinema-studio studio.py:_repair_frame).
+                if (
+                    plan.strategy is RetryStrategy.REPAIR_STILL
+                    and prev_attempt is not None
+                    and prev_attempt.qc is not None
+                    and attempt.qc is not None
+                    and not attempt.qc.passed
+                ):
+                    old_failed = {c.name for c in prev_attempt.qc.failed_checks}
+                    new_failed = {c.name for c in attempt.qc.failed_checks}
+                    improved = new_failed <= old_failed and len(attempt.qc.issues) < len(
+                        prev_attempt.qc.issues
+                    )
+                    if not improved:
+                        attempt.regressed = True
+                        log.info(
+                            "%s still repair did not strictly reduce issues (%s -> %s); "
+                            "excluding regressed repair from best_attempt selection",
+                            shot.id,
+                            len(prev_attempt.qc.issues),
+                            len(attempt.qc.issues),
+                        )
+                with self._manifest_lock:
+                    state.attempts.append(attempt)
+                    self._manifest.total_generations += 1
+                self._emit(
+                    RunEvent(
+                        "attempt_finished",
+                        asset=kind.value,
+                        shot_id=shot.id,
+                        attempt=attempt.number,
+                        strategy=attempt.strategy.value,
+                        passed=attempt.qc.passed if attempt.qc else None,
+                        score=attempt.qc.score if attempt.qc else None,
+                        issues=attempt.qc.issues if attempt.qc else [],
+                        error=attempt.error,
+                        generations_used=self._budget.used,
+                    )
+                )
+                if attempt.qc is not None and attempt.qc.passed:
+                    # Smart Cutaway Rescue: if lip-sync correlation is critically low on an
+                    # advisory pass and smart_cutaway_rescue is enabled, convert to a b-roll
+                    # cutaway instead of keeping a poor mouth-sync clip
+                    # (inspired by VisualFrisson/ComfyUI-OneShotMV).
+                    if (
+                        kind is AssetKind.VIDEO
+                        and self._should_rescue_weak_lipsync(shot, attempt)
+                        and self._convert_lipsync_to_broll(shot, state, client=active_client)
+                    ):
+                        continue
+                    with self._manifest_lock:
+                        state.status = AssetStatus.PASSED
+                        state.selected_attempt = attempt.number
+                    self._emit(
+                        RunEvent(
+                            "asset_passed",
+                            asset=kind.value,
+                            shot_id=shot.id,
+                            attempt=attempt.number,
+                        )
+                    )
+                with self._manifest_lock:
+                    self._project.save_manifest(self._manifest)
+                if (
+                    attempt.error is not None
+                    and len(state.attempts) > 1
+                    and state.attempts[-2].error == attempt.error
+                ):
+                    # A different seed or prompt cannot fix a missing model or a dead network,
+                    # so stop here and leave the shot pending for the next run.
+                    log.error(
+                        "%s %s: the same error twice in a row, so more attempts would not help. "
+                        "Fix it and run again: %s",
+                        shot.id,
+                        kind.value,
+                        attempt.error,
+                    )
+                    break
+        except BaseException:
+            exc_info = sys.exc_info()
+            raise
+        finally:
+            if active_client is not None and lease_handle is not None:
+                self._release_shot_client(active_client, lease_handle, exc_info)
 
     def _attempt(
         self,
@@ -549,6 +766,7 @@ class ShotRunner:
         plan: AttemptPlan,
         *,
         previous_attempt: Attempt | None = None,
+        client: ComfyClient | None = None,
     ) -> Attempt:
         state = shot.asset(kind)
         plate = self._plate_for(shot) if kind is AssetKind.STILL else None
@@ -621,12 +839,19 @@ class ShotRunner:
         try:
             if kind is AssetKind.STILL:
                 self._generate_still(
-                    shot, attempt, destination, still_refs, prop_refs, repair_source=repair_source
+                    shot,
+                    attempt,
+                    destination,
+                    still_refs,
+                    prop_refs,
+                    repair_source=repair_source,
+                    client=client,
                 )
             else:
-                self._generate_video(shot, attempt, destination, prop_refs)
+                self._generate_video(shot, attempt, destination, prop_refs, client=client)
             attempt.path = self._project.rel(destination)
-            attempt.qc = self._check(shot, kind, destination)
+            with self._qc_lock:
+                attempt.qc = self._check(shot, kind, destination)
             if kind is AssetKind.VIDEO and attempt.qc is not None:
                 attempt.sync_delay_seconds = self._extract_sync_delay(shot, attempt.qc)
         except (ComfyJobError, MediaToolError) as exc:
@@ -725,6 +950,7 @@ class ShotRunner:
         prop_refs: list[tuple[str, Path]],
         *,
         repair_source: Path | None = None,
+        client: ComfyClient | None = None,
     ) -> None:
         video = self._project.config.video
         width, height = video.generation_size(draft=self._draft)
@@ -739,14 +965,14 @@ class ShotRunner:
         if shot.type.shows_singer:
             template = self._templates["still"]
             if repair_source is not None:
-                params["reference_image"] = self._upload(repair_source)
+                params["reference_image"] = self._upload(repair_source, client=client)
             else:
                 for param, ref_path in still_refs:
-                    params[param] = self._upload(ref_path)
+                    params[param] = self._upload(ref_path, client=client)
         else:
             template = self._templates["t2i"]
             if repair_source is not None and template.accepts("reference_image"):
-                params["reference_image"] = self._upload(repair_source)
+                params["reference_image"] = self._upload(repair_source, client=client)
         if (
             repair_source is None
             and shot.continuity is ContinuityMode.REFRAME
@@ -754,9 +980,11 @@ class ShotRunner:
         ):
             handoff = self._previous_handoff_frame(shot)
             if handoff is not None:
-                params["previous_frame"] = self._upload(handoff)
-        self._attach_prop_refs(params, template, prop_refs)
-        self._run_comfy(template.render(params), template.bindings.output, destination)
+                params["previous_frame"] = self._upload(handoff, client=client)
+        self._attach_prop_refs(params, template, prop_refs, client=client)
+        self._run_comfy(
+            template.render(params), template.bindings.output, destination, client=client
+        )
 
     def _video_template(self, shot: Shot) -> WorkflowTemplate:
         return (
@@ -775,6 +1003,8 @@ class ShotRunner:
         attempt: Attempt,
         destination: Path,
         prop_refs: list[tuple[str, Path]],
+        *,
+        client: ComfyClient | None = None,
     ) -> None:
         video = self._project.config.video
         width, height = video.generation_size(draft=self._draft)
@@ -788,7 +1018,7 @@ class ShotRunner:
             "negative_prompt": self._manifest.visual_bible.negative_prompt,
             "lyrics": shot.lyrics,
             "seed": attempt.seed,
-            "image": self._upload(still_path),
+            "image": self._upload(still_path, client=client),
             "width": width,
             "height": height,
             "num_frames": shot.num_frames,
@@ -797,20 +1027,24 @@ class ShotRunner:
             **attempt.params,
         }
         if shot.type is ShotType.LIPSYNC or "audio" in template.bindings.required:
-            params["audio"] = self._upload(self._ensure_audio_slice(shot))
+            params["audio"] = self._upload(self._ensure_audio_slice(shot), client=client)
         if self._video_uses_audio_video(shot, template):
-            params["audio_video"] = self._upload(self._ensure_audio_video_slice(shot))
+            params["audio_video"] = self._upload(
+                self._ensure_audio_video_slice(shot), client=client
+            )
         if shot.type.shows_singer and template.accepts("reference_video"):
             ref = self._reference_set(shot)
             if ref is not None and ref.video:
                 ref_video_path = self._project.path(ref.video)
                 if ref_video_path.is_file():
-                    params["reference_video"] = self._upload(self._with_audio(ref_video_path))
+                    params["reference_video"] = self._upload(
+                        self._with_audio(ref_video_path), client=client
+                    )
         if template.accepts("end_image"):
             if shot.end_frame_path:
                 end_path = self._project.path(shot.end_frame_path)
                 if end_path.is_file():
-                    params["end_image"] = self._upload(end_path)
+                    params["end_image"] = self._upload(end_path, client=client)
             elif (
                 shot.camera_path_zoom is not None
                 and not shot.type.shows_singer
@@ -821,21 +1055,33 @@ class ShotRunner:
                 safe_shot_id = require_safe_id(shot.id, "shot id")
                 guide_dst = self._project.path(f"assets/stills/{safe_shot_id}_path_guide.png")
                 media.zoom_crop_image(still_path, guide_dst, zoom_factor=shot.camera_path_zoom)
-                params["end_image"] = self._upload(guide_dst)
-        self._attach_prop_refs(params, template, prop_refs)
+                params["end_image"] = self._upload(guide_dst, client=client)
+        self._attach_prop_refs(params, template, prop_refs, client=client)
         previz = self._previz_for(shot, template)
         if previz is not None:
-            params["previz_video"] = self._upload(self._with_audio(previz))
+            params["previz_video"] = self._upload(self._with_audio(previz), client=client)
         previz_depth = self._previz_depth_for(shot, template)
         if previz_depth is not None:
-            params["previz_depth_video"] = self._upload(self._with_audio(previz_depth))
-        self._run_comfy(template.render(params), template.bindings.output, destination)
+            params["previz_depth_video"] = self._upload(
+                self._with_audio(previz_depth), client=client
+            )
+        self._run_comfy(
+            template.render(params), template.bindings.output, destination, client=client
+        )
 
     def _with_audio(self, video_path: Path) -> Path:
         """``video_path``, or a cached copy of it with a silent audio track to upload instead."""
-        return ensure_upload_audio_track(self._project, video_path)
+        with self._media_cache_lock:
+            return ensure_upload_audio_track(self._project, video_path)
 
-    def _run_comfy(self, graph: dict[str, Any], output: OutputSpec, destination: Path) -> Path:
+    def _run_comfy(
+        self,
+        graph: dict[str, Any],
+        output: OutputSpec,
+        destination: Path,
+        *,
+        client: ComfyClient | None = None,
+    ) -> Path:
         """Render ``graph``, using the content-addressed cache when it can.
 
         The cache is an optimization, so none of its failure modes may change the outcome of a
@@ -845,13 +1091,23 @@ class ShotRunner:
         the entire run with a traceback, discarding every shot's progress, even though the render
         itself had succeeded. Each cache interaction is now best-effort and logged.
         """
+        active_client = self._comfy if client is None else client
+        cache_lock = getattr(self, "_cache_lock", nullcontext())
         key: str | None = None
         if self._cache is not None:
+            if hasattr(self, "_upload_lock") and hasattr(self, "_primary_upload_table"):
+                table = self._upload_table_for(active_client)
+                with self._upload_lock:
+                    uploaded_local = dict(table.uploaded_local)
+                    uploaded_digests = dict(table.uploaded_digests)
+            else:
+                uploaded_local = self._uploaded_local
+                uploaded_digests = self._uploaded_digests
             try:
                 key = canonical_graph_key(
                     graph,
-                    self._uploaded_local,
-                    uploaded_digests=self._uploaded_digests,
+                    uploaded_local,
+                    uploaded_digests=uploaded_digests,
                     output_node=output.node,
                     extensions=tuple(output.extensions),
                 )
@@ -859,14 +1115,17 @@ class ShotRunner:
                 log.warning("Skipping ComfyUI cache for this render (unusable key): %s", exc)
             if key is not None:
                 try:
-                    if self._cache.lookup(key, destination):
+                    with cache_lock:
+                        hit = self._cache.lookup(key, destination)
+                    if hit:
                         return destination
                 except (ValueError, OSError) as exc:
                     log.warning("ComfyUI cache lookup failed; rendering instead: %s", exc)
-        result = self._comfy.run(graph, output, destination)
+        result = active_client.run(graph, output, destination)
         if self._cache is not None and key is not None:
             try:
-                self._cache.store(key, result)
+                with cache_lock:
+                    self._cache.store(key, result)
             except (ValueError, OSError) as exc:
                 log.warning("Could not cache render %s: %s", result.name, exc)
         return result
@@ -985,34 +1244,42 @@ class ShotRunner:
             return False
         return sync_check.metrics["correlation"] < retry_cfg.smart_cutaway_max_correlation
 
-    def _convert_lipsync_to_broll(self, shot: Shot, state: AssetState) -> bool:
+    def _convert_lipsync_to_broll(
+        self,
+        shot: Shot,
+        state: AssetState,
+        *,
+        client: ComfyClient | None = None,
+    ) -> bool:
         """Convert a weak or exhausted singing shot into a cutaway if within the cutaway run cap.
 
         Credits & Attribution:
             Smart Cutaway rescue prioritizing weak-lip-sync singing shots inspired by
             ``VisualFrisson/ComfyUI-OneShotMV`` (``fv/broll.py``).
         """
-        if (
-            not self._can_become_cutaway(shot)
-            or "t2i" not in self._templates
-            or "i2v" not in self._templates
-        ):
-            return False
-        # Snapshot mutable shot fields so a failed cutaway still or exception rolls back cleanly.
-        snapshot = (
-            shot.fallback_from,
-            shot.type,
-            shot.continuity,
-            shot.character,
-            list(shot.characters),
-            list(shot.singers),
-            shot.wardrobe,
-            dict(shot.character_wardrobes),
-            shot.still_prompt,
-            shot.motion_prompt,
-            shot.still.model_copy(deep=True),
-        )
-        try:
+        with self._manifest_lock:
+            if (
+                not self._can_become_cutaway(shot)
+                or "t2i" not in self._templates
+                or "i2v" not in self._templates
+            ):
+                return False
+            # Snapshot mutable shot fields so a failed cutaway still or exception rolls back
+            # cleanly. Mutating shot.type to BROLL under _manifest_lock also reserves this
+            # slot against adjacent parallel workers checking the 2-cutaway run cap.
+            snapshot = (
+                shot.fallback_from,
+                shot.type,
+                shot.continuity,
+                shot.character,
+                list(shot.characters),
+                list(shot.singers),
+                shot.wardrobe,
+                dict(shot.character_wardrobes),
+                shot.still_prompt,
+                shot.motion_prompt,
+                shot.still.model_copy(deep=True),
+            )
             shot.fallback_from, shot.type = shot.type, ShotType.BROLL
             shot.continuity = ContinuityMode.CUT
             shot.character = None
@@ -1031,50 +1298,51 @@ class ShotRunner:
             shot.still.reset(self._project.config.retry.max_attempts)
             shot.still.prompt_override = None
             shot.still.param_overrides = {}
-            self._run_asset(shot, AssetKind.STILL)
+
+        def _restore() -> None:
+            with self._manifest_lock:
+                (
+                    shot.fallback_from,
+                    shot.type,
+                    shot.continuity,
+                    shot.character,
+                    shot.characters,
+                    shot.singers,
+                    shot.wardrobe,
+                    shot.character_wardrobes,
+                    shot.still_prompt,
+                    shot.motion_prompt,
+                    shot.still,
+                ) = snapshot
+
+        try:
+            self._run_asset(shot, AssetKind.STILL, client=client)
         except BaseException:
-            (
-                shot.fallback_from,
-                shot.type,
-                shot.continuity,
-                shot.character,
-                shot.characters,
-                shot.singers,
-                shot.wardrobe,
-                shot.character_wardrobes,
-                shot.still_prompt,
-                shot.motion_prompt,
-                shot.still,
-            ) = snapshot
+            _restore()
             raise
         if shot.still.status is not AssetStatus.PASSED:
-            (
-                shot.fallback_from,
-                shot.type,
-                shot.continuity,
-                shot.character,
-                shot.characters,
-                shot.singers,
-                shot.wardrobe,
-                shot.character_wardrobes,
-                shot.still_prompt,
-                shot.motion_prompt,
-                shot.still,
-            ) = snapshot
+            _restore()
             return False
-        state.reset(self._project.config.retry.max_attempts)
-        state.prompt_override = None
-        state.param_overrides = {}
-        shot.review = Review()
+        with self._manifest_lock:
+            state.reset(self._project.config.retry.max_attempts)
+            state.prompt_override = None
+            state.param_overrides = {}
+            shot.review = Review()
+            self._project.save_manifest(self._manifest)
         log.warning(
             "%s: weak/exhausted lip-sync rescued as a b-roll cutaway (within 2-cutaway limit)",
             shot.id,
         )
         self._emit(RunEvent("shot_converted", shot_id=shot.id, asset=AssetKind.VIDEO.value))
-        self._project.save_manifest(self._manifest)
         return True
 
-    def _fall_back_from_lipsync(self, shot: Shot, state: AssetState) -> bool:
+    def _fall_back_from_lipsync(
+        self,
+        shot: Shot,
+        state: AssetState,
+        *,
+        client: ComfyClient | None = None,
+    ) -> bool:
         """Convert an exhausted singing shot to b-roll (when configured) or performance."""
         if (
             not self._project.config.retry.lipsync_fallback
@@ -1084,7 +1352,7 @@ class ShotRunner:
             return False
         if (
             self._project.config.retry.lipsync_fallback_mode == "broll"
-            and self._convert_lipsync_to_broll(shot, state)
+            and self._convert_lipsync_to_broll(shot, state, client=client)
         ):
             return True
         return self._fall_back_to_performance(shot, state)
@@ -1102,26 +1370,29 @@ class ShotRunner:
             or "i2v" not in self._templates
         ):
             return False
-        shot.fallback_from, shot.type = shot.type, ShotType.PERFORMANCE
-        shot.singers = []
-        shot.motion_prompt = prompts.PERFORMANCE_MOTION
-        state.reset(self._project.config.retry.max_attempts)
-        state.prompt_override = None
-        state.param_overrides = {}
-        shot.review = Review()
+        with self._manifest_lock:
+            shot.fallback_from, shot.type = shot.type, ShotType.PERFORMANCE
+            shot.singers = []
+            shot.motion_prompt = prompts.PERFORMANCE_MOTION
+            state.reset(self._project.config.retry.max_attempts)
+            state.prompt_override = None
+            state.param_overrides = {}
+            shot.review = Review()
+            self._project.save_manifest(self._manifest)
         log.warning(
             "%s: no usable lip-sync video, so it is now a performance shot (the singer on "
             "camera, not singing)",
             shot.id,
         )
         self._emit(RunEvent("shot_converted", shot_id=shot.id, asset=AssetKind.VIDEO.value))
-        self._project.save_manifest(self._manifest)
         return True
 
     def _mark_exhausted(self, shot: Shot, kind: AssetKind, state: AssetState) -> None:
-        best = state.best_attempt()
-        state.status = AssetStatus.EXHAUSTED
-        state.selected_attempt = best.number if best else None
+        with self._manifest_lock:
+            best = state.best_attempt()
+            state.status = AssetStatus.EXHAUSTED
+            state.selected_attempt = best.number if best else None
+            self._project.save_manifest(self._manifest)
         self._emit(
             RunEvent(
                 "asset_exhausted",
@@ -1138,44 +1409,44 @@ class ShotRunner:
             len(state.attempts),
             f"keeping attempt {best.number} for review" if best else "nothing usable was produced",
         )
-        self._project.save_manifest(self._manifest)
 
     def _effective_mute_spans(self, shot: Shot) -> list[tuple[float, float]]:
         """Song-timeline spans silenced inside ``shot.audio_slice`` to prevent duet voice bleed."""
-        if shot.type is not ShotType.LIPSYNC:
-            return []
-        s_start, s_end = shot.audio_slice.start, shot.audio_slice.end
-        spans: list[tuple[float, float]] = [
-            (max(s_start, m.start), min(s_end, m.end))
-            for m in shot.audio_slice.mute_spans
-            if min(s_end, m.end) - max(s_start, m.start) >= 0.01
-        ]
-        # Also guard adjacent-shot singer handoffs on older manifests that predate mute_spans.
-        active = self._manifest.active_singer_ids(shot)
-        if len(self._manifest.characters) > 1 and active:
-            shots = self._manifest.shots
-            pos = next((i for i, item in enumerate(shots) if item.id == shot.id), None)
-            if pos is not None:
-                if pos > 0 and s_start < shot.start:
-                    prev = shots[pos - 1]
-                    prev_singers = self._manifest.active_singer_ids(prev) or (
-                        {rc}
-                        if prev.character
-                        and (rc := self._manifest.resolve_character_id(prev.character))
-                        else set()
-                    )
-                    if prev_singers and prev_singers != active:
-                        spans.append((s_start, shot.start))
-                if pos + 1 < len(shots) and s_end > shot.end:
-                    nxt = shots[pos + 1]
-                    next_singers = self._manifest.active_singer_ids(nxt) or (
-                        {rc}
-                        if nxt.character
-                        and (rc := self._manifest.resolve_character_id(nxt.character))
-                        else set()
-                    )
-                    if next_singers and next_singers != active:
-                        spans.append((shot.end, s_end))
+        with self._manifest_lock:
+            if shot.type is not ShotType.LIPSYNC:
+                return []
+            s_start, s_end = shot.audio_slice.start, shot.audio_slice.end
+            spans: list[tuple[float, float]] = [
+                (max(s_start, m.start), min(s_end, m.end))
+                for m in shot.audio_slice.mute_spans
+                if min(s_end, m.end) - max(s_start, m.start) >= 0.01
+            ]
+            # Also guard adjacent-shot singer handoffs on older manifests that predate mute_spans.
+            active = self._manifest.active_singer_ids(shot)
+            if len(self._manifest.characters) > 1 and active:
+                shots = self._manifest.shots
+                pos = next((i for i, item in enumerate(shots) if item.id == shot.id), None)
+                if pos is not None:
+                    if pos > 0 and s_start < shot.start:
+                        prev = shots[pos - 1]
+                        prev_singers = self._manifest.active_singer_ids(prev) or (
+                            {rc}
+                            if prev.character
+                            and (rc := self._manifest.resolve_character_id(prev.character))
+                            else set()
+                        )
+                        if prev_singers and prev_singers != active:
+                            spans.append((s_start, shot.start))
+                    if pos + 1 < len(shots) and s_end > shot.end:
+                        nxt = shots[pos + 1]
+                        next_singers = self._manifest.active_singer_ids(nxt) or (
+                            {rc}
+                            if nxt.character
+                            and (rc := self._manifest.resolve_character_id(nxt.character))
+                            else set()
+                        )
+                        if next_singers and next_singers != active:
+                            spans.append((shot.end, s_end))
         if not spans:
             return []
         ordered = sorted(spans)
@@ -1273,19 +1544,59 @@ class ShotRunner:
             atomic_write(marker, json.dumps(stamp))
         return mp4_path
 
-    def _upload(self, path: Path) -> str:
+    def _upload_table_for(self, client: ComfyClient) -> _UploadTable:
+        if client is self._comfy:
+            return self._primary_upload_table
+        with self._upload_lock:
+            try:
+                table = self._upload_tables.get(client)
+                if table is None:
+                    table = _UploadTable()
+                    self._upload_tables[client] = table
+                return table
+            except TypeError:
+                entry = self._unweakref_upload_tables.get(id(client))
+                if entry is None:
+                    table = _UploadTable()
+                    self._unweakref_upload_tables[id(client)] = (client, table)
+                    return table
+                return entry[1]
+
+    def _upload(self, path: Path, *, client: ComfyClient | None = None) -> str:
         if not path.is_file():
             raise ConfigError(f"Asset file not found for upload: {path}")
+        active_client = self._comfy if client is None else client
         st = path.stat()
         cache_key = (path, st.st_size, st.st_mtime_ns)
-        if cache_key not in self._uploads:
-            remote = self._comfy.upload(path)
-            self._uploads[cache_key] = remote
-            self._uploaded_local[remote] = path
+        table = self._upload_table_for(active_client)
+        while True:
+            with self._upload_lock:
+                existing = table.uploads.get(cache_key)
+                if existing is not None:
+                    return existing
+                waiter = table.in_flight.get(cache_key)
+                if waiter is None:
+                    owner_event = threading.Event()
+                    table.in_flight[cache_key] = owner_event
+                    break
+            waiter.wait()
+
+        try:
+            remote = active_client.upload(path)
+            digest: str | None = None
             if self._cache is not None:
-                digest = self._file_hashes.get(cache_key)
+                with self._upload_lock:
+                    digest = self._file_hashes.get(cache_key)
                 if digest is None:
                     digest = file_sha256(path)
+            with self._upload_lock:
+                table.uploads[cache_key] = remote
+                table.uploaded_local[remote] = path
+                if digest is not None:
                     self._file_hashes[cache_key] = digest
-                self._uploaded_digests[remote] = digest
-        return self._uploads[cache_key]
+                    table.uploaded_digests[remote] = digest
+            return remote
+        finally:
+            with self._upload_lock:
+                table.in_flight.pop(cache_key, None)
+            owner_event.set()

@@ -53,7 +53,7 @@ pip install -c constraints.txt -e ".[qc,align,ui]"
 git clone https://github.com/sherwinlu/mvdirector.git
 cd mvdirector
 py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1   # if blocked, run: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 pip install -c constraints.txt -e ".[qc,align,ui]"
 ```
 
@@ -93,9 +93,17 @@ ollama pull gemma3:12b          # default recommended local model
 
 If you have Docker + the NVIDIA Container Toolkit installed, you can launch GPU ComfyUI, GPU Ollama, and the review UI together from the repo root:
 
+**macOS / Linux:**
 ```bash
 COMFY_URL=http://comfy-gpu:8188 MVD_LLM_URL=http://ollama-gpu:11434 \
   docker compose --profile comfy-gpu --profile llm-gpu --profile ui up -d
+```
+
+**Windows (PowerShell):**
+```powershell
+$env:COMFY_URL = "http://comfy-gpu:8188"
+$env:MVD_LLM_URL = "http://ollama-gpu:11434"
+docker compose --profile comfy-gpu --profile llm-gpu --profile ui up -d
 ```
 
 See [Installation, Docker & Language Models](setup.md#running-with-docker-local-or-cloud-gpu-stack) for all Compose profiles and volume mounts.
@@ -108,13 +116,13 @@ ComfyUI only needs to be reachable over HTTP(S) from your machine — `mvdirecto
    ```bash
    python main.py --listen 0.0.0.0 --port 8188
    ```
-   *(If you use a cloud GPU host behind HTTPS + a Bearer token reverse proxy, note its URL and set `export COMFY_TOKEN=<your-token>` on your local machine.)*
+   *(If you use a cloud GPU host behind HTTPS + a Bearer token reverse proxy, note its URL and set `export COMFY_TOKEN=<your-token>` on macOS/Linux or `$env:COMFY_TOKEN = "<your-token>"` in Windows PowerShell.)*
 2. **On your local machine**, verify reachability with `mvd setup --check-only`:
    ```bash
    # Unauthenticated home LAN / Tailscale computer:
    mvd setup --check-only --comfy-url http://192.168.1.50:8188
 
-   # Authenticated HTTPS cloud server (pass --llm-provider if not using local Ollama):
+   # Authenticated HTTPS cloud server (on Windows PowerShell, use $env:COMFY_TOKEN = "your-bearer-token"):
    export COMFY_TOKEN="your-bearer-token"
    mvd setup --check-only --comfy-url https://gpu.example.com:8188 --comfy-token-env COMFY_TOKEN
    ```

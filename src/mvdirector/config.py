@@ -440,12 +440,31 @@ class VideoConfig(_Section):
 class ComfyConfig(_Section):
     base_url: str = Field(default="${COMFY_URL:-http://127.0.0.1:8188}", validate_default=True)
     headers: dict[str, str] = Field(default_factory=dict)
+    api_key_comfy_org: str | None = Field(
+        default=None,
+        description=(
+            "Optional Comfy.org API key forwarded in POST /prompt extra_data for paid ComfyUI "
+            "cloud API nodes (may reference ${COMFY_ORG_API_KEY})."
+        ),
+    )
 
-    @field_validator("base_url", "headers", mode="before")
+    @field_validator("base_url", "headers", "api_key_comfy_org", mode="before")
     @classmethod
     def _expand_connection_env(cls, value: Any) -> Any:
         """Expand ``${NAME}`` here (defaults included) rather than on the raw YAML."""
         return expand_env(value)
+
+    @field_validator("api_key_comfy_org")
+    @classmethod
+    def _check_api_key_comfy_org(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in cleaned):
+            raise ValueError("comfy.api_key_comfy_org must not contain control characters.")
+        return cleaned
 
     @field_validator("headers")
     @classmethod

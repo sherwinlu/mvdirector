@@ -51,15 +51,31 @@ Everything revolves around one file, `manifest.json`. Each stage reads it, does 
 
 > Getting started locally or with a remote ComfyUI server? Follow the step-by-step [Quickstart Guide](docs/local-quickstart.md) or run `mvd setup` to inspect your environment and configure a project interactively.
 
+**macOS / Linux:**
+
 ```bash
-brew install ffmpeg
-python -m venv .venv && source .venv/bin/activate
+brew install ffmpeg                                         # or: sudo apt-get install ffmpeg
+python3 -m venv .venv && source .venv/bin/activate
 pip install -c constraints.txt -e ".[qc,align,ui,dev]"      # add "anthropic" to use Claude
 ollama pull gemma3:12b                                      # default local LLM; or use any Ollama/cloud/OpenAI-compatible model (docs/setup.md)
 export COMFY_URL=http://127.0.0.1:8188                      # local, home LAN/Tailscale (http://192.168.x.x:8188), or remote cloud HTTPS URL
 
 mvd setup projects/my-song                   # or `mvd init projects/my-song` (add `--mode mix` for 30-90+ min mixes)
 cd projects/my-song
+```
+
+**Windows (PowerShell):**
+
+```powershell
+winget install Python.Python.3.12 Gyan.FFmpeg               # restart terminal after installing
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1                                # if blocked, run: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+pip install -c constraints.txt -e ".[qc,align,ui,dev]"      # add "anthropic" to use Claude
+ollama pull gemma3:12b                                      # default local LLM; or use any Ollama/cloud/OpenAI-compatible model (docs/setup.md)
+$env:COMFY_URL = "http://127.0.0.1:8188"                    # local, home LAN/Tailscale (http://192.168.x.x:8188), or remote cloud HTTPS URL
+
+mvd setup projects\my-song                                  # or `mvd init projects\my-song` (add `--mode mix` for 30-90+ min mixes)
+cd projects\my-song
 ```
 
 1. Put your song files in `inputs/`: `mix.wav`, `vocals.wav` (optionally a drum stem or DAW/Suno stem pack in `inputs/stems/`), `inputs/lyrics.txt` (`[Section]` tags and `(adlibs)`), and `inputs/style.md` — or start from a single `.mp3`/`.wav` file with `mvd prepare /path/to/song.mp3` (requires the `stems` and `align` extras), or draft lyrics and a brief first with `mvd brief --idea "..."`. For `mode: mix`, supply `inputs/mix.wav` and an optional `inputs/tracklist.json` (`.yaml`, `.cue`, `.csv`, or `.txt`).

@@ -245,6 +245,7 @@ def setup(
     chosen_title = title or _default_project_title(directory)
     chosen_comfy = comfy_url or report.comfy.url
     chosen_comfy_token_env: str | None = comfy_token_env
+    active_comfy_probe = report.comfy
     chosen_provider = (llm_provider or setup_mod.DEFAULT_LLM_PROVIDER).strip().lower()
     if chosen_provider not in _VALID_SETUP_PROVIDERS:
         valid = ", ".join(_VALID_SETUP_PROVIDERS)
@@ -294,6 +295,7 @@ def setup(
                 ).comfy
             except MVDError as exc:
                 raise _fail(exc) from exc
+            active_comfy_probe = reprobe
             if reprobe.reachable:
                 gpu = f" ({reprobe.devices[0]})" if reprobe.devices else ""
                 typer.secho(
@@ -388,18 +390,21 @@ def setup(
     ):
         qc_missing_policy = "skip"
 
-    options = api.SetupOptions(
-        title=chosen_title,
-        mode=mode if is_new else None,
-        comfy_url=chosen_comfy,
-        comfy_token_env=chosen_comfy_token_env,
-        llm_enabled=chosen_llm_enabled,
-        llm_provider=chosen_provider,
-        llm_model=chosen_model,
-        llm_base_url=chosen_llm_base_url,
-        qc_on_missing_dependency=qc_missing_policy,
-        qc_vision_enabled=chosen_vision,
-        video_preset=chosen_preset,
+    options = setup_mod.optimize_setup_options(
+        api.SetupOptions(
+            title=chosen_title,
+            mode=mode if is_new else None,
+            comfy_url=chosen_comfy,
+            comfy_token_env=chosen_comfy_token_env,
+            llm_enabled=chosen_llm_enabled,
+            llm_provider=chosen_provider,
+            llm_model=chosen_model,
+            llm_base_url=chosen_llm_base_url,
+            qc_on_missing_dependency=qc_missing_policy,
+            qc_vision_enabled=chosen_vision,
+            video_preset=chosen_preset,
+        ),
+        comfy_probe=active_comfy_probe,
     )
 
     try:
@@ -409,6 +414,15 @@ def setup(
 
     action_word = "Created and configured" if is_new else "Updated"
     typer.secho(f"\n{action_word} {directory / CONFIG_FILENAME}", fg=typer.colors.GREEN)
+    comfy_scope = "local" if setup_mod.is_loopback_url(chosen_comfy) else "remote"
+    tuned_parts = [
+        f"dedup_uploads={str(bool(options.comfy_dedup_uploads)).lower()}",
+        f"cache_enabled={str(bool(options.comfy_cache_enabled)).lower()}",
+        f"sort_batch_for_cache={str(bool(options.comfy_sort_batch_for_cache)).lower()}",
+    ]
+    if options.comfy_min_free_vram_gb is not None:
+        tuned_parts.append(f"min_free_vram_gb={options.comfy_min_free_vram_gb}")
+    typer.echo(f"Optimized for {comfy_scope} ComfyUI: {', '.join(tuned_parts)}")
 
     if chosen_comfy_token_env and not os.environ.get(chosen_comfy_token_env):
         _yellow(

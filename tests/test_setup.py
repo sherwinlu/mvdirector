@@ -26,6 +26,7 @@ from mvdirector.setup import (
     SetupOptions,
     apply_setup_config,
     is_loopback_url,
+    optimize_setup_options,
     pick_default_ollama_model,
     probe_comfy,
     probe_ollama,
@@ -613,3 +614,138 @@ def test_setup_exact_preset_and_check_only_non_ollama(
     assert cfg.video.size_multiple == 1
     assert cfg.video.max_clip_seconds == 10.0
     assert cfg.comfy.base_url == "http://192.168.1.50:8188"
+    assert cfg.comfy.dedup_uploads is True
+    assert cfg.comfy.cache_enabled is True
+    assert cfg.comfy.sort_batch_for_cache is True
+
+
+def test_optimize_setup_options_local_vs_remote_and_vram() -> None:
+    local_probe = ComfyProbe("http://127.0.0.1:8188", True, vram_total_gb=16.0)
+    local_opts = optimize_setup_options(
+        SetupOptions(comfy_url="http://127.0.0.1:8188", llm_enabled=True),
+        comfy_probe=local_probe,
+    )
+    assert local_opts.comfy_dedup_uploads is False
+    assert local_opts.comfy_cache_enabled is True
+    assert local_opts.comfy_sort_batch_for_cache is True
+    assert local_opts.comfy_min_free_vram_gb == 4.0
+    assert local_opts.qc_vision_blind_observer is False
+    assert local_opts.retry_in_place_repair is True
+
+    remote_probe = ComfyProbe("https://gpu.example.com:8188", True, vram_total_gb=48.0)
+    remote_opts = optimize_setup_options(
+        SetupOptions(
+            comfy_url="https://gpu.example.com:8188",
+            mode=ProjectMode.MIX,
+            llm_enabled=False,
+        ),
+        comfy_probe=remote_probe,
+    )
+    assert remote_opts.comfy_dedup_uploads is True
+    assert remote_opts.comfy_min_free_vram_gb == 6.0
+    assert remote_opts.qc_vision_enabled is False
+    assert remote_opts.qc_vision_blind_observer is False
+    assert remote_opts.retry_in_place_repair is False
+
+    # Small GPU (< 8 GiB) or unreachable probe leaves VRAM floor unset.
+    small_gpu = ComfyProbe("http://127.0.0.1:8188", True, vram_total_gb=6.0)
+    assert (
+        optimize_setup_options(
+            SetupOptions(comfy_url="http://127.0.0.1:8188"), comfy_probe=small_gpu
+        ).comfy_min_free_vram_gb
+        is None
+    )
+
+    # Explicit overrides are always respected.
+    explicit = optimize_setup_options(
+        SetupOptions(
+            comfy_url="https://gpu.example.com:8188",
+            comfy_dedup_uploads=False,
+            comfy_cache_enabled=False,
+            comfy_min_free_vram_gb=8.0,
+        ),
+        comfy_probe=remote_probe,
+    )
+    assert explicit.comfy_dedup_uploads is False
+    assert explicit.comfy_cache_enabled is False
+    assert explicit.comfy_min_free_vram_gb == 8.0
+
+
+def test_apply_setup_config_validates_and_writes_optimized_fields(tmp_path: Path) -> None:
+    project_dir = tmp_path / "opt-song"
+    api.init_project(project_dir)
+
+    for bad_vram in (0.1, 300.0, float("nan"), float("inf")):
+        with pytest.raises(ConfigError, match="min_free_vram_gb"):
+            apply_setup_config(project_dir, SetupOptions(comfy_min_free_vram_gb=bad_vram))
+
+    opts = optimize_setup_options(
+        SetupOptions(comfy_url="http://localhost:8188", llm_enabled=True),
+        comfy_probe=ComfyProbe("http://localhost:8188", True, vram_total_gb=24.0),
+    )
+    apply_setup_config(project_dir, opts)
+    cfg = load_config(project_dir / CONFIG_FILENAME)
+    assert cfg.comfy.dedup_uploads is False
+    assert cfg.comfy.cache_enabled is True
+    assert cfg.comfy.sort_batch_for_cache is True
+    assert cfg.comfy.min_free_vram_gb == 6.0
+    assert cfg.qc.vision_blind_observer is False
+    assert cfg.retry.in_place_repair is True
+
+
+def test_cli_setup_local_disables_dedup_and_remote_enables_dedup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(api, "inspect_environment", lambda **_kw: _fake_report(healthy=True))
+    local_dir = tmp_path / "local-opt"
+    res = runner.invoke(
+        app,
+        ["setup", str(local_dir), "--non-interactive", "--comfy-url", "http://127.0.0.1:8188"],
+    )
+    assert res.exit_code == 0, res.output
+    assert "Optimized for local ComfyUI: dedup_uploads=false" in res.stdout
+    cfg = load_config(local_dir / CONFIG_FILENAME)
+    assert cfg.comfy.dedup_uploads is False
+    assert cfg.comfy.cache_enabled is True
+    assert cfg.comfy.sort_batch_for_cache is True
+    assert cfg.comfy.min_free_vram_gb == 6.0
+    assert cfg.retry.in_place_repair is True
+
+
+def test_inspect_environment_forwards_explicit_comfy_headers() -> None:
+    from mvdirector.setup import inspect_environment
+
+    seen_auth: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_auth.append(request.headers.get("authorization"))
+        return httpx.Response(200, json={"system": {"comfyui_version": "0.45.4"}, "devices": []})
+
+    report = inspect_environment(
+        comfy_url="http://127.0.0.1:8188",
+        comfy_headers={"Authorization": "Basic dXNlcjpwYXNz"},
+        comfy_transport=httpx.MockTransport(handler),
+        ollama_transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={"models": []})),
+    )
+    assert report.comfy.reachable is True
+    assert seen_auth == ["Basic dXNlcjpwYXNz"]
+
+
+def test_comfy_client_sends_api_key_comfy_org_in_extra_data() -> None:
+    import json
+
+    from mvdirector.comfy.client import ComfyClient
+    from mvdirector.config import ComfyConfig
+
+    captured: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(200, json={"prompt_id": "p-123"})
+
+    cfg = ComfyConfig(base_url="http://127.0.0.1:8188", api_key_comfy_org="comfyui-test-key")
+    with ComfyClient(cfg, transport=httpx.MockTransport(handler)) as client:
+        pid = client.queue({"1": {"class_type": "Test", "inputs": {}}})
+
+    assert pid == "p-123"
+    assert captured[0]["extra_data"] == {"api_key_comfy_org": "comfyui-test-key"}

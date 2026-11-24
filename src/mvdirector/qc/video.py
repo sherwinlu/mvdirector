@@ -209,10 +209,12 @@ class VideoQC:
         cut_count = int(np.sum(cut_mask))
         non_cut = differences[~cut_mask]
         flicker = float(np.percentile(non_cut if non_cut.size else differences, 95))
+        flicker_excess = max(0.0, flicker - median)
         metrics: dict[str, float] = {
             "median_motion": round(median, 5),
             "peak_motion": round(peak, 4),
             "p95_motion": round(flicker, 4),
+            "flicker_excess": round(flicker_excess, 4),
         }
         if allow_cuts:
             metrics["cut_count"] = float(cut_count)
@@ -251,8 +253,15 @@ class VideoQC:
                     fix_hint=hint,
                 )
             ]
-        score = linear_score(flicker, self._cfg.flicker_bad, self._cfg.flicker_good)
         unstable = flicker > self._cfg.flicker_bad
+        # Measure erratic spikes above steady continuous motion (p95 - median) so smooth camera
+        # moves or steady environmental motion (water, embers, snow) are not penalized as flicker,
+        # while still failing hard when raw p95 exceeds flicker_bad (strobe / heavy flicker).
+        score = (
+            0.0
+            if unstable
+            else linear_score(flicker_excess, self._cfg.flicker_bad, self._cfg.flicker_good)
+        )
         detail = (
             "heavy flicker or erratic motion"
             if unstable

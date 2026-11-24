@@ -576,6 +576,14 @@ class LLMConfig(_Section):
         ge=1024,
         description="Context window to request. Used by ollama (default 16384) and for warnings.",
     )
+    stream: bool = Field(
+        default=False,
+        description=(
+            "Stream chat completions over SSE for openai/openai_compatible servers. Prevents "
+            "reverse-proxy idle timeouts (e.g. Cloudflare 100s HTTP 524 on RunPod vLLM) on long "
+            "planning replies."
+        ),
+    )
 
     @field_validator("base_url", mode="before")
     @classmethod
@@ -618,6 +626,15 @@ class PlanningConfig(_Section):
             "singing intercut with performance and b-roll), 'narrative' (no lip-sync: recurring "
             "character(s) in performance shots intercut with b-roll), or 'visual' (no lip-sync "
             "and no recurring characters: 100% b-roll visual/atmospheric film)."
+        ),
+    )
+    vocals: Literal["auto", "solo", "multi"] = Field(
+        default="auto",
+        description=(
+            "How many vocalists sing on camera: 'auto' (and 'multi', which currently behaves "
+            "the same) maps solo, duet and ensemble singers from lyrics and diarized vocal "
+            "turns; 'solo' locks all singing shots to the primary protagonist so secondary story "
+            "characters never lip-sync."
         ),
     )
     wardrobe_monotonic: bool = Field(
@@ -680,6 +697,14 @@ class ReferenceConfig(_Section):
         default=2,
         ge=1,
         description="Candidate turnaround reference videos generated per run.",
+    )
+    closeup_face_panel: bool = Field(
+        default=False,
+        description=(
+            "Use the cropped face-detail panel as reference_image on close_up shots when the "
+            "still workflow binds only a single reference_image (improves close-up framing and "
+            "facial fidelity at the expense of full-outfit visibility)."
+        ),
     )
     panel_inset: float = Field(
         default=0.012,

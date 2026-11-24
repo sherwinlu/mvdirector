@@ -946,3 +946,108 @@ def test_check_comfy_wiring_redacts_userinfo_in_report_url(tmp_path: Path) -> No
     assert report.reachable is True
     assert "topsecret" not in report.url
     assert report.url == "http://127.0.0.1:8188"
+
+
+def test_probe_ollama_and_render_environment_report_redact_userinfo() -> None:
+    from mvdirector.setup import render_environment_report
+
+    ollama_probe = probe_ollama(
+        "http://bob:hunter2@127.0.0.1:11434",
+        transport=httpx.MockTransport(lambda _r: httpx.Response(503)),
+    )
+    assert ollama_probe.reachable is False
+    assert "hunter2" not in ollama_probe.error
+
+    report = EnvironmentReport(
+        python_version="3.12.0",
+        platform_label="Darwin arm64",
+        ffmpeg_ok=True,
+        ffprobe_ok=True,
+        extras=[],
+        ollama=ollama_probe,
+        comfy=ComfyProbe(
+            url="http://carol:s3cr3t@127.0.0.1:8188",
+            reachable=True,
+            devices=["RTX 4090"],
+        ),
+    )
+    rendered = render_environment_report(report)
+    assert "hunter2" not in rendered
+    assert "s3cr3t" not in rendered
+    assert "http://127.0.0.1:11434" in rendered
+    assert "http://127.0.0.1:8188" in rendered
+
+
+def test_cli_setup_drops_abandoned_provider_secret_on_switch_and_respects_existing_dotenv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mvdirector.dotenv import write_project_dotenv_var
+    from mvdirector.llm.check import LLMCheckResult
+    from mvdirector.setup import ComfyWiringReport
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(api, "inspect_environment", lambda **_kw: _fake_report(healthy=True))
+    monkeypatch.setattr(
+        api,
+        "check_comfy_wiring",
+        lambda _dir: ComfyWiringReport(url="http://127.0.0.1:8188", reachable=True),
+    )
+
+    calls = {"n": 0}
+
+    def fake_verify(cfg: object, **_kw: object) -> LLMCheckResult:
+        calls["n"] += 1
+        if getattr(cfg, "provider", None) == "openai":
+            return LLMCheckResult(
+                json_ok=True,
+                vision="error",
+                vision_detail="quota exceeded on vision",
+                vision_error_kind="quota",
+            )
+        return LLMCheckResult(json_ok=True, vision="ok")
+
+    monkeypatch.setattr(api, "verify_llm_config", fake_verify)
+
+    # Interactive: enter OpenAI key, vision fails with quota, user switches to ollama.
+    # The abandoned OPENAI_API_KEY must NOT be prompted to save or written to .env.
+    switched_dir = tmp_path / "switched"
+    answers = "\n".join(
+        [
+            "y",  # confirm creating new project
+            "Switched Song",  # title
+            "http://127.0.0.1:8188",  # comfy url
+            "openai",  # provider
+            "gpt-4o",  # model
+            "sk-abandoned-secret",  # key
+            "switch",  # switch provider after vision quota failure
+            "ollama",  # new provider
+            "gemma3:12b",  # model
+            "ltx",  # video preset
+            "",
+        ]
+    )
+    res = runner.invoke(app, ["setup", str(switched_dir)], input=answers)
+    assert res.exit_code == 0, res.output
+    assert "Save OPENAI_API_KEY" not in res.stdout
+    assert not (switched_dir / ".env").exists()
+
+    # Non-interactive re-run on project that already stores OPENAI_API_KEY in .env
+    # should not emit a misleading "Note: export OPENAI_API_KEY=..." warning.
+    existing_dir = tmp_path / "with-dotenv"
+    api.init_project(existing_dir)
+    write_project_dotenv_var(existing_dir, "OPENAI_API_KEY", "sk-already-saved")
+    res2 = runner.invoke(
+        app,
+        [
+            "setup",
+            str(existing_dir),
+            "--non-interactive",
+            "--no-verify",
+            "--llm-provider",
+            "openai",
+            "--llm-model",
+            "gpt-4o",
+        ],
+    )
+    assert res2.exit_code == 0, res2.output
+    assert "Note: export OPENAI_API_KEY" not in res2.stdout

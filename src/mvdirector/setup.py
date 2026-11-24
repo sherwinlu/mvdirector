@@ -333,7 +333,7 @@ def probe_ollama(
         return OllamaProbe(
             url=normalized,
             reachable=False,
-            error=f"HTTP {resp.status_code} from {normalized}/api/tags",
+            error=f"HTTP {resp.status_code} from {redact_url(normalized)}/api/tags",
         )
 
     try:
@@ -973,19 +973,21 @@ def render_environment_report(report: EnvironmentReport) -> str:
 
     lines.append("")
     lines.append("Services:")
+    ollama_display_url = redact_url(report.ollama.url)
+    comfy_display_url = redact_url(report.comfy.url)
     if report.ollama.reachable:
         if report.ollama.models:
             shown = ", ".join(report.ollama.models[:6])
             more_count = len(report.ollama.models) - 6
             extra_n = f" (+{more_count} more)" if more_count > 0 else ""
-            lines.append(f"  OK   Ollama at {report.ollama.url} (models: {shown}{extra_n})")
+            lines.append(f"  OK   Ollama at {ollama_display_url} (models: {shown}{extra_n})")
         else:
             lines.append(
-                f"  WARN Ollama at {report.ollama.url} is running, but no models are pulled."
+                f"  WARN Ollama at {ollama_display_url} is running, but no models are pulled."
             )
             lines.append(f"       -> Run: `ollama pull {DEFAULT_LLM_MODEL}`")
     else:
-        lines.append(f"  MISS Ollama at {report.ollama.url}: {report.ollama.error}")
+        lines.append(f"  MISS Ollama at {ollama_display_url}: {report.ollama.error}")
         lines.append(
             "       -> Install Ollama (https://ollama.com), start `ollama serve`, "
             f"then `ollama pull {DEFAULT_LLM_MODEL}` — or point at a remote/cloud LLM "
@@ -1010,9 +1012,9 @@ def render_environment_report(report: EnvironmentReport) -> str:
         if report.comfy.node_count is not None:
             details.append(f"{report.comfy.node_count} nodes")
         suffix = f" ({', '.join(details)})" if details else ""
-        lines.append(f"  OK   ComfyUI at {report.comfy.url}{suffix}")
+        lines.append(f"  OK   ComfyUI at {comfy_display_url}{suffix}")
     else:
-        lines.append(f"  MISS ComfyUI at {report.comfy.url}: {report.comfy.error}")
+        lines.append(f"  MISS ComfyUI at {comfy_display_url}: {report.comfy.error}")
         lines.append(
             "       -> Start ComfyUI locally on port 8188, or point at a home-LAN/cloud server "
             "with `--comfy-url <url>` (and `--comfy-token-env COMFY_TOKEN` if authenticated)."

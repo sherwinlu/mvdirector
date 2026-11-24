@@ -27,6 +27,7 @@ from mvdirector.dotenv import (
 from mvdirector.errors import MVDError
 from mvdirector.generation.runner import RunEvent
 from mvdirector.llm.check import LLMCheckResult
+from mvdirector.llm.http import redact_url
 from mvdirector.models import AssetKind, Character, Manifest, ProjectMode, VideoStyle
 from mvdirector.project import Project
 from mvdirector.review import policy as review_policy
@@ -254,7 +255,8 @@ def _configure_ollama_interactive(
                     probe = setup_mod.start_ollama_server(resolved_url)
                     if probe.reachable:
                         typer.secho(
-                            f"  OK   Ollama is running at {probe.url}", fg=typer.colors.GREEN
+                            f"  OK   Ollama is running at {redact_url(probe.url)}",
+                            fg=typer.colors.GREEN,
                         )
                     else:
                         _yellow(f"  WARN Ollama did not respond yet: {probe.error}")
@@ -274,7 +276,10 @@ def _configure_ollama_interactive(
             ):
                 probe = setup_mod.start_ollama_server(resolved_url)
                 if probe.reachable:
-                    typer.secho(f"  OK   Ollama is running at {probe.url}", fg=typer.colors.GREEN)
+                    typer.secho(
+                        f"  OK   Ollama is running at {redact_url(probe.url)}",
+                        fg=typer.colors.GREEN,
+                    )
                 else:
                     _yellow(f"  WARN Could not start Ollama: {probe.error}")
 
@@ -498,18 +503,24 @@ def setup(
                     details.append(f"{reprobe.node_count} nodes")
                 suffix = f" ({', '.join(details)})" if details else ""
                 typer.secho(
-                    f"  OK   Connected to ComfyUI at {reprobe.url}{suffix}",
+                    f"  OK   Connected to ComfyUI at {redact_url(reprobe.url)}{suffix}",
                     fg=typer.colors.GREEN,
                 )
             else:
-                _yellow(f"  WARN Could not reach ComfyUI at {reprobe.url}: {reprobe.error}")
+                _yellow(
+                    f"  WARN Could not reach ComfyUI at {redact_url(reprobe.url)}: {reprobe.error}"
+                )
 
         # Provider-first LLM configuration (with optional Ollama install or cloud API key check).
         providers_label = "/".join(_VALID_SETUP_PROVIDERS)
         select_provider = True
         force_key_prompt = False
+        pending_llm_secret: str | None = None
         while True:
             if select_provider:
+                if pending_llm_secret is not None:
+                    pending_secrets.pop(pending_llm_secret, None)
+                    pending_llm_secret = None
                 while True:
                     raw_provider = typer.prompt(
                         f"LLM provider ({providers_label}; aliases: chatgpt, claude)",
@@ -526,6 +537,9 @@ def setup(
             chosen_vision = None
             chosen_llm_api_key_env = None
             if not chosen_llm_enabled:
+                if pending_llm_secret is not None:
+                    pending_secrets.pop(pending_llm_secret, None)
+                    pending_llm_secret = None
                 chosen_provider = setup_mod.DEFAULT_LLM_PROVIDER
                 chosen_model = None
                 chosen_llm_base_url = None
@@ -561,7 +575,10 @@ def setup(
                         if entered:
                             session_env[raw_key_env] = entered
                             if is_allowed_dotenv_var(raw_key_env):
+                                if pending_llm_secret and pending_llm_secret != raw_key_env:
+                                    pending_secrets.pop(pending_llm_secret, None)
                                 pending_secrets[raw_key_env] = entered
+                                pending_llm_secret = raw_key_env
             else:
                 if chosen_provider == "anthropic" and not report.extra_installed("anthropic"):
                     _yellow(
@@ -587,7 +604,10 @@ def setup(
                     ).strip()
                     if entered_key:
                         session_env[key_env] = entered_key
+                        if pending_llm_secret and pending_llm_secret != key_env:
+                            pending_secrets.pop(pending_llm_secret, None)
                         pending_secrets[key_env] = entered_key
+                        pending_llm_secret = key_env
 
             force_key_prompt = False
             if not run_verify:
@@ -665,12 +685,14 @@ def setup(
                 break
 
             # Sanity check failed (bad API key, usage/quota limit, unknown model, etc.).
-            if (
-                key_env
-                and key_env in pending_secrets
-                and check_res.json_error_kind in ("auth", "quota")
-            ):
+            bad_key_error = check_res.json_error_kind in (
+                "auth",
+                "quota",
+            ) or check_res.vision_error_kind in ("auth", "quota")
+            if key_env and key_env in pending_secrets and bad_key_error:
                 pending_secrets.pop(key_env, None)
+                if pending_llm_secret == key_env:
+                    pending_llm_secret = None
             action = (
                 typer.prompt(
                     "LLM check failed — how would you like to proceed? (retry/switch/continue)",
@@ -687,7 +709,7 @@ def setup(
                 chosen_llm_base_url = None
                 force_key_prompt = False
                 continue
-            force_key_prompt = check_res.json_error_kind in ("auth", "quota")
+            force_key_prompt = bad_key_error
 
         typer.echo("Video model family presets:")
         for key, preset in setup_mod.VIDEO_PRESETS.items():
@@ -809,9 +831,10 @@ def setup(
             if not wiring.ok and non_interactive:
                 verify_failed = True
 
+    final_env = merged_project_environ(directory)
     if chosen_comfy_token_env and (
         chosen_comfy_token_env not in saved_secret_names
-        and not os.environ.get(chosen_comfy_token_env)
+        and not final_env.get(chosen_comfy_token_env)
     ):
         _yellow(
             f"Note: export {chosen_comfy_token_env}=<your-token> before running `mvd validate`."
@@ -824,7 +847,7 @@ def setup(
     if chosen_llm_enabled and chosen_provider in _CLOUD_KEY_HINTS:
         env_var = _CLOUD_KEY_HINTS[chosen_provider]
         if env_var not in saved_secret_names and not _has_provider_key(
-            chosen_provider, env_var, dict(os.environ)
+            chosen_provider, env_var, final_env
         ):
             _yellow(f"Note: export {env_var}=<your-key> before running `mvd llm-check`.")
 

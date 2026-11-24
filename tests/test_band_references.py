@@ -70,7 +70,7 @@ def test_still_references_bind_three_band_members(project, analysis):
         gates=None,  # type: ignore[arg-type]
         policy=None,  # type: ignore[arg-type]
         templates={"still": tpl_3},
-        budget=RunBudget(limit=None),
+        budget=RunBudget(limit=10),
     )
     refs_3 = runner_3._still_reference_paths(shot, plate=None)
     assert [name for name, _ in refs_3] == [
@@ -93,7 +93,88 @@ def test_still_references_bind_three_band_members(project, analysis):
         gates=None,  # type: ignore[arg-type]
         policy=None,  # type: ignore[arg-type]
         templates={"still": tpl_2},
-        budget=RunBudget(limit=None),
+        budget=RunBudget(limit=10),
     )
     refs_2 = runner_2._still_reference_paths(shot, plate=None)
     assert [name for name, _ in refs_2] == ["reference_image", "reference_image_2"]
+
+    # Missing secondary file on disk is skipped cleanly rather than raising FileNotFoundError
+    (ref_dir / "guitarist_base_sheet.png").unlink()
+    refs_missing = runner_3._still_reference_paths(shot, plate=None)
+    assert [name for name, _ in refs_missing] == ["reference_image", "reference_image_3"]
+
+
+def test_workflow_render_drops_unused_higher_band_reference_loaders() -> None:
+    tpl = _make_still_template(
+        ["reference_image", "reference_image_2", "reference_image_3", "reference_image_4"]
+    )
+    # Attach consumer links so we verify upstream links are also cleaned up.
+    tpl._graph["9"]["inputs"] = {
+        "ref1": ["10", 0],
+        "ref2": ["11", 0],
+        "ref3": ["12", 0],
+        "ref4": ["13", 0],
+    }
+
+    solo_graph = tpl.render({"positive_prompt": "solo", "reference_image": "lead.png"})
+    assert "10" in solo_graph
+    assert "11" not in solo_graph
+    assert "12" not in solo_graph
+    assert "13" not in solo_graph
+    assert solo_graph["9"]["inputs"] == {"ref1": ["10", 0]}
+
+    trio_graph = tpl.render(
+        {
+            "positive_prompt": "trio",
+            "reference_image": "lead.png",
+            "reference_image_2": "g.png",
+            "reference_image_3": "a.png",
+        }
+    )
+    assert {"10", "11", "12"}.issubset(trio_graph)
+    assert "13" not in trio_graph
+
+
+def test_compose_still_prompt_numbers_three_plus_band_refs_and_plate(project, analysis) -> None:
+    from mvdirector.planning import prompts
+
+    manifest = build_manifest(project.config, analysis, "lyrics", "style", llm=None)
+    chars: dict[str, Character] = {
+        "lead": Character(name="Lead Singer", appearance="Lead look."),
+        "guitarist": Character(name="Guitarist", appearance="Guitarist look."),
+        "alto": Character(name="Alto", appearance="Alto look."),
+    }
+    manifest.characters = chars
+    manifest.character = chars["lead"]
+    shot = next(s for s in manifest.shots if s.type is ShotType.LIPSYNC)
+    shot.characters = ["lead", "guitarist", "alto"]
+
+    bound = ["reference_image", "reference_image_2", "reference_image_3", "set_image"]
+    tagged = prompts.compose_still_prompt(
+        manifest, shot, plate_attached=True, reference_notation="tags", bound_references=bound
+    )
+    assert "@image1 shows the singer" in tagged
+    assert "@image2 shows the secondary performer" in tagged
+    assert "@image3 shows performer #3" in tagged
+    assert "@image4 shows the location" in tagged
+
+    prose = prompts.compose_still_prompt(
+        manifest, shot, plate_attached=True, reference_notation="prose", bound_references=bound
+    )
+    assert "third reference image shows performer #3" in prose
+    assert "fourth reference image shows the location" in prose
+    assert "Picture 1 defines Lead Singer's appearance" in prose
+    assert "Picture 2 defines Guitarist's appearance" in prose
+    assert "Picture 3 defines Alto's appearance" in prose
+    assert "Picture 4 defines only the empty location" in prose
+
+    # Sparse binding (member 2 has no ref, member 3 has ref): still labels Alto correctly.
+    sparse = prompts.compose_still_prompt(
+        manifest,
+        shot,
+        plate_attached=False,
+        reference_notation="prose",
+        bound_references=["reference_image", "reference_image_3"],
+    )
+    assert "second reference image shows performer #3" in sparse
+    assert "Picture 2 defines Alto's appearance" in sparse

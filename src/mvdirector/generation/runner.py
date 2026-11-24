@@ -685,7 +685,9 @@ class ShotRunner:
             sec_ref = sec_char.reference_for(sec_state)
             sec_front = sec_ref.panel("front") if sec_ref else None
             if sec_front is not None:
-                refs.append((param, self._project.path(sec_front)))
+                sec_path = self._project.path(sec_front)
+                if sec_path.is_file():
+                    refs.append((param, sec_path))
         if plate is not None:
             refs.append(("set_image", plate))
         return refs

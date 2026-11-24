@@ -390,6 +390,8 @@ def setup(
     ):
         qc_missing_policy = "skip"
 
+    existing_mode = None if is_new else setup_mod.detect_project_mode(directory)
+
     options = setup_mod.optimize_setup_options(
         api.SetupOptions(
             title=chosen_title,
@@ -405,6 +407,7 @@ def setup(
             video_preset=chosen_preset,
         ),
         comfy_probe=active_comfy_probe,
+        project_mode=existing_mode,
     )
 
     try:

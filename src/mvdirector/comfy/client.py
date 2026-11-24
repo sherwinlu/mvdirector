@@ -11,6 +11,7 @@ Polling ``/history`` is used instead of the websocket because it survives proxie
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import math
@@ -34,7 +35,7 @@ from mvdirector import __version__
 from mvdirector.comfy.cache import file_sha256
 from mvdirector.comfy.workflow import OutputSpec
 from mvdirector.config import ComfyConfig
-from mvdirector.errors import ComfyConnectionError, ComfyJobError, ComfyResourceError
+from mvdirector.errors import ComfyConnectionError, ComfyJobError, ComfyResourceError, ConfigError
 from mvdirector.llm.http import redact_url, retry_delay
 
 log = logging.getLogger(__name__)
@@ -49,6 +50,30 @@ _VRAM_SETTLE_POLLS = 30
 _VRAM_POLL_SECONDS = 1.0
 _ALLOWED_OUTPUT_TYPES = frozenset({"output", "temp", "input"})
 _MAX_WS_FRAME_BYTES = 4 * 1024 * 1024  # 4 MiB safety cap for ComfyUI WebSocket frames
+_WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+_WS_HANDSHAKE_TIMEOUT_SECONDS = 5.0
+_WS_MAX_HANDSHAKE_BYTES = 16384
+_WS_FORBIDDEN_HEADERS = frozenset(
+    {
+        "host",
+        "upgrade",
+        "connection",
+        "sec-websocket-key",
+        "sec-websocket-version",
+        "sec-websocket-extensions",
+        "sec-websocket-accept",
+    }
+)
+
+
+def _finite_number(value: Any) -> float | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+        return float(value)
+    return None
+
+
+def _reject_json_constant(token: str) -> Any:
+    raise ValueError(f"Non-standard JSON constant {token!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +97,8 @@ def parse_comfy_ws_event(
     elapsed_seconds: float = 0.0,
 ) -> ComfyProgress | None:
     """Convert a ComfyUI WebSocket JSON message into a ``ComfyProgress`` if it matches."""
+    if not isinstance(payload, dict):
+        return None
     event_type = payload.get("type")
     data = payload.get("data")
     if not isinstance(data, dict):
@@ -79,27 +106,23 @@ def parse_comfy_ws_event(
     msg_prompt = data.get("prompt_id")
     if msg_prompt is not None and msg_prompt != prompt_id:
         return None
+    safe_elapsed_raw = _finite_number(elapsed_seconds)
+    safe_elapsed = round(max(0.0, safe_elapsed_raw), 1) if safe_elapsed_raw is not None else 0.0
 
     if event_type == "progress":
-        raw_val = data.get("value")
-        raw_max = data.get("max")
-        if (
-            isinstance(raw_val, (int, float))
-            and not isinstance(raw_val, bool)
-            and isinstance(raw_max, (int, float))
-            and not isinstance(raw_max, bool)
-            and raw_max > 0
-        ):
-            pct = round(min(100.0, max(0.0, (float(raw_val) / float(raw_max)) * 100.0)), 1)
+        val = _finite_number(data.get("value"))
+        mx = _finite_number(data.get("max"))
+        if val is not None and mx is not None and val >= 0.0 and mx > 0.0:
+            pct = round(min(100.0, max(0.0, (val / mx) * 100.0)), 1)
             raw_node = data.get("node")
             return ComfyProgress(
                 prompt_id=prompt_id,
                 state="running",
-                step=int(raw_val),
-                total_steps=int(raw_max),
+                step=int(val),
+                total_steps=int(mx),
                 percent=pct,
                 node=str(raw_node) if raw_node is not None else None,
-                elapsed_seconds=round(elapsed_seconds, 1),
+                elapsed_seconds=safe_elapsed,
             )
         return None
 
@@ -113,20 +136,14 @@ def parse_comfy_ws_event(
         for node_id, info in nodes.items():
             if not isinstance(info, dict):
                 continue
-            v = info.get("value")
-            m = info.get("max")
-            if (
-                isinstance(v, (int, float))
-                and not isinstance(v, bool)
-                and isinstance(m, (int, float))
-                and not isinstance(m, bool)
-                and m > 0
-            ):
-                total_val += float(v)
-                total_max += float(m)
+            v = _finite_number(info.get("value"))
+            m = _finite_number(info.get("max"))
+            if v is not None and m is not None and v >= 0.0 and m > 0.0:
+                total_val += min(m, v)
+                total_max += m
                 if info.get("state") == "running" or active_node is None:
                     active_node = str(node_id)
-        if total_max > 0:
+        if total_max > 0.0:
             pct = round(min(100.0, max(0.0, (total_val / total_max) * 100.0)), 1)
             return ComfyProgress(
                 prompt_id=prompt_id,
@@ -135,31 +152,36 @@ def parse_comfy_ws_event(
                 total_steps=int(total_max),
                 percent=pct,
                 node=active_node,
-                elapsed_seconds=round(elapsed_seconds, 1),
+                elapsed_seconds=safe_elapsed,
             )
         return None
 
     if event_type == "executing":
         raw_node = data.get("node")
         if raw_node is None:
+            # Require explicit prompt_id so idle/connect broadcasts cannot mark queued jobs done.
+            if msg_prompt != prompt_id:
+                return None
             return ComfyProgress(
                 prompt_id=prompt_id,
                 state="downloading",
                 percent=99.0,
-                elapsed_seconds=round(elapsed_seconds, 1),
+                elapsed_seconds=safe_elapsed,
             )
         return ComfyProgress(
             prompt_id=prompt_id,
             state="running",
             node=str(raw_node),
-            elapsed_seconds=round(elapsed_seconds, 1),
+            elapsed_seconds=safe_elapsed,
         )
 
     if event_type == "execution_start":
+        if msg_prompt != prompt_id:
+            return None
         return ComfyProgress(
             prompt_id=prompt_id,
             state="running",
-            elapsed_seconds=round(elapsed_seconds, 1),
+            elapsed_seconds=safe_elapsed,
         )
 
     return None
@@ -189,11 +211,18 @@ class _ComfyWsProgressListener:
         self._started = started
         self._on_progress = on_progress
         self._stop = threading.Event()
-        self._last_ws_event_at = 0.0
+        self._lock = threading.Lock()
+        self._sock: socket.socket | None = None
+        self._connected = False
+        self._last_ws_event_at: float | None = None
         self._thread: threading.Thread | None = None
 
     @property
-    def last_event_at(self) -> float:
+    def connected(self) -> bool:
+        return self._connected
+
+    @property
+    def last_event_at(self) -> float | None:
         return self._last_ws_event_at
 
     def start(self) -> None:
@@ -205,9 +234,24 @@ class _ComfyWsProgressListener:
         self._thread.start()
 
     def stop(self) -> None:
-        self._stop.set()
+        with self._lock:
+            self._stop.set()
+            sock = self._sock
+            self._sock = None
+        if sock is not None:
+            with suppress(OSError):
+                sock.shutdown(socket.SHUT_RDWR)
+            with suppress(OSError):
+                sock.close()
         if self._thread is not None:
             self._thread.join(timeout=1.5)
+
+    def _register_socket(self, sock: socket.socket) -> bool:
+        with self._lock:
+            if self._stop.is_set():
+                return False
+            self._sock = sock
+            return True
 
     def _run(self) -> None:
         sock: socket.socket | None = None
@@ -217,19 +261,21 @@ class _ComfyWsProgressListener:
                 return
             use_tls = parsed.scheme == "https"
             port = parsed.port or (443 if use_tls else 80)
+            if self._stop.is_set():
+                return
             raw_sock = socket.create_connection((parsed.hostname, port), timeout=3.0)
+            sock = raw_sock
             if use_tls:
                 ctx = ssl.create_default_context()
                 sock = ctx.wrap_socket(raw_sock, server_hostname=parsed.hostname)
-            else:
-                sock = raw_sock
-            sock.settimeout(1.0)
+            if not self._register_socket(sock):
+                return
+            sock.settimeout(0.1)
 
             base_path = parsed.path.rstrip("/")
             ws_path = f"{base_path}/ws?clientId={urllib.parse.quote(self._client_id, safe='')}"
-            host_header = parsed.hostname
-            if parsed.port:
-                host_header = f"{host_header}:{parsed.port}"
+            host_part = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+            host_header = f"{host_part}:{parsed.port}" if parsed.port else host_part
             ws_key = base64.b64encode(os.urandom(16)).decode("ascii")
             req_lines = [
                 f"GET {ws_path} HTTP/1.1",
@@ -240,38 +286,92 @@ class _ComfyWsProgressListener:
                 "Sec-WebSocket-Version: 13",
             ]
             for k, v in self._headers.items():
-                kl = k.lower()
-                if kl in ("host", "upgrade", "connection", "sec-websocket-key"):
-                    continue
-                if "\r" in k or "\n" in k or "\r" in v or "\n" in v:
+                if (
+                    not k
+                    or ":" in k
+                    or _has_control_chars(k)
+                    or _has_control_chars(v)
+                    or k.lower() in _WS_FORBIDDEN_HEADERS
+                ):
                     continue
                 req_lines.append(f"{k}: {v}")
             req_lines.extend(["", ""])
             sock.sendall("\r\n".join(req_lines).encode("utf-8"))
 
-            # Read HTTP 101 upgrade response headers (capped at 16 KiB).
+            # Read HTTP 101 upgrade response headers (capped at 16 KiB and bounded in time).
             resp_buf = bytearray()
+            handshake_deadline = time.monotonic() + _WS_HANDSHAKE_TIMEOUT_SECONDS
             while b"\r\n\r\n" not in resp_buf:
-                chunk = sock.recv(1024)
-                if not chunk or len(resp_buf) > 16384:
+                if self._stop.is_set() or time.monotonic() > handshake_deadline:
+                    return
+                try:
+                    chunk = sock.recv(1024)
+                except TimeoutError:
+                    continue
+                if not chunk:
                     return
                 resp_buf.extend(chunk)
+                if len(resp_buf) > _WS_MAX_HANDSHAKE_BYTES:
+                    return
             header_end = resp_buf.index(b"\r\n\r\n")
-            status_line = resp_buf[:header_end].split(b"\r\n", 1)[0]
-            if b" 101 " not in status_line:
+            header_lines = resp_buf[:header_end].split(b"\r\n")
+            status_parts = header_lines[0].split(b" ", 2)
+            if (
+                len(status_parts) < 2
+                or not status_parts[0].startswith(b"HTTP/1.")
+                or status_parts[1] != b"101"
+            ):
+                return
+            expected_accept = base64.b64encode(
+                hashlib.sha1((ws_key + _WS_GUID).encode("ascii")).digest()
+            ).decode("ascii")
+            resp_headers: dict[str, str] = {}
+            for raw_line in header_lines[1:]:
+                if b":" in raw_line:
+                    hk, hv = raw_line.split(b":", 1)
+                    resp_headers[hk.decode("latin1").strip().lower()] = hv.decode("latin1").strip()
+            if resp_headers.get("sec-websocket-accept") != expected_accept:
                 return
 
+            self._connected = True
             leftover = bytes(resp_buf[header_end + 4 :])
             self._read_loop(sock, leftover)
         except Exception as exc:  # noqa: BLE001 - best-effort progress listener
             log.debug("ComfyUI WebSocket progress listener unavailable: %s", exc)
         finally:
-            if sock is not None:
-                with suppress(OSError):
-                    sock.close()
+            self._connected = False
+            with self._lock:
+                active = self._sock
+                self._sock = None
+            for handle in (active, sock):
+                if handle is not None:
+                    with suppress(OSError):
+                        handle.close()
+
+    def _emit_text_payload(self, payload: bytes) -> None:
+        if self._stop.is_set():
+            return
+        try:
+            msg = json.loads(payload.decode("utf-8"), parse_constant=_reject_json_constant)
+        except (UnicodeDecodeError, ValueError):
+            return
+        if not isinstance(msg, dict):
+            return
+        progress = parse_comfy_ws_event(
+            msg,
+            self._prompt_id,
+            elapsed_seconds=time.monotonic() - self._started,
+        )
+        if progress is not None and not self._stop.is_set():
+            self._last_ws_event_at = time.monotonic()
+            try:
+                self._on_progress(progress)
+            except Exception:  # noqa: BLE001 - observer errors must not break polling
+                log.debug("Progress callback error ignored", exc_info=True)
 
     def _read_loop(self, sock: socket.socket, initial: bytes) -> None:
         buf = bytearray(initial)
+        frag_buf: bytearray | None = None
 
         def read_bytes(n: int) -> bytes | None:
             while len(buf) < n:
@@ -292,6 +392,7 @@ class _ComfyWsProgressListener:
             hdr = read_bytes(2)
             if hdr is None:
                 return
+            fin = bool(hdr[0] & 0x80)
             opcode = hdr[0] & 0x0F
             masked = bool(hdr[1] & 0x80)
             length = hdr[1] & 0x7F
@@ -313,40 +414,49 @@ class _ComfyWsProgressListener:
             payload = read_bytes(length) if length > 0 else b""
             if payload is None:
                 return
-            if mask_key is not None and payload:
-                payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
 
             if opcode == 0x8:  # close
                 return
-            if opcode == 0x9:  # ping -> send masked pong
+            if opcode == 0x9:  # ping -> send masked pong (allowed mid-fragment per RFC 6455)
+                if mask_key is not None and payload:
+                    payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload[:125]))
+                else:
+                    payload = payload[:125]
                 pong_mask = os.urandom(4)
-                masked_payload = bytes(b ^ pong_mask[i % 4] for i, b in enumerate(payload[:125]))
+                masked_payload = bytes(b ^ pong_mask[i % 4] for i, b in enumerate(payload))
                 pong = bytes([0x8A, 0x80 | len(masked_payload)]) + pong_mask + masked_payload
                 try:
                     sock.sendall(pong)
                 except OSError:
                     return
                 continue
-            if opcode != 0x1:  # ignore binary preview frames / continuations
+            if opcode == 0xA:  # pong
                 continue
-
-            try:
-                msg = json.loads(payload.decode("utf-8"))
-            except (UnicodeDecodeError, ValueError):
+            if opcode == 0x1:  # text frame (complete or start of fragmented message)
+                if mask_key is not None and payload:
+                    payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+                if fin:
+                    frag_buf = None
+                    self._emit_text_payload(payload)
+                else:
+                    frag_buf = bytearray(payload)
                 continue
-            if not isinstance(msg, dict):
+            if opcode == 0x0:  # continuation frame
+                if frag_buf is None:
+                    continue
+                if len(frag_buf) + len(payload) > _MAX_WS_FRAME_BYTES:
+                    return
+                if mask_key is not None and payload:
+                    payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+                frag_buf.extend(payload)
+                if fin:
+                    assembled = bytes(frag_buf)
+                    frag_buf = None
+                    self._emit_text_payload(assembled)
                 continue
-            progress = parse_comfy_ws_event(
-                msg,
-                self._prompt_id,
-                elapsed_seconds=time.monotonic() - self._started,
-            )
-            if progress is not None:
-                self._last_ws_event_at = time.monotonic()
-                try:
-                    self._on_progress(progress)
-                except Exception:  # noqa: BLE001 - observer errors must not break polling
-                    log.debug("Progress callback error ignored", exc_info=True)
+            # Ignore binary preview frames (0x2) and unknown data opcodes without unmasking.
+            if opcode == 0x2:
+                frag_buf = None
 
 
 def _has_control_chars(value: str) -> bool:
@@ -418,9 +528,12 @@ class ComfyClient:
         if not any(key.lower() == "user-agent" for key in headers):
             headers["User-Agent"] = f"mvdirector/{__version__}"
         self._headers = headers
-        self._api_key_comfy_org = (
+        raw_api_key = (
             config.api_key_comfy_org or os.environ.get("COMFY_ORG_API_KEY") or ""
-        ).strip() or None
+        ).strip()
+        if raw_api_key and _has_control_chars(raw_api_key):
+            raise ConfigError("comfy.api_key_comfy_org must not contain control characters.")
+        self._api_key_comfy_org = raw_api_key or None
         self._http = httpx.Client(
             base_url=config.base_url.rstrip("/"),
             headers=headers,
@@ -766,7 +879,13 @@ class ComfyClient:
                             return entry
                 if self._on_progress is not None:
                     now = time.monotonic()
-                    ws_recent = ws_listener is not None and (now - ws_listener.last_event_at) < 1.5
+                    ws_window = max(5.0, self._config.poll_interval * 2.0)
+                    ws_recent = (
+                        ws_listener is not None
+                        and ws_listener.connected
+                        and ws_listener.last_event_at is not None
+                        and (now - ws_listener.last_event_at) < ws_window
+                    )
                     if not ws_recent:
                         self._poll_queue_progress(prompt_id, elapsed=now - started)
                 self._sleep(self._config.poll_interval)
@@ -791,7 +910,7 @@ class ComfyClient:
         state = "running"
         queue_pos: int | None = None
         try:
-            resp = self._http.get("/queue")
+            resp = self._http.get("/queue", timeout=min(self._config.request_timeout, 5.0))
             if resp.status_code == 200:
                 body = resp.json()
                 if isinstance(body, dict):

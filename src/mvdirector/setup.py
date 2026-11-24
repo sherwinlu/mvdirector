@@ -197,14 +197,24 @@ _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "host.docker.inter
 
 def is_loopback_url(url: str) -> bool:
     """Return True when ``url`` points to the local host (not a separate remote server)."""
-    parsed = urllib.parse.urlparse(url.strip())
-    host = (parsed.hostname or "").lower()
+    try:
+        parsed = urllib.parse.urlparse(url.strip())
+        host = (parsed.hostname or "").rstrip(".").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
     if host in _LOOPBACK_HOSTS:
         return True
     try:
-        return ipaddress.ip_address(host).is_loopback
+        addr = ipaddress.ip_address(host)
     except ValueError:
         return False
+    if addr.is_loopback:
+        return True
+    return isinstance(addr, ipaddress.IPv6Address) and (
+        addr.ipv4_mapped is not None and addr.ipv4_mapped.is_loopback
+    )
 
 
 def validate_comfy_token_env(name: str) -> str:
@@ -237,9 +247,16 @@ def validate_http_url(url: str, label: str = "URL") -> str:
         raise ConfigError(f"{label} must not be empty.")
     if any(ord(ch) < 32 or ord(ch) == 127 or ch.isspace() for ch in cleaned):
         raise ConfigError(f"{label} contains invalid whitespace or control characters.")
-    parsed = urllib.parse.urlparse(cleaned)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+    try:
+        parsed = urllib.parse.urlparse(cleaned)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise ConfigError(f"{label} is not a valid URL (got {url!r}): {exc}") from exc
+    if parsed.scheme not in ("http", "https") or not hostname:
         raise ConfigError(f"{label} must be an http:// or https:// URL with a host (got {url!r}).")
+    if port is not None and not (1 <= port <= 65535):
+        raise ConfigError(f"{label} port must be between 1 and 65535 (got {port}).")
     return cleaned.rstrip("/")
 
 
@@ -317,7 +334,7 @@ def probe_comfy(
     try:
         with ComfyClient(config, transport=transport) as client:
             stats = client.ping()
-    except (ComfyConnectionError, ComfyJobError, ValueError) as exc:
+    except (ComfyConnectionError, ComfyJobError, ConfigError, ValueError) as exc:
         return ComfyProbe(url=normalized, reachable=False, error=str(exc))
 
     devices: list[str] = []
@@ -382,6 +399,8 @@ def inspect_environment(
     plat = f"{platform.system()} {platform.machine()}".strip()
     merged_headers = dict(_comfy_probe_headers(comfy_token_env) or {})
     if comfy_headers:
+        override_keys = {k.lower() for k in comfy_headers}
+        merged_headers = {k: v for k, v in merged_headers.items() if k.lower() not in override_keys}
         merged_headers.update(comfy_headers)
     return EnvironmentReport(
         python_version=py_ver,
@@ -419,10 +438,28 @@ def _recommended_min_free_vram_gb(comfy_probe: ComfyProbe | None) -> float | Non
     return round(min(6.0, max(2.0, total * 0.25)), 1)
 
 
+def detect_project_mode(project_dir: Path) -> ProjectMode | None:
+    """Read the configured ``mode`` from an existing ``project.yaml``, or None if absent/invalid."""
+    yaml_path = project_dir / CONFIG_FILENAME
+    if not yaml_path.is_file():
+        return None
+    try:
+        raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError, RecursionError):
+        return None
+    if isinstance(raw, dict) and isinstance(raw.get("mode"), str):
+        try:
+            return ProjectMode(raw["mode"].strip().lower())
+        except ValueError:
+            return None
+    return None
+
+
 def optimize_setup_options(
     options: SetupOptions,
     *,
     comfy_probe: ComfyProbe | None = None,
+    project_mode: ProjectMode | None = None,
 ) -> SetupOptions:
     """Pre-fill unset pipeline-tuning fields in ``options`` for the detected setup.
 
@@ -452,10 +489,15 @@ def optimize_setup_options(
     elif options.llm_enabled is True and options.qc_vision_blind_observer is None:
         updates["qc_vision_blind_observer"] = False
 
+    effective_mode = options.mode if options.mode is not None else project_mode
     if options.retry_in_place_repair is None:
-        updates["retry_in_place_repair"] = options.mode is not ProjectMode.MIX
+        updates["retry_in_place_repair"] = effective_mode is not ProjectMode.MIX
 
     return replace(options, **updates) if updates else options
+
+
+_VALID_LLM_PROVIDERS = frozenset({"anthropic", "openai", "gemini", "ollama", "openai_compatible"})
+_VALID_MISSING_DEP_POLICIES = frozenset({"skip", "fail"})
 
 
 def validate_setup_options(options: SetupOptions) -> None:
@@ -470,10 +512,24 @@ def validate_setup_options(options: SetupOptions) -> None:
         vram = options.comfy_min_free_vram_gb
         if isinstance(vram, bool) or not math.isfinite(vram) or vram < 0.5 or vram > 256.0:
             raise ConfigError("comfy.min_free_vram_gb must be a finite number between 0.5 and 256.")
+    if options.llm_provider is not None and options.llm_provider not in _VALID_LLM_PROVIDERS:
+        valid_providers = ", ".join(sorted(_VALID_LLM_PROVIDERS))
+        raise ConfigError(
+            f"Invalid configuration: unknown llm.provider {options.llm_provider!r}. "
+            f"Choose from: {valid_providers}"
+        )
     if options.llm_model is not None and not options.llm_model.strip():
         raise ConfigError("llm.model must not be empty.")
     if options.llm_base_url:
         validate_http_url(options.llm_base_url, "LLM base URL")
+    if (
+        options.qc_on_missing_dependency is not None
+        and options.qc_on_missing_dependency not in _VALID_MISSING_DEP_POLICIES
+    ):
+        raise ConfigError(
+            f"Invalid configuration: unknown qc.on_missing_dependency "
+            f"{options.qc_on_missing_dependency!r}. Choose from: fail, skip"
+        )
     if options.video_preset is not None and options.video_preset not in VIDEO_PRESETS:
         valid = ", ".join(VIDEO_PRESETS)
         raise ConfigError(f"Unknown video preset {options.video_preset!r}. Choose from: {valid}")

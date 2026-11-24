@@ -749,3 +749,88 @@ def test_comfy_client_sends_api_key_comfy_org_in_extra_data() -> None:
 
     assert pid == "p-123"
     assert captured[0]["extra_data"] == {"api_key_comfy_org": "comfyui-test-key"}
+
+
+def test_url_validation_and_loopback_edge_cases() -> None:
+    from mvdirector.setup import validate_http_url
+
+    for bad in (
+        "http://[invalid",
+        "http://:8188",
+        "http://127.0.0.1:abc",
+        "http://127.0.0.1:99999",
+    ):
+        with pytest.raises(ConfigError):
+            validate_http_url(bad, "ComfyUI URL")
+
+    assert is_loopback_url("http://[invalid") is False
+    assert is_loopback_url("http://localhost.:8188") is True
+    assert is_loopback_url("http://[::ffff:127.0.0.1]:8188") is True
+
+
+def test_inspect_environment_merges_comfy_headers_case_insensitively(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mvdirector.setup import inspect_environment
+
+    monkeypatch.setenv("COMFY_TOKEN", "from-env")
+    seen_auth_headers: list[list[tuple[str, str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_auth_headers.append(
+            [
+                (k.decode(), v.decode())
+                for k, v in request.headers.raw
+                if k.lower() == b"authorization"
+            ]
+        )
+        return httpx.Response(200, json={"devices": []})
+
+    inspect_environment(
+        comfy_url="http://127.0.0.1:8188",
+        comfy_token_env="COMFY_TOKEN",
+        comfy_headers={"authorization": "Basic explicit"},
+        comfy_transport=httpx.MockTransport(handler),
+        ollama_transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={"models": []})),
+    )
+    assert seen_auth_headers == [[("authorization", "Basic explicit")]]
+
+
+def test_cli_setup_preserves_mix_mode_in_place_repair_false_on_existing_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(api, "inspect_environment", lambda **_kw: _fake_report(healthy=True))
+    mix_dir = tmp_path / "existing-mix"
+    api.init_project(mix_dir, mode=ProjectMode.MIX)
+
+    res = runner.invoke(
+        app,
+        ["setup", str(mix_dir), "--non-interactive", "--comfy-url", "http://127.0.0.1:8188"],
+    )
+    assert res.exit_code == 0, res.output
+    cfg = load_config(mix_dir / CONFIG_FILENAME)
+    assert cfg.mode is ProjectMode.MIX
+    assert cfg.retry.in_place_repair is False
+
+
+def test_setup_project_fails_atomically_on_invalid_provider_or_policy(tmp_path: Path) -> None:
+    bad_dir = tmp_path / "never-created"
+    with pytest.raises(ConfigError, match="Invalid configuration"):
+        api.setup_project(bad_dir, SetupOptions(llm_provider="bogus"))
+    assert not bad_dir.exists()
+
+    with pytest.raises(ConfigError, match="Invalid configuration"):
+        api.setup_project(bad_dir, SetupOptions(qc_on_missing_dependency="ignore"))
+    assert not bad_dir.exists()
+
+
+def test_probe_comfy_returns_unreachable_on_invalid_env_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COMFY_ORG_API_KEY", "bad\r\nkey")
+    probe = probe_comfy(
+        "http://127.0.0.1:8188",
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={"devices": []})),
+    )
+    assert probe.reachable is False
+    assert "control characters" in (probe.error or "")

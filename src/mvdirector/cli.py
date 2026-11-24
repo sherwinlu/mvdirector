@@ -17,7 +17,7 @@ import typer
 
 from mvdirector import api, mix_assemble
 from mvdirector import setup as setup_mod
-from mvdirector.config import CONFIG_FILENAME, ReviewMode, load_config
+from mvdirector.config import CONFIG_FILENAME, MAX_COMFY_CONCURRENCY, ReviewMode, load_config
 from mvdirector.errors import MVDError
 from mvdirector.generation.runner import RunEvent
 from mvdirector.models import AssetKind, Character, Manifest, ProjectMode, VideoStyle
@@ -57,6 +57,14 @@ DraftOption = typer.Option(
     False,
     "--draft",
     help="Render at draft resolution (video.draft_width/height, or half target resolution).",
+)
+ConcurrencyOption = typer.Option(
+    None,
+    "--concurrency",
+    "-j",
+    min=1,
+    max=MAX_COMFY_CONCURRENCY,
+    help="Parallel shots per dependency wave (defaults to comfy.max_concurrency).",
 )
 StateOption = typer.Option(None, "--state", help="Wardrobe state id. Defaults to the first.")
 CharacterOption = typer.Option(
@@ -921,6 +929,7 @@ def _generate(
     skip_preflight: bool = False,
     draft: bool = False,
     chapters: list[str] | None = None,
+    max_concurrency: int | None = None,
 ) -> None:
     try:
         result = api.generate(
@@ -932,6 +941,7 @@ def _generate(
             draft=draft,
             observer=_progress,
             chapters=chapters,
+            max_concurrency=max_concurrency,
         )
     except MVDError as exc:
         raise _fail(exc) from exc
@@ -947,6 +957,7 @@ def stills(
     chapter: list[str] = ChaptersOption,
     skip_preflight: bool = SkipPreflight,
     draft: bool = DraftOption,
+    concurrency: int | None = ConcurrencyOption,
 ) -> None:
     """Generate and quality-check stills, regenerating failures automatically."""
     _generate(
@@ -957,6 +968,7 @@ def stills(
         skip_preflight,
         draft=draft,
         chapters=chapter or None,
+        max_concurrency=concurrency,
     )
 
 
@@ -967,6 +979,7 @@ def videos(
     chapter: list[str] = ChaptersOption,
     review_mode: ReviewMode = ModeOption,
     draft: bool = DraftOption,
+    concurrency: int | None = ConcurrencyOption,
 ) -> None:
     """Generate and quality-check videos for shots whose still has passed."""
     _generate(
@@ -976,6 +989,7 @@ def videos(
         review_mode,
         draft=draft,
         chapters=chapter or None,
+        max_concurrency=concurrency,
     )
 
 
@@ -987,6 +1001,7 @@ def run(
     review_mode: ReviewMode = ModeOption,
     skip_preflight: bool = SkipPreflight,
     draft: bool = DraftOption,
+    concurrency: int | None = ConcurrencyOption,
 ) -> None:
     """Generate stills, then videos, with automatic quality checks and retries."""
     _generate(
@@ -997,6 +1012,7 @@ def run(
         skip_preflight,
         draft=draft,
         chapters=chapter or None,
+        max_concurrency=concurrency,
     )
 
 

@@ -993,3 +993,35 @@ def test_qc_and_retry_config_boundaries_and_partial_framing_thresholds(still_pat
         still_path, shot, Manifest(title="T", duration=4.0, fps=24, shots=[shot]), None
     )
     assert report.passed
+
+
+def test_temporal_checks_allow_smooth_steady_motion_while_catching_flicker():
+    from mvdirector.qc.video import VideoQC
+
+    cfg = ProjectConfig()
+    gate = VideoQC(cfg.qc, cfg.video, None, None, None)
+
+    # Smooth steady brightness/camera ramp: high median (~0.055) with near-zero spike excess.
+    smooth_frames = [np.full((64, 64, 3), int(10 + i * 14), dtype=np.uint8) for i in range(16)]
+    smooth = gate._temporal_checks(smooth_frames)[0]
+    assert smooth.status is CheckStatus.PASSED
+    assert smooth.score is not None and smooth.score >= 0.95
+    assert smooth.metrics["median_motion"] > 0.04
+    assert smooth.metrics["flicker_excess"] < 0.01
+
+    # Calm clip with intermittent erratic spike (median low, p95 spike high): penalized.
+    jitter_frames = [np.full((64, 64, 3), 100 + (i % 2) * 2, dtype=np.uint8) for i in range(16)]
+    jitter_frames[8] = np.full((64, 64, 3), 124, dtype=np.uint8)
+    jitter = gate._temporal_checks(jitter_frames)[0]
+    assert jitter.status is CheckStatus.PASSED
+    assert jitter.score is not None and jitter.score < 0.70
+    assert jitter.metrics["flicker_excess"] > cfg.qc.video.flicker_good
+
+    # Heavy strobe/flicker exceeding flicker_bad still fails hard with score 0.0.
+    strobe_frames = [
+        np.full((64, 64, 3), 60 if i % 2 == 0 else 100, dtype=np.uint8) for i in range(16)
+    ]
+    strobe = gate._temporal_checks(strobe_frames)[0]
+    assert strobe.status is CheckStatus.FAILED
+    assert strobe.score == 0.0
+    assert "flicker" in strobe.detail

@@ -10,8 +10,9 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from mvdirector.errors import DependencyMissing, LLMError, LLMUnavailableError
+from mvdirector.errors import DependencyMissing, LLMError, LLMQuotaError, LLMUnavailableError
 from mvdirector.llm.base import ChatBackend, Message, Reply
+from mvdirector.llm.http import is_quota_error
 
 
 class AnthropicChat(ChatBackend):
@@ -83,6 +84,12 @@ class AnthropicChat(ChatBackend):
         except self._unavailable as exc:
             raise LLMUnavailableError(f"Anthropic API call failed: {exc}") from exc
         except self._api_error as exc:
+            if is_quota_error(str(exc)):
+                raise LLMQuotaError(
+                    f"Anthropic usage or quota limit reached ({exc}). "
+                    "Check your Anthropic billing/usage limits, or switch to another provider "
+                    "or local Ollama."
+                ) from exc
             raise LLMError(f"Anthropic API call failed: {exc}") from exc
         text = "".join(block.text for block in response.content if block.type == "text")
         return Reply(text, truncated=getattr(response, "stop_reason", None) == "max_tokens")

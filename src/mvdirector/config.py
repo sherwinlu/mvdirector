@@ -13,40 +13,50 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
+from mvdirector.dotenv import (
+    ALLOWED_ENV_PREFIXES as _ALLOWED_ENV_PREFIXES,
+)
+from mvdirector.dotenv import (
+    ALLOWED_LLM_KEY_NAMES as _ALLOWED_LLM_KEY_NAMES,
+)
+from mvdirector.dotenv import (
+    BLOCKED_ENV_PREFIXES as _BLOCKED_ENV_PREFIXES,
+)
+from mvdirector.dotenv import (
+    ENV_NAME_RE as _ENV_NAME,
+)
+from mvdirector.dotenv import (
+    merged_project_environ,
+)
 from mvdirector.errors import ConfigError
 from mvdirector.models import Framing, ProjectMode, RetryStrategy, VideoStyle
 
 CONFIG_FILENAME = "project.yaml"
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
-_ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_ALLOWED_ENV_PREFIXES = ("MVD_", "COMFY_")
-_ALLOWED_LLM_KEY_NAMES = {
-    "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
-    "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
-}
-_BLOCKED_ENV_PREFIXES = (
-    "AWS_",
-    "AZURE_",
-    "DOCKER_",
-    "GCP_",
-    "GH_",
-    "GITHUB_",
-    "GITLAB_",
-    "GPG_",
-    "KUBE",
-    "NPM_",
-    "PYPI_",
-    "SSH_",
-)
+
+
+def _context_environ(info: ValidationInfo) -> Mapping[str, str] | None:
+    if isinstance(info.context, dict):
+        env = info.context.get("environ")
+        if isinstance(env, Mapping):
+            return env
+    return None
 
 
 def _extra_allowed_env_vars() -> set[str]:
@@ -437,15 +447,52 @@ class VideoConfig(_Section):
         return _snap_size(dw, dh, self.size_multiple)
 
 
+MAX_COMFY_CONCURRENCY = 64
+
+
+def validate_max_concurrency(value: object) -> int:
+    """Validate an integer concurrency cap in ``[1, MAX_COMFY_CONCURRENCY]``."""
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 1
+        or value > MAX_COMFY_CONCURRENCY
+    ):
+        raise ConfigError(
+            f"comfy.max_concurrency must be an integer between 1 and {MAX_COMFY_CONCURRENCY}, "
+            f"got {value!r}."
+        )
+    return value
+
+
 class ComfyConfig(_Section):
     base_url: str = Field(default="${COMFY_URL:-http://127.0.0.1:8188}", validate_default=True)
     headers: dict[str, str] = Field(default_factory=dict)
+    api_key_comfy_org: str | None = Field(
+        default=None,
+        description=(
+            "Optional Comfy.org API key forwarded in POST /prompt extra_data for paid ComfyUI "
+            "cloud API nodes (may reference ${COMFY_ORG_API_KEY})."
+        ),
+    )
 
-    @field_validator("base_url", "headers", mode="before")
+    @field_validator("base_url", "headers", "api_key_comfy_org", mode="before")
     @classmethod
-    def _expand_connection_env(cls, value: Any) -> Any:
+    def _expand_connection_env(cls, value: Any, info: ValidationInfo) -> Any:
         """Expand ``${NAME}`` here (defaults included) rather than on the raw YAML."""
-        return expand_env(value)
+        return expand_env(value, environ=_context_environ(info))
+
+    @field_validator("api_key_comfy_org")
+    @classmethod
+    def _check_api_key_comfy_org(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in cleaned):
+            raise ValueError("comfy.api_key_comfy_org must not contain control characters.")
+        return cleaned
 
     @field_validator("headers")
     @classmethod
@@ -460,6 +507,15 @@ class ComfyConfig(_Section):
     request_timeout: float = Field(default=60.0, gt=0.0, allow_inf_nan=False)
     job_timeout: float = Field(default=1800.0, gt=0.0, allow_inf_nan=False)
     poll_interval: float = Field(default=3.0, ge=0.0, allow_inf_nan=False)
+    max_concurrency: int = Field(
+        default=1,
+        ge=1,
+        le=MAX_COMFY_CONCURRENCY,
+        description=(
+            "Maximum shots generated concurrently within each dependency wave "
+            "(1 = sequential; set >1 for RunPod Serverless or multi-pod pools)."
+        ),
+    )
     workflows_dir: str = "workflows"
     reference_notation: Literal["prose", "tags"] = Field(
         default="prose",
@@ -557,14 +613,22 @@ class LLMConfig(_Section):
         ge=1024,
         description="Context window to request. Used by ollama (default 16384) and for warnings.",
     )
+    stream: bool = Field(
+        default=False,
+        description=(
+            "Stream chat completions over SSE for openai/openai_compatible servers. Prevents "
+            "reverse-proxy idle timeouts (e.g. Cloudflare 100s HTTP 524 on RunPod vLLM) on long "
+            "planning replies."
+        ),
+    )
 
     @field_validator("base_url", mode="before")
     @classmethod
-    def _expand_base_url_env(cls, value: Any) -> Any:
-        return expand_env(value)
+    def _expand_base_url_env(cls, value: Any, info: ValidationInfo) -> Any:
+        return expand_env(value, environ=_context_environ(info))
 
     @model_validator(mode="after")
-    def _check_provider(self) -> LLMConfig:
+    def _check_provider(self, info: ValidationInfo) -> LLMConfig:
         if not self.model.strip():
             raise ValueError("llm.model must not be empty")
         if self.provider != DEFAULT_LLM_PROVIDER and "model" not in self.model_fields_set:
@@ -574,7 +638,8 @@ class LLMConfig(_Section):
                 "name your provider or server lists."
             )
         if self.provider == "openai_compatible" and not self.base_url:
-            env_url = os.environ.get("MVD_LLM_URL", "").strip()
+            env = _context_environ(info) or os.environ
+            env_url = env.get("MVD_LLM_URL", "").strip()
             if env_url:
                 self.base_url = env_url
             else:
@@ -599,6 +664,15 @@ class PlanningConfig(_Section):
             "singing intercut with performance and b-roll), 'narrative' (no lip-sync: recurring "
             "character(s) in performance shots intercut with b-roll), or 'visual' (no lip-sync "
             "and no recurring characters: 100% b-roll visual/atmospheric film)."
+        ),
+    )
+    vocals: Literal["auto", "solo", "multi"] = Field(
+        default="auto",
+        description=(
+            "How many vocalists sing on camera: 'auto' (and 'multi', which currently behaves "
+            "the same) maps solo, duet and ensemble singers from lyrics and diarized vocal "
+            "turns; 'solo' locks all singing shots to the primary protagonist so secondary story "
+            "characters never lip-sync."
         ),
     )
     wardrobe_monotonic: bool = Field(
@@ -661,6 +735,14 @@ class ReferenceConfig(_Section):
         default=2,
         ge=1,
         description="Candidate turnaround reference videos generated per run.",
+    )
+    closeup_face_panel: bool = Field(
+        default=False,
+        description=(
+            "Use the cropped face-detail panel as reference_image on close_up shots when the "
+            "still workflow binds only a single reference_image (improves close-up framing and "
+            "facial fidelity at the expense of full-outfit visibility)."
+        ),
     )
     panel_inset: float = Field(
         default=0.012,
@@ -823,8 +905,8 @@ class QCConfig(_Section):
 
     @field_validator("syncnet_model_path", mode="before")
     @classmethod
-    def _expand_syncnet_model_path(cls, value: Any) -> Any:
-        return expand_env(value)
+    def _expand_syncnet_model_path(cls, value: Any, info: ValidationInfo) -> Any:
+        return expand_env(value, environ=_context_environ(info))
 
     weights: dict[str, float] = Field(
         default_factory=lambda: {
@@ -1028,8 +1110,9 @@ class ProjectConfig(_Section):
     review: ReviewConfig = Field(default_factory=ReviewConfig)
 
 
-def expand_env(value: Any) -> Any:
+def expand_env(value: Any, *, environ: Mapping[str, str] | None = None) -> Any:
     """Recursively replace ``${NAME}`` / ``${NAME:-default}`` in strings."""
+    env = os.environ if environ is None else environ
     if isinstance(value, str):
 
         def replace(match: re.Match[str]) -> str:
@@ -1040,38 +1123,39 @@ def expand_env(value: Any) -> Any:
                     "Only MVD_*, COMFY_*, or names listed in MVD_ALLOWED_ENV_VARS "
                     "may be expanded."
                 )
-            resolved = os.environ.get(name, default)
+            resolved = env.get(name, default)
             if resolved is None:
                 raise ConfigError(f"Environment variable {name} is not set")
             return resolved
 
         return _ENV_PATTERN.sub(replace, value)
     if isinstance(value, dict):
-        return {key: expand_env(item) for key, item in value.items()}
+        return {key: expand_env(item, environ=env) for key, item in value.items()}
     if isinstance(value, list):
-        return [expand_env(item) for item in value]
+        return [expand_env(item, environ=env) for item in value]
     return value
 
 
-def mask_unset_allowed_env_refs(value: Any) -> Any:
+def mask_unset_allowed_env_refs(value: Any, *, environ: Mapping[str, str] | None = None) -> Any:
     """Replace unset allowed ``${VAR}`` placeholders so validation works before export."""
+    env = os.environ if environ is None else environ
     if isinstance(value, str):
 
         def _sub(match: re.Match[str]) -> str:
             var_name = match.group(1)
-            if is_allowed_env_var(var_name) and os.environ.get(var_name) is None:
+            if is_allowed_env_var(var_name) and env.get(var_name) is None:
                 return "placeholder"
             return match.group(0)
 
         return _ENV_PATTERN.sub(_sub, value)
     if isinstance(value, dict):
-        return {key: mask_unset_allowed_env_refs(item) for key, item in value.items()}
+        return {key: mask_unset_allowed_env_refs(item, environ=env) for key, item in value.items()}
     if isinstance(value, list):
-        return [mask_unset_allowed_env_refs(item) for item in value]
+        return [mask_unset_allowed_env_refs(item, environ=env) for item in value]
     return value
 
 
-def load_config(path: Path) -> ProjectConfig:
+def load_config(path: Path, *, environ: Mapping[str, str] | None = None) -> ProjectConfig:
     if not path.is_file():
         raise ConfigError(f"Config file not found: {path}")
     try:
@@ -1086,7 +1170,8 @@ def load_config(path: Path) -> ProjectConfig:
         # PyYAML recurses per nesting level, so a deeply nested document exhausts the stack
         # instead of raising YAMLError.
         raise ConfigError(f"{path} nests collections too deeply to parse.") from None
+    effective_env = merged_project_environ(path.parent) if environ is None else environ
     try:
-        return ProjectConfig.model_validate(raw)
+        return ProjectConfig.model_validate(raw, context={"environ": effective_env})
     except ValidationError as exc:
         raise ConfigError(f"Invalid configuration in {path}:\n{exc}") from exc

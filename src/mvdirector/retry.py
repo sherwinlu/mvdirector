@@ -82,7 +82,10 @@ class RetryPolicy:
             state.prompt_override = self._rewrite(shot, kind, state, after_fallback=after_fallback)
             state.director_note = None
         elif strategy is RetryStrategy.ADJUST_PARAMS:
-            state.param_overrides.update(self._config.adjust_params.get(kind.value, {}))
+            state.param_overrides = {
+                **state.param_overrides,
+                **self._config.adjust_params.get(kind.value, {}),
+            }
         return AttemptPlan(number=number, strategy=strategy, seed=self.seed_for(shot, kind, number))
 
     def seed_for(self, shot: Shot, kind: AssetKind, number: int) -> int:
@@ -145,7 +148,8 @@ class RetryPolicy:
         if state.director_note and state.director_note.strip():
             hints = [state.director_note.strip(), *hints]
 
-        if self._llm is not None:
+        llm = self._llm
+        if llm is not None:
             request = (
                 f"ASSET: {kind.value} for a {shot.type.value} shot, framing {shot.framing.value}\n"
                 f"CURRENT PROMPT:\n{current}\n\nPROBLEMS FOUND:\n"
@@ -154,7 +158,7 @@ class RetryPolicy:
                 + "\n".join(f"- {hint}" for hint in hints or ["(none)"])
             )
             try:
-                reply = self._llm.complete_json(
+                reply = llm.complete_json(
                     system=prompts.REWRITE_SYSTEM,
                     content=[text_block(request)],
                     schema=_RewriteReply,

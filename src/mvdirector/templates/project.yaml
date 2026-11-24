@@ -72,6 +72,7 @@ comfy:
   request_timeout: 60
   job_timeout: 1800
   poll_interval: 3
+  max_concurrency: 1             # shots rendered in parallel per wave (>1 for serverless / multi-pod)
   workflows_dir: workflows
   reference_notation: prose      # prose ('first/second reference image') | tags ('@image1', '@video1')
   workflows:                     # starter examples; point these at bindings for any model you prefer
@@ -95,6 +96,7 @@ llm:
   timeout_seconds: 600           # a local model can be slow when the GPU is busy
   json_mode: auto                # auto | off | object | schema
   context_tokens: null           # context window to request (ollama default 16384)
+  stream: false                  # true = SSE streaming for openai/openai_compatible (avoids proxy timeouts)
   # Examples:
   #   provider: anthropic         model: <a Claude model>
   #   provider: openai            model: <an OpenAI model>
@@ -103,6 +105,7 @@ llm:
 
 planning:
   video_style: lipsync           # lipsync | narrative (characters, no lip-sync) | visual (100% b-roll, no characters)
+  vocals: auto                   # auto | solo (lock singing to primary protagonist) | multi (duet/ensemble)
   wardrobe_monotonic: true       # a costume change is one-way (a cape taken off stays off)
   allow_multicut_shots: false    # allow the planner to emit multi-angle montage cuts (allow_cuts)
   max_lipsync_share: 0.45        # cap on screen time the singer sings to camera: 0.7 performance,
@@ -115,6 +118,7 @@ reference:
   height: null
   candidates: 4
   video_candidates: 2
+  closeup_face_panel: false      # true = use face-detail panel on close_up stills for single-ref workflows
   panel_inset: 0.012             # trimmed from each panel edge to drop dividers and labels
 
 plates:

@@ -48,6 +48,7 @@ from mvdirector.errors import (
 )
 from mvdirector.llm.check import LLMCheckResult, run_llm_check
 from mvdirector.llm.factory import PROVIDERS, build_llm
+from mvdirector.llm.http import redact_url
 from mvdirector.models import ProjectMode, VideoStyle
 from mvdirector.project import Project
 from mvdirector.store import atomic_write
@@ -60,7 +61,7 @@ from mvdirector.tuning import (
 DEFAULT_COMFY_URL = "http://127.0.0.1:8188"
 DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 DEFAULT_PROBE_TIMEOUT = 5.0
-_SAFE_OLLAMA_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+_SAFE_OLLAMA_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z")
 
 PROVIDER_ALIASES: dict[str, str] = {
     "chatgpt": "openai",
@@ -588,6 +589,7 @@ def pull_ollama_model(
             return False, f"`ollama pull {cleaned}` exited with status {proc.returncode}."
         return True, f"Pulled Ollama model '{cleaned}'."
 
+    safe_url = redact_url(normalized)
     try:
         with httpx.Client(timeout=600.0, transport=transport) as client:
             resp = client.post(
@@ -595,10 +597,16 @@ def pull_ollama_model(
                 json={"name": cleaned, "stream": False},
             )
     except httpx.HTTPError as exc:
-        return False, f"Could not pull '{cleaned}' from {normalized}: {exc}"
+        return False, f"Could not pull '{cleaned}' from {safe_url}: {exc}"
     if resp.status_code >= 400:
         return False, f"Ollama /api/pull returned HTTP {resp.status_code}: {resp.text[:200]}"
-    return True, f"Pulled Ollama model '{cleaned}' on {normalized}."
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    if isinstance(body, dict) and body.get("error"):
+        return False, f"Ollama /api/pull failed for '{cleaned}': {str(body['error'])[:200]}"
+    return True, f"Pulled Ollama model '{cleaned}' on {safe_url}."
 
 
 def verify_llm_config(
@@ -646,7 +654,7 @@ def check_comfy_wiring(
     """Verify ComfyUI reachability, ``/object_info``, and any exported workflow bindings."""
     project = Project.open(project_dir)
     comfy_cfg = project.config.comfy
-    url = comfy_cfg.base_url
+    url = redact_url(comfy_cfg.base_url)
     env = project.environ()
 
     workflows_ok: list[str] = []

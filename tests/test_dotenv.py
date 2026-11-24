@@ -196,3 +196,32 @@ def test_project_dotenv_is_isolated_and_shell_always_wins(
     assert load_config(proj_a / CONFIG_FILENAME).comfy.headers == {
         "Authorization": "Bearer tok-from-shell"
     }
+
+
+def test_dotenv_blocks_unicode_line_separators_and_trailing_newline_names(tmp_path: Path) -> None:
+    from mvdirector.dotenv import is_allowed_dotenv_var, parse_dotenv
+
+    assert is_allowed_dotenv_var("COMFY_URL\n") is False
+    assert is_allowed_dotenv_var("MVD_LLM_URL\n") is False
+    assert is_allowed_dotenv_var("OPENAI_API_KEY\n") is False
+
+    for sep in ("\u0085", "\u2028", "\u2029"):
+        with pytest.raises(ConfigError, match="control characters"):
+            write_project_dotenv_var(
+                tmp_path, "OPENAI_API_KEY", f'sk-real"{sep}COMFY_URL="http://evil.invalid'
+            )
+
+    # Even if a crafted file contains Unicode line separators, parse_dotenv does not split on them.
+    parsed = parse_dotenv('OPENAI_API_KEY="sk-a\u2028COMFY_URL=http://evil.invalid"\n')
+    assert "COMFY_URL" not in parsed
+    assert parsed == {}
+
+
+def test_ensure_dotenv_gitignored_preserves_readable_mode(tmp_path: Path) -> None:
+    import stat
+
+    from mvdirector.dotenv import ensure_dotenv_gitignored
+
+    gi = ensure_dotenv_gitignored(tmp_path)
+    if os.name == "posix":
+        assert stat.S_IMODE(gi.stat().st_mode) == 0o644

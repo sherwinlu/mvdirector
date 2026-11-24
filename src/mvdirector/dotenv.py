@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 DOTENV_FILENAME = ".env"
 _MAX_DOTENV_BYTES = 64 * 1024  # 64 KiB cap
 
-ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 ALLOWED_ENV_PREFIXES = ("MVD_", "COMFY_")
 ALLOWED_LLM_KEY_NAMES = frozenset(
     {
@@ -76,8 +76,11 @@ def is_allowed_dotenv_var(name: str) -> bool:
     return upper in ALLOWED_LLM_KEY_NAMES or upper.startswith(ALLOWED_ENV_PREFIXES)
 
 
+_UNICODE_LINE_BREAKS = frozenset({"\u0085", "\u2028", "\u2029"})
+
+
 def _has_control_chars(value: str) -> bool:
-    return any(ord(ch) < 32 or ord(ch) == 127 for ch in value)
+    return any(ord(ch) < 32 or ord(ch) == 127 or ch in _UNICODE_LINE_BREAKS for ch in value)
 
 
 def _unescape_double_quoted(raw: str) -> str:
@@ -108,8 +111,8 @@ def _parse_value(raw: str) -> str:
 def parse_dotenv(text: str) -> dict[str, str]:
     """Parse ``KEY=VALUE`` pairs from ``text``, retaining only allowlisted variable names."""
     values: dict[str, str] = {}
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
+    for raw_line in text.split("\n"):
+        line = raw_line.rstrip("\r").strip()
         if not line or line.startswith("#"):
             continue
         line = _EXPORT_PREFIX_RE.sub("", line, count=1)
@@ -191,10 +194,16 @@ def ensure_dotenv_gitignored(project_dir: Path) -> Path:
     if gitignore_path.is_symlink():
         raise ConfigError(f"Refusing to modify symlinked .gitignore at {gitignore_path}")
     existing = ""
+    existing_mode: int | None = None
     if gitignore_path.exists():
         if not gitignore_path.is_file():
             raise ConfigError(f"{gitignore_path} exists and is not a regular file")
-        existing = gitignore_path.read_text(encoding="utf-8")
+        if os.name == "posix":
+            existing_mode = stat.S_IMODE(os.lstat(gitignore_path).st_mode)
+        raw_existing = _read_regular_text(gitignore_path)
+        if raw_existing is None:
+            raise ConfigError(f"Could not safely read existing {gitignore_path}")
+        existing = raw_existing
     lines = {line.strip() for line in existing.splitlines()}
     needed: list[str] = []
     if ".env" not in lines and "/.env" not in lines:
@@ -210,10 +219,15 @@ def ensure_dotenv_gitignored(project_dir: Path) -> Path:
     fd, tmp_name = tempfile.mkstemp(prefix=".gitignore.", suffix=".tmp", dir=project_dir)
     tmp_path = Path(tmp_name)
     try:
+        if os.name == "posix":
+            os.fchmod(fd, existing_mode if existing_mode is not None else 0o644)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
             handle.write(updated)
         os.replace(tmp_path, gitignore_path)
     except BaseException:
+        if fd >= 0:
+            os.close(fd)
         tmp_path.unlink(missing_ok=True)
         raise
     return gitignore_path
@@ -244,7 +258,7 @@ def write_project_dotenv_var(project_dir: Path, name: str, value: str) -> Path:
         raw = _read_regular_text(dotenv_path)
         if raw is None:
             raise ConfigError(f"Could not safely read existing {dotenv_path}")
-        existing_lines = raw.splitlines(keepends=True)
+        existing_lines = re.findall(r"[^\n]*\n|[^\n]+", raw)
     else:
         existing_lines = [
             "# Local project secrets (owner-only 0600, gitignored). Never commit this file.\n"

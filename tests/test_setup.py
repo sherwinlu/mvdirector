@@ -895,3 +895,54 @@ def test_cli_setup_non_interactive_verify_exits_nonzero_on_failure(
     )
     assert res.exit_code == 1
     assert "Usage or billing quota limit reached" in res.stdout
+
+
+def test_pull_ollama_model_handles_http_200_error_and_redacts_url() -> None:
+    from mvdirector.setup import pull_ollama_model
+
+    ok, msg = pull_ollama_model(
+        "missing:latest",
+        base_url="http://user:supersecret@127.0.0.1:11434",
+        transport=httpx.MockTransport(
+            lambda _r: httpx.Response(
+                200, json={"error": "pull model manifest: file does not exist"}
+            )
+        ),
+    )
+    assert ok is False
+    assert "file does not exist" in msg
+    assert "supersecret" not in msg
+
+    ok2, msg2 = pull_ollama_model(
+        "qwen3:8b",
+        base_url="http://user:supersecret@127.0.0.1:11434",
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={"status": "success"})),
+    )
+    assert ok2 is True
+    assert "supersecret" not in msg2
+
+
+def test_check_comfy_wiring_redacts_userinfo_in_report_url(tmp_path: Path) -> None:
+    from mvdirector.setup import check_comfy_wiring
+
+    proj = tmp_path / "wired-secret"
+    api.setup_project(
+        proj,
+        SetupOptions(
+            comfy_url="http://alice:topsecret@127.0.0.1:8188",
+            llm_enabled=False,
+        ),
+    )
+    report = check_comfy_wiring(
+        proj,
+        comfy_transport=httpx.MockTransport(
+            lambda r: (
+                httpx.Response(200, json={"devices": []})
+                if r.url.path == "/system_stats"
+                else httpx.Response(200, json={})
+            )
+        ),
+    )
+    assert report.reachable is True
+    assert "topsecret" not in report.url
+    assert report.url == "http://127.0.0.1:8188"

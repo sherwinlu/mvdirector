@@ -34,6 +34,10 @@ Score from 0 to 1:
     shots, BOTH named vocalists must appear in frame with unobstructed mouths singing together; on
     solo two-shots with a listener, ONLY the named solo vocalist sings while the listener's mouth
     stays closed (score spec_match <= 0.2 if a co-singer is missing or the wrong person is singing).
+  * Reference-image priority: when a character reference image is provided, treat the reference
+    image as the visual ground truth for character appearance and accessory placement; do not
+    penalize spec_match for a left/right side discrepancy between the reference image and the
+    text description when the shot matches the reference image.
 - artifact_free: no malformed hands or fingers, extra or missing limbs, warped faces,
   melted objects, garbled text, watermarks{video_artifacts}.
   * Overlaid text & title cards: any overlaid typography, opening credits, title cards,
@@ -50,9 +54,12 @@ Score from 0 to 1:
   sheet or portrait is given, looks like the same person. A sheet shows the same person from
   several angles. Judge only details large enough to resolve at the stated framing. Check face
   shape, skin tone, hair cut and length, makeup, build and the costume for this shot's wardrobe
-  state (for example a cape must be present or absent exactly as specified). Identifying
-  marks must be on the stated side of the singer's anatomical left or right; a mirror-flipped
-  face or mark is a mismatch.
+  state (for example a cape must be present or absent exactly as specified). When a reference
+  sheet or portrait is given, treat the reference image as the ground truth for which anatomical
+  side any asymmetric mark or accessory sits on—do not penalize a shot that matches the reference
+  image even if the text description names the opposite side; only flag a mirror-flipped face,
+  mark, or accessory when it contradicts the reference image (or the text description when no
+  reference image is given).
   Use null if the specification says no singer should be visible.
 
 List each concrete problem in 'issues' (empty if none). In 'fix', give one short,

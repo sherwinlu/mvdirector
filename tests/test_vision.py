@@ -141,6 +141,8 @@ def test_system_prompt_flags_mirrored_features_and_costume_state(manifest, png):
     llm = FakeLLM(_verdict())
     VisionJudge(llm).judge([png], _shot(), manifest, AssetKind.STILL)
     assert "mirror-flipped" in llm.system and "cape" in llm.system
+    assert "Reference-image priority" in llm.system
+    assert "ground truth" in llm.system
 
 
 def _checks(verdict, manifest, png, kind=AssetKind.STILL):

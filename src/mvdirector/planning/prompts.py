@@ -1024,7 +1024,14 @@ def compose_still_prompt(
     if ref_note is not None:
         parts.append(ref_note)
     if not plate_attached and scene is not None and scene.description:
-        parts.append(f"Setting: {scene.description}")
+        if shot.framing is Framing.CLOSE_UP and shot.type is ShotType.BROLL:
+            if shot.setting:
+                parts.append(
+                    f"Setting: {shot.setting} "
+                    "(tight close-up; keep distant room elements out of frame)."
+                )
+        else:
+            parts.append(f"Setting: {scene.description}")
     resolved_props = bible.resolve_props(shot.props)
     if resolved_props:
         if props_attached:

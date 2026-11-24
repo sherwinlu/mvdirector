@@ -30,6 +30,7 @@ from mvdirector.models import (
     AssetStatus,
     Attempt,
     ContinuityMode,
+    Framing,
     Manifest,
     QCReport,
     ReferenceSet,
@@ -669,7 +670,18 @@ class ShotRunner:
                     "No reference sheet is locked. Run `mvd reference generate` and "
                     "`mvd reference lock <image>` before generating stills."
                 )
-            refs.append(("reference_image", self._project.path(front)))
+            # Single-reference workflows lose facial detail and pull framing too wide on close-ups
+            # when given the full-body front panel; prefer the macro face panel when available.
+            primary_panel = (
+                reference.panel("face") or front
+                if (
+                    self._project.config.reference.closeup_face_panel
+                    and shot.framing is Framing.CLOSE_UP
+                    and not template.accepts("reference_face")
+                )
+                else front
+            )
+            refs.append(("reference_image", self._project.path(primary_panel)))
         # Extra angles go only to workflows that bind them, so nothing is uploaded for nothing.
         if reference is not None:
             for name in ("profile", "three_quarter", "face"):

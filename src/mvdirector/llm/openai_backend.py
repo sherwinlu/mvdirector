@@ -10,6 +10,7 @@ OpenRouter. Images are sent as base64 data URLs.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -50,6 +51,7 @@ class OpenAIChat(ChatBackend):
         token_param: str,
         key_hint: str,
         context_tokens: int | None = None,
+        stream: bool = False,
     ) -> None:
         super().__init__(model=model, max_tokens=max_tokens, context_tokens=context_tokens)
         self._provider = provider
@@ -58,6 +60,7 @@ class OpenAIChat(ChatBackend):
         self._json_mode = json_mode  # "off", "object" or "schema"; never "auto" here
         self._token_param = token_param
         self._key_hint = key_hint
+        self._stream = stream
 
     # ------------------------------------------------------------------ request
 
@@ -103,6 +106,8 @@ class OpenAIChat(ChatBackend):
         hint = f"Is the server running at {safe_base}?"
         images = has_images(messages)
         words = IMAGE_WORDS if images else ()
+        if self._stream:
+            return self._send_stream(payload, response_format, hint, words, images)
         response = self._http.post(self._url, payload, unreachable_hint=hint, no_retry_words=words)
         if response_format and response.status_code == 400 and _mentions_json_mode(response.text):
             # Some servers do not support it. Remember that and ask in the prompt alone.
@@ -121,6 +126,70 @@ class OpenAIChat(ChatBackend):
             response, provider=self._provider, key_hint=self._key_hint, had_images=images
         )
         return self._parse(json_body(response, self._provider))
+
+    def _send_stream(
+        self,
+        payload: dict[str, Any],
+        response_format: dict[str, Any] | None,
+        hint: str,
+        words: tuple[str, ...],
+        images: bool,
+    ) -> Reply:
+        payload["stream"] = True
+        response, events = self._http.post_sse(
+            self._url, payload, unreachable_hint=hint, no_retry_words=words
+        )
+        if response_format and response.status_code == 400 and _mentions_json_mode(response.text):
+            log.warning(
+                "%s does not accept response_format (%s); continuing with the prompt alone. "
+                "Set llm.json_mode: off to silence this.",
+                self._provider,
+                error_message(response),
+            )
+            self._json_mode = "off"
+            payload.pop("response_format")
+            response, events = self._http.post_sse(
+                self._url, payload, unreachable_hint=hint, no_retry_words=words
+            )
+        check_response(
+            response, provider=self._provider, key_hint=self._key_hint, had_images=images
+        )
+        return self._parse_sse(events)
+
+    def _parse_sse(self, events: list[str]) -> Reply:
+        parts: list[str] = []
+        refusal_parts: list[str] = []
+        finish: str | None = None
+        for raw in events:
+            try:
+                chunk = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(chunk, dict):
+                continue
+            choices = chunk.get("choices")
+            if not isinstance(choices, list) or not choices:
+                continue
+            choice = choices[0]
+            if not isinstance(choice, dict):
+                continue
+            delta = choice.get("delta")
+            if isinstance(delta, dict):
+                content = delta.get("content")
+                if isinstance(content, str):
+                    parts.append(content)
+                refusal = delta.get("refusal")
+                if isinstance(refusal, str):
+                    refusal_parts.append(refusal)
+            if isinstance(choice.get("finish_reason"), str):
+                finish = choice["finish_reason"]
+        text = "".join(parts)
+        refusal_text = "".join(refusal_parts)
+        if not text and refusal_text:
+            raise LLMError(f"The model refused the request: {refusal_text}")
+        if not text and finish == "content_filter":
+            raise LLMError(f"{self._provider} blocked the reply with its content filter.")
+        return Reply(text, truncated=finish == "length")
 
     # ----------------------------------------------------------------- response
 

@@ -263,7 +263,13 @@ Rules:
   Never return to an earlier state. Use null on 'broll'.
 - 'lipsync' shots show the active singer singing the given lyrics. Use framing close_up or
   medium_close (never medium or wide) so the singer's mouth is clearly visible and unobstructed
-  (no hands, microphones, hair or foreground objects across the mouth).
+  (no hands, microphones, hair or foreground objects across the mouth). In still_prompt for
+  'lipsync' shots, keep the singer's mouth relaxed, softly closed, or barely parted (never
+  wide-open mid-scream) so audio-driven lip-sync models animate naturally from the vocal track
+  and performance fallbacks stay consistent.
+- Character close_up framing: frame head-and-shoulders or the full face (forehead to chin) with
+  both eyes and mouth clearly inside the frame. Never ask for extreme mouth-only or eye-only
+  macros on character shots, which crop off the head and break face framing checks.
 - Shots given as 'performance' have no vocals. Keep them as 'performance' (performer visibly on
   camera, not singing) or change them to 'broll' (no performer) where a cutaway serves the song,
   without putting more than two 'broll' shots in a row. Never leave type as 'performance' if
@@ -311,6 +317,12 @@ Rules:
   something in the room while keeping their face and mouth clearly visible to the lens. Save a
   look straight into the lens for the pre-chorus build and the chorus hook.
 - Use at least three distinct looks across the video (different sets or lighting), not one setup.
+  Hold one primary set across each musical section rather than ping-ponging between sets every
+  1-2 shots, unless a deliberate cross-cut is called for in a later verse or bridge.
+- Reliable camera motion: prefer movements that image-to-video models execute cleanly (slow
+  push-in, slow pull-back, gentle handheld drift, subtle pan, subject expression/performance,
+  and ambient motion like fire, snow, embers, or light shifts). Avoid complex 360-degree orbits
+  or long multi-room tracking shots that models tend to render static.
 - Something should visibly change every 2 to 4 seconds without a cut: light shifting, a flame or
   curtain moving, a background element, the performer's posture. Do not use camera moves for this
   on lipsync shots.
@@ -551,7 +563,7 @@ _SHEET_BODY_REALISM = (
 )
 SHEET_STUDIO = (
     f"{_SHEET_BACKGROUNDS['white']} {_SHEET_BODY_REALISM} "
-    "One small label per panel: FRONT / SIDE / 3-QUARTER / FACE DETAIL."
+    "No text, no labels, no captions, no watermarks anywhere in or around the panels."
 )
 # The first sheet is built from a written description.
 SHEET_TEMPLATE = (
@@ -772,13 +784,12 @@ def _sheet_panels(layout: str) -> str:
 
 
 def _sheet_studio(layout: str, background: str) -> str:
+    del layout  # panel layout is already described by _sheet_panels(); omit text labels
     bg = _SHEET_BACKGROUNDS.get(background, _SHEET_BACKGROUNDS["white"])
-    labels = (
-        "FRONTAL / PROFILE / FULL FRONT / FULL BACK."
-        if layout == "columns"
-        else "FRONT / SIDE / 3-QUARTER / FACE DETAIL."
+    return (
+        f"{bg} {_SHEET_BODY_REALISM} "
+        "No text, no labels, no captions, no watermarks anywhere in or around the panels."
     )
-    return f"{bg} {_SHEET_BODY_REALISM} One small label per panel: {labels}"
 
 
 def _format_character_sheet(

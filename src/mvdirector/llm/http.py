@@ -130,6 +130,65 @@ class HttpJSON:
             f"Could not reach {origin(url)} ({last}). {unreachable_hint}".strip()
         )
 
+    def post_sse(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        *,
+        unreachable_hint: str = "",
+        no_retry_words: tuple[str, ...] = (),
+    ) -> tuple[httpx.Response, list[str]]:
+        """POST JSON and collect SSE ``data:`` payloads while keeping reverse proxies alive.
+
+        On non-2xx responses the full error body is read onto the returned ``httpx.Response`` so
+        callers can inspect it with ``check_response`` just like :meth:`post`.
+        """
+        last = ""
+        for attempt in range(self._retries):
+            final = attempt == self._retries - 1
+            try:
+                with self._client.stream("POST", url, json=payload) as response:
+                    if response.status_code != 200:
+                        response.read()
+                        described = _mentions(response, no_retry_words)
+                        if response.status_code in _RETRYABLE and not final and not described:
+                            delay = retry_delay(response, attempt)
+                            log.warning(
+                                "%s returned %d; retrying in %.0f s",
+                                origin(url),
+                                response.status_code,
+                                delay,
+                            )
+                            self._sleep(delay)
+                            continue
+                        return response, []
+                    events: list[str] = []
+                    for line in response.iter_lines():
+                        if not line or not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            break
+                        if data:
+                            events.append(data)
+                    return response, events
+            except httpx.InvalidURL as exc:
+                raise ConfigError(f"Invalid LLM URL: {exc}") from exc
+            except httpx.ConnectTimeout:
+                last = "the connection timed out"
+            except httpx.TimeoutException as exc:
+                raise LLMUnavailableError(
+                    f"The request to {origin(url)} timed out after {self._timeout:.0f} s. "
+                    "Raise llm.timeout_seconds for a slow model."
+                ) from exc
+            except httpx.TransportError as exc:
+                last = str(exc) or type(exc).__name__
+            if not final:
+                self._sleep(retry_delay(None, attempt))
+        raise LLMUnavailableError(
+            f"Could not reach {origin(url)} ({last}). {unreachable_hint}".strip()
+        )
+
 
 def _mentions(response: httpx.Response, words: tuple[str, ...]) -> bool:
     if not words:

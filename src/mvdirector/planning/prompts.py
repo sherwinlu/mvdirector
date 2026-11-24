@@ -732,7 +732,7 @@ _STILL_REF_ROLES = {
 }
 
 
-_EXTRA_STILL_REF_RE = re.compile(r"^reference_image_([1-9]\d*)$")
+_EXTRA_STILL_REF_RE = re.compile(r"^reference_image_([1-9][0-9]*)\Z")
 
 
 def _extra_reference_index(name: str) -> int | None:

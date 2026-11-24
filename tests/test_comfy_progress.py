@@ -396,3 +396,62 @@ def test_ws_listener_closes_raw_socket_on_tls_error_and_caps_fragment_size() -> 
         t.join(timeout=3.0)
         l_big.stop()
     assert seen == []
+
+
+def test_parse_comfy_ws_event_handles_progress_state_float_overflow() -> None:
+    ev = parse_comfy_ws_event(
+        {
+            "type": "progress_state",
+            "data": {
+                "prompt_id": "p-ovf",
+                "nodes": {
+                    "1": {"value": 1e308, "max": 1e308, "state": "running"},
+                    "2": {"value": 1e308, "max": 1e308, "state": "running"},
+                },
+            },
+        },
+        "p-ovf",
+    )
+    assert ev is None
+
+
+def test_ws_listener_blocks_whitespace_headers_and_oversized_control_frames() -> None:
+    req_captured: list[str] = []
+    pong_captured: list[bytes] = []
+    c_sock, s_sock = socket.socketpair()
+
+    def serve() -> None:
+        try:
+            req = s_sock.recv(4096)
+            req_captured.append(req.decode("latin1"))
+            s_sock.sendall(_ws_handshake_reply(req))
+            # RFC 6455 §5.5 forbids control frames with payload > 125 bytes.
+            s_sock.sendall(_ws_frame(b"A" * 200, fin=True, opcode=0x9))
+            s_sock.settimeout(0.4)
+            with suppress(OSError, TimeoutError):
+                data = s_sock.recv(256)
+                if data:
+                    pong_captured.append(data)
+        finally:
+            s_sock.close()
+
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    with patch("mvdirector.comfy.client.socket.create_connection", return_value=c_sock):
+        listener = _ComfyWsProgressListener(
+            "http://127.0.0.1:8188",
+            "cid",
+            {" Host": "evil.example", "X-Bad Name": "1", "X-Good-Header": "ok"},
+            "p-ctrl",
+            time.monotonic(),
+            lambda _: None,
+        )
+        listener.start()
+        t.join(timeout=2.0)
+        listener.stop()
+
+    assert req_captured
+    assert " Host:" not in req_captured[0]
+    assert "X-Bad Name:" not in req_captured[0]
+    assert "X-Good-Header: ok\r\n" in req_captured[0]
+    assert pong_captured == []

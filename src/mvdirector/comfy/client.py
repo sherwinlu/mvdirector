@@ -16,6 +16,7 @@ import json
 import logging
 import math
 import os
+import re
 import socket
 import ssl
 import struct
@@ -64,6 +65,8 @@ _WS_FORBIDDEN_HEADERS = frozenset(
         "sec-websocket-accept",
     }
 )
+_WS_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+\Z")
+_WS_MAX_CONTROL_FRAME_BYTES = 125
 
 
 def _finite_number(value: Any) -> float | None:
@@ -143,7 +146,7 @@ def parse_comfy_ws_event(
                 total_max += m
                 if info.get("state") == "running" or active_node is None:
                     active_node = str(node_id)
-        if total_max > 0.0:
+        if math.isfinite(total_val) and math.isfinite(total_max) and total_max > 0.0:
             pct = round(min(100.0, max(0.0, (total_val / total_max) * 100.0)), 1)
             return ComfyProgress(
                 prompt_id=prompt_id,
@@ -219,11 +222,13 @@ class _ComfyWsProgressListener:
 
     @property
     def connected(self) -> bool:
-        return self._connected
+        with self._lock:
+            return self._connected
 
     @property
     def last_event_at(self) -> float | None:
-        return self._last_ws_event_at
+        with self._lock:
+            return self._last_ws_event_at
 
     def start(self) -> None:
         self._thread = threading.Thread(
@@ -271,7 +276,7 @@ class _ComfyWsProgressListener:
                 sock = ctx.wrap_socket(raw_sock, server_hostname=parsed.hostname)
             if not self._register_socket(sock):
                 return
-            sock.settimeout(0.1)
+            sock.settimeout(_WS_HANDSHAKE_TIMEOUT_SECONDS)
 
             base_path = parsed.path.rstrip("/")
             ws_path = f"{base_path}/ws?clientId={urllib.parse.quote(self._client_id, safe='')}"
@@ -288,9 +293,7 @@ class _ComfyWsProgressListener:
             ]
             for k, v in self._headers.items():
                 if (
-                    not k
-                    or ":" in k
-                    or _has_control_chars(k)
+                    not _WS_HEADER_NAME_RE.match(k)
                     or _has_control_chars(v)
                     or k.lower() in _WS_FORBIDDEN_HEADERS
                 ):
@@ -298,6 +301,7 @@ class _ComfyWsProgressListener:
                 req_lines.append(f"{k}: {v}")
             req_lines.extend(["", ""])
             sock.sendall("\r\n".join(req_lines).encode("utf-8"))
+            sock.settimeout(0.1)
 
             # Read HTTP 101 upgrade response headers (capped at 16 KiB and bounded in time).
             resp_buf = bytearray()
@@ -330,18 +334,31 @@ class _ComfyWsProgressListener:
             for raw_line in header_lines[1:]:
                 if b":" in raw_line:
                     hk, hv = raw_line.split(b":", 1)
-                    resp_headers[hk.decode("latin1").strip().lower()] = hv.decode("latin1").strip()
-            if resp_headers.get("sec-websocket-accept") != expected_accept:
+                    key_lower = hk.decode("latin1").strip().lower()
+                    val = hv.decode("latin1").strip()
+                    if key_lower == "connection" and key_lower in resp_headers:
+                        resp_headers[key_lower] = f"{resp_headers[key_lower]}, {val}"
+                    else:
+                        resp_headers[key_lower] = val
+            conn_tokens = {
+                tok.strip().lower() for tok in resp_headers.get("connection", "").split(",")
+            }
+            if (
+                resp_headers.get("sec-websocket-accept") != expected_accept
+                or resp_headers.get("upgrade", "").lower() != "websocket"
+                or "upgrade" not in conn_tokens
+            ):
                 return
 
-            self._connected = True
+            with self._lock:
+                self._connected = True
             leftover = bytes(resp_buf[header_end + 4 :])
             self._read_loop(sock, leftover)
         except Exception as exc:  # noqa: BLE001 - best-effort progress listener
             log.debug("ComfyUI WebSocket progress listener unavailable: %s", exc)
         finally:
-            self._connected = False
             with self._lock:
+                self._connected = False
                 active = self._sock
                 self._sock = None
             for handle in (active, sock):
@@ -364,7 +381,8 @@ class _ComfyWsProgressListener:
             elapsed_seconds=time.monotonic() - self._started,
         )
         if progress is not None and not self._stop.is_set():
-            self._last_ws_event_at = time.monotonic()
+            with self._lock:
+                self._last_ws_event_at = time.monotonic()
             try:
                 self._on_progress(progress)
             except Exception:  # noqa: BLE001 - observer errors must not break polling
@@ -408,6 +426,9 @@ class _ComfyWsProgressListener:
                     return
                 length = struct.unpack("!Q", ext)[0]
             if length > _MAX_WS_FRAME_BYTES:
+                return
+            # RFC 6455 §5.5: control frames must not be fragmented and have payload <= 125 bytes.
+            if opcode >= 0x8 and (not fin or length > _WS_MAX_CONTROL_FRAME_BYTES):
                 return
             mask_key = read_bytes(4) if masked else None
             if masked and mask_key is None:

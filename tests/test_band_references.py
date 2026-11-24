@@ -178,3 +178,19 @@ def test_compose_still_prompt_numbers_three_plus_band_refs_and_plate(project, an
     )
     assert "second reference image shows performer #3" in sparse
     assert "Picture 2 defines Alto's appearance" in sparse
+
+
+def test_extra_reference_param_rejects_trailing_newline_and_unicode_digits() -> None:
+    from mvdirector.comfy.workflow import is_optional_file_param
+    from mvdirector.planning.prompts import _extra_reference_index
+
+    for invalid in (
+        "reference_image_0",
+        "reference_image_1",
+        "reference_image_2\n",
+        "reference_image_٢",
+    ):
+        assert is_optional_file_param(invalid) is False
+        assert _extra_reference_index(invalid) is None
+    assert is_optional_file_param("reference_image_2") is True
+    assert _extra_reference_index("reference_image_2") == 1

@@ -441,7 +441,7 @@ def _recommended_min_free_vram_gb(comfy_probe: ComfyProbe | None) -> float | Non
 def detect_project_mode(project_dir: Path) -> ProjectMode | None:
     """Read the configured ``mode`` from an existing ``project.yaml``, or None if absent/invalid."""
     yaml_path = project_dir / CONFIG_FILENAME
-    if not yaml_path.is_file():
+    if yaml_path.is_symlink() or not yaml_path.is_file():
         return None
     try:
         raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))

@@ -47,7 +47,7 @@ OPTIONAL_FILE_PARAMS = frozenset(
 )
 
 
-_EXTRA_REF_IMAGE_RE = re.compile(r"^reference_image_([1-9]\d*)$")
+_EXTRA_REF_IMAGE_RE = re.compile(r"^reference_image_([1-9][0-9]*)\Z")
 
 
 def is_optional_file_param(name: str) -> bool:

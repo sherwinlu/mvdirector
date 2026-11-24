@@ -834,3 +834,14 @@ def test_probe_comfy_returns_unreachable_on_invalid_env_api_key(
     )
     assert probe.reachable is False
     assert "control characters" in (probe.error or "")
+
+
+def test_detect_project_mode_ignores_symlinked_project_yaml(tmp_path: Path) -> None:
+    from mvdirector.setup import detect_project_mode
+
+    outside = tmp_path / "outside.yaml"
+    outside.write_text("mode: mix\n", encoding="utf-8")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / CONFIG_FILENAME).symlink_to(outside)
+    assert detect_project_mode(proj) is None

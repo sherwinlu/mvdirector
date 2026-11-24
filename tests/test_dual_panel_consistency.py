@@ -264,3 +264,62 @@ def test_vision_prompts_enforce_reference_sheet_garment_fidelity_and_priority() 
     assert "anatomical left/right placement" in vision._SYSTEM
     assert "neckline coverage" in vision._BLIND_OBSERVER_SYSTEM
     assert "character_match <= 0.4" in vision._BLIND_AUDITOR_SYSTEM
+    assert "text-vs-reference discrepancies" in vision._BLIND_AUDITOR_SYSTEM
+
+
+def test_compose_still_prompt_numbers_dual_panel_plus_set_plate_without_contradiction(
+    tmp_path: Path,
+) -> None:
+    _, manifest, shot = _make_project_and_manifest(tmp_path)
+    prose = prompts.compose_still_prompt(
+        manifest,
+        shot,
+        plate_attached=True,
+        reference_notation="prose",
+        bound_references=["reference_image", "reference_face", "set_image"],
+    )
+    assert "The first reference image shows the singer" in prose
+    assert "The second reference image shows a close-up of the singer's face" in prose
+    assert "The third reference image shows the location" in prose
+    assert "The second reference image shows the location" not in prose
+    assert "Picture 1 defines The Architect's appearance" in prose
+    assert "Picture 2 defines The Architect's close-up facial features" in prose
+    assert "Picture 3 defines only the empty location" in prose
+
+
+def test_solo_face_fallback_skips_rear_view_shots_and_aliased_front_paths(tmp_path: Path) -> None:
+    proj, manifest, shot = _make_project_and_manifest(tmp_path)
+    tpl = _make_template(
+        tmp_path,
+        "dual_rear_and_alias",
+        {
+            "reference_image": [{"node": "10", "field": "image"}],
+            "reference_image_2": [{"node": "11", "field": "image"}],
+        },
+    )
+    runner = _make_runner(proj, manifest, tpl)
+
+    # Rear-view non-lipsync performance shots must not inject a frontal face close-up.
+    rear_shot = shot.model_copy(
+        update={
+            "type": ShotType.PERFORMANCE,
+            "still_prompt": "Wide shot from behind looking away from camera down the hall.",
+        }
+    )
+    rear_refs = runner._still_reference_paths(rear_shot, plate=None)
+    assert [(param, role) for param, role, _ in rear_refs] == [
+        ("reference_image", "reference_image")
+    ]
+
+    # Equivalent relative paths resolving to the same file as front must not duplicate into slot 2.
+    manifest.character.references["cinder"] = ReferenceSet(
+        sheet="assets/reference/cinder/front.png",
+        panels={
+            "front": "assets/reference/cinder/front.png",
+            "face": "./assets/reference/cinder/front.png",
+        },
+    )
+    aliased_refs = runner._still_reference_paths(shot, plate=None)
+    assert [(param, role) for param, role, _ in aliased_refs] == [
+        ("reference_image", "reference_image")
+    ]

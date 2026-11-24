@@ -115,7 +115,10 @@ specification. You do NOT see the image; rely ONLY on the observed facts and the
 Score from 0 to 1:
 - spec_match: whether observed framing, people count, setting, props, vocal delivery, and all
   explicit exclusions ('Must NOT appear') satisfy the specification. If a forbidden element was
-  observed, or a required element clearly contradicted the observation, score <= 0.2.
+  observed, or a required element clearly contradicted the observation, score <= 0.2. Do not
+  penalize spec_match for minor text-vs-reference discrepancies (such as anatomical left/right
+  accessory side or skin details covered by the reference garment) when the observation matches
+  the reference portrait/sheet.
 - artifact_free: whether observed anatomy, proportions, faces, hands, and absence of garbled
   text/watermarks/morphing are clean. Any observed overlaid typography (title cards, opening
   credits, subtitles, captions, logos, watermarks), even clean and legible, MUST score

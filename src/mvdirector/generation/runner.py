@@ -670,13 +670,15 @@ class ShotRunner:
         refs: list[tuple[str, str, Path]] = []
         reference = self._reference_set(shot)
         front = reference.panel("front") if reference else None
+        front_path: Path | None = None
         if template.accepts("reference_image"):
             if reference is None or front is None:
                 raise ConfigError(
                     "No reference sheet is locked. Run `mvd reference generate` and "
                     "`mvd reference lock <image>` before generating stills."
                 )
-            refs.append(("reference_image", "reference_image", self._project.path(front)))
+            front_path = self._project.path(front)
+            refs.append(("reference_image", "reference_image", front_path))
         # Extra angles go only to workflows that bind them, so nothing is uploaded for nothing.
         has_face_ref = False
         if reference is not None:
@@ -684,28 +686,37 @@ class ShotRunner:
                 path = reference.panel(name)
                 param = f"reference_{name}"
                 if path and template.accepts(param):
-                    refs.append((param, param, self._project.path(path)))
-                    if name == "face":
-                        has_face_ref = True
+                    panel_path = self._project.path(path)
+                    if panel_path.is_file():
+                        refs.append((param, param, panel_path))
+                        if name == "face":
+                            has_face_ref = True
         visible = self._manifest.visible_characters(shot)
         if len(visible) > 1 and template.accepts("reference_image_2"):
             _, sec_char, sec_state = visible[1]
             sec_ref = sec_char.reference_for(sec_state)
             sec_front = sec_ref.panel("front") if sec_ref else None
             if sec_front is not None:
-                refs.append(
-                    ("reference_image_2", "reference_image_2", self._project.path(sec_front))
-                )
+                sec_path = self._project.path(sec_front)
+                if sec_path.is_file():
+                    refs.append(("reference_image_2", "reference_image_2", sec_path))
         elif (
             len(visible) == 1
             and not has_face_ref
             and reference is not None
             and template.accepts("reference_image_2")
+            and not (
+                shot.type is not ShotType.LIPSYNC
+                and prompts.is_rear_view_prompt(shot.still.prompt_override or shot.still_prompt)
+            )
         ):
             face = reference.panel("face")
-            if face and face != front:
+            if face:
                 face_path = self._project.path(face)
-                if face_path.is_file():
+                same_as_front = (
+                    front_path is not None and face_path.resolve() == front_path.resolve()
+                )
+                if not same_as_front and face_path.is_file():
                     refs.append(("reference_image_2", "reference_face", face_path))
         if plate is not None:
             refs.append(("set_image", "set_image", plate))

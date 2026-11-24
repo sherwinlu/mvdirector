@@ -753,7 +753,7 @@ def _still_reference_note(
     if not active:
         return None
     if reference_notation == "prose":
-        if plate_attached and "reference_image_2" not in active:
+        if plate_attached and active == ["reference_image", "set_image"]:
             return PLATE_NOTE
         if len(active) <= 1:
             return None

@@ -471,7 +471,7 @@ def test_a_plate_replaces_the_text_description_in_the_prompt(project, staged, tm
     plates.lock_plate(project, staged, image, "Corridor")
     run_still(project, staged, FakeComfy(png=sample_png), "s002")
     prompt = staged.shot("s002").still.attempts[0].prompt
-    assert "second reference image shows the location" in prompt
+    assert "fifth reference image shows the location" in prompt
     assert "a narrow black corridor" not in prompt
     # A set without a plate keeps its text description.
     lock(project, staged, tmp_path, "bare")

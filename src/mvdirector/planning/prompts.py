@@ -723,7 +723,9 @@ _STILL_REF_ROLES = {
     "reference_image": "the singer: keep the same face, hair and costume",
     "reference_profile": "the singer's side profile angle",
     "reference_three_quarter": "the singer's three-quarter angle",
-    "reference_face": "a macro close-up of the singer's face",
+    "reference_face": (
+        "a close-up of the singer's face: match their exact facial features, eyes and hair"
+    ),
     "reference_image_2": "the secondary performer: keep their face, hair and costume",
     "set_image": (
         "the location: place the performers in that location and match its layout, "
@@ -753,7 +755,7 @@ def _still_reference_note(
     if reference_notation == "prose":
         if plate_attached and "reference_image_2" not in active:
             return PLATE_NOTE
-        if "reference_image_2" not in active:
+        if len(active) <= 1:
             return None
         clauses = []
         for index, name in enumerate(active):
@@ -1059,17 +1061,25 @@ def compose_still_prompt(
         hide_facial = rear_view
         if (
             bound_references
+            and len(bound_references) > 1
             and len(visible) >= 1
-            and ("reference_image_2" in bound_references or "set_image" in bound_references)
             and reference_notation != "tags"
         ):
             # Explicit Picture N identity disambiguation (clean-room concept inspired by
             # heroesjouney/aimoviestudiov2 prompt_builder.py).
             slot_notes: list[str] = []
+            p_label = visible[0][1].name or visible[0][0] or "the primary singer"
             for slot_idx, param in enumerate(bound_references, start=1):
                 if param == "reference_image":
-                    p_label = visible[0][1].name or visible[0][0] or "the primary singer"
                     slot_notes.append(f"Picture {slot_idx} defines {p_label}'s appearance")
+                elif param == "reference_face":
+                    slot_notes.append(
+                        f"Picture {slot_idx} defines {p_label}'s close-up facial features"
+                    )
+                elif param == "reference_profile":
+                    slot_notes.append(f"Picture {slot_idx} defines {p_label}'s side profile")
+                elif param == "reference_three_quarter":
+                    slot_notes.append(f"Picture {slot_idx} defines {p_label}'s three-quarter view")
                 elif param == "reference_image_2" and len(visible) > 1:
                     s_label = visible[1][1].name or visible[1][0] or "the second performer"
                     slot_notes.append(f"Picture {slot_idx} defines {s_label}'s appearance")

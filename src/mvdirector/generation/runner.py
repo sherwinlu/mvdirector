@@ -551,11 +551,12 @@ class ShotRunner:
         plate = self._plate_for(shot) if kind is AssetKind.STILL else None
         notation = self._project.config.comfy.reference_notation
         max_chars = self._project.config.comfy.max_prompt_chars
-        still_refs: list[tuple[str, Path]] = []
+        still_refs: list[tuple[str, str, Path]] = []
         prop_refs = self._prop_paths(shot)
         repair_source: Path | None = None
         if kind is AssetKind.STILL:
             still_refs = self._still_reference_paths(shot, plate)
+            bound_ref_roles = [role for _, role, _ in still_refs] if still_refs else None
             still_tpl = self._templates["still" if shot.type.shows_singer else "t2i"]
             if (
                 plan.strategy is RetryStrategy.REPAIR_STILL
@@ -582,7 +583,7 @@ class ShotRunner:
                         plate_attached=plate is not None,
                         props_attached=bool(prop_refs and still_tpl.accepts("prop_image")),
                         reference_notation=notation,
-                        bound_references=[name for name, _ in still_refs] if still_refs else None,
+                        bound_references=bound_ref_roles,
                     )
             else:
                 prompt = prompts.compose_still_prompt(
@@ -591,7 +592,7 @@ class ShotRunner:
                     plate_attached=plate is not None,
                     props_attached=bool(prop_refs and still_tpl.accepts("prop_image")),
                     reference_notation=notation,
-                    bound_references=[name for name, _ in still_refs] if still_refs else None,
+                    bound_references=bound_ref_roles,
                 )
         else:
             video_template = self._video_template(shot)
@@ -655,12 +656,18 @@ class ShotRunner:
         tail = max(0.0, shot.audio_slice.end - shot.end)
         return round(max(-head, min(tail, float(raw_delay))), 4)
 
-    def _still_reference_paths(self, shot: Shot, plate: Path | None) -> list[tuple[str, Path]]:
-        """Ordered (binding_name, path) pairs uploaded to the ``still`` workflow."""
+    def _still_reference_paths(self, shot: Shot, plate: Path | None) -> list[tuple[str, str, Path]]:
+        """Ordered ``(binding_param, prompt_role, path)`` triples uploaded to ``still``.
+
+        On solo shots where the workflow exposes ``reference_image_2`` (but not a dedicated
+        ``reference_face`` slot), the singer's face-detail panel is routed into
+        ``reference_image_2`` with prompt role ``reference_face`` so the edit model gets both
+        full-body wardrobe continuity and high-resolution facial identity in one pass.
+        """
         if not shot.type.shows_singer:
             return []
         template = self._templates["still"]
-        refs: list[tuple[str, Path]] = []
+        refs: list[tuple[str, str, Path]] = []
         reference = self._reference_set(shot)
         front = reference.panel("front") if reference else None
         if template.accepts("reference_image"):
@@ -669,23 +676,39 @@ class ShotRunner:
                     "No reference sheet is locked. Run `mvd reference generate` and "
                     "`mvd reference lock <image>` before generating stills."
                 )
-            refs.append(("reference_image", self._project.path(front)))
+            refs.append(("reference_image", "reference_image", self._project.path(front)))
         # Extra angles go only to workflows that bind them, so nothing is uploaded for nothing.
+        has_face_ref = False
         if reference is not None:
             for name in ("profile", "three_quarter", "face"):
                 path = reference.panel(name)
                 param = f"reference_{name}"
                 if path and template.accepts(param):
-                    refs.append((param, self._project.path(path)))
+                    refs.append((param, param, self._project.path(path)))
+                    if name == "face":
+                        has_face_ref = True
         visible = self._manifest.visible_characters(shot)
         if len(visible) > 1 and template.accepts("reference_image_2"):
             _, sec_char, sec_state = visible[1]
             sec_ref = sec_char.reference_for(sec_state)
             sec_front = sec_ref.panel("front") if sec_ref else None
             if sec_front is not None:
-                refs.append(("reference_image_2", self._project.path(sec_front)))
+                refs.append(
+                    ("reference_image_2", "reference_image_2", self._project.path(sec_front))
+                )
+        elif (
+            len(visible) == 1
+            and not has_face_ref
+            and reference is not None
+            and template.accepts("reference_image_2")
+        ):
+            face = reference.panel("face")
+            if face and face != front:
+                face_path = self._project.path(face)
+                if face_path.is_file():
+                    refs.append(("reference_image_2", "reference_face", face_path))
         if plate is not None:
-            refs.append(("set_image", plate))
+            refs.append(("set_image", "set_image", plate))
         return refs
 
     def _still_negative_prompt(self, shot: Shot) -> str:
@@ -703,7 +726,7 @@ class ShotRunner:
         shot: Shot,
         attempt: Attempt,
         destination: Path,
-        still_refs: list[tuple[str, Path]],
+        still_refs: list[tuple[str, str, Path]],
         prop_refs: list[tuple[str, Path]],
         *,
         repair_source: Path | None = None,
@@ -723,7 +746,7 @@ class ShotRunner:
             if repair_source is not None:
                 params["reference_image"] = self._upload(repair_source)
             else:
-                for param, ref_path in still_refs:
+                for param, _, ref_path in still_refs:
                     params[param] = self._upload(ref_path)
         else:
             template = self._templates["t2i"]

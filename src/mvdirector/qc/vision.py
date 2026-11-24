@@ -34,6 +34,12 @@ Score from 0 to 1:
     shots, BOTH named vocalists must appear in frame with unobstructed mouths singing together; on
     solo two-shots with a listener, ONLY the named solo vocalist sings while the listener's mouth
     stays closed (score spec_match <= 0.2 if a co-singer is missing or the wrong person is singing).
+  * Reference-image priority: when a character reference image is provided, treat the reference
+    image as the visual ground truth for character appearance, garment construction/coverage
+    (neckline, collar, undershirt/turtleneck, sleeves, coat), and accessory placement; do not
+    penalize spec_match for minor text-vs-reference discrepancies (such as an anatomical
+    left/right side difference or a skin detail covered by the reference garment) when the shot
+    faithfully matches the reference image.
 - artifact_free: no malformed hands or fingers, extra or missing limbs, warped faces,
   melted objects, garbled text, watermarks{video_artifacts}.
   * Overlaid text & title cards: any overlaid typography, opening credits, title cards,
@@ -50,9 +56,17 @@ Score from 0 to 1:
   sheet or portrait is given, looks like the same person. A sheet shows the same person from
   several angles. Judge only details large enough to resolve at the stated framing. Check face
   shape, skin tone, hair cut and length, makeup, build and the costume for this shot's wardrobe
-  state (for example a cape must be present or absent exactly as specified). Identifying
-  marks must be on the stated side of the singer's anatomical left or right; a mirror-flipped
-  face or mark is a mismatch.
+  state (for example a cape must be present or absent exactly as specified). When a reference
+  sheet or portrait is given, treat it as the visual ground truth for both facial identity and
+  wardrobe construction/coverage—neckline, collar, undershirt or turtleneck vs. bare skin,
+  sleeves, coat, and accessories must match the reference sheet for this wardrobe state. Score
+  character_match <= 0.4 and name the mismatch in 'issues' if a garment layer shown in the
+  reference sheet is dropped or altered (for example, replacing a high-neck turtleneck or
+  undershirt with bare skin or an open neckline) even when the text description did not repeat
+  that layer. For asymmetric identifying marks or accessories, treat the reference image as ground
+  truth for anatomical left/right placement; flag a mirror-flipped face, mark, or accessory only
+  when it contradicts the reference image (or the text description when no reference image is
+  given).
   Use null if the specification says no singer should be visible.
 
 List each concrete problem in 'issues' (empty if none). In 'fix', give one short,
@@ -81,7 +95,10 @@ Describe concretely:
 - people_count: integer count of visible people or human figures (0 if empty scene).
 - framing: observed shot distance (extreme_close_up, close_up, medium_close, medium, wide).
 - subjects: who is visible, their pose, facing direction, mouth state (open/singing vs closed),
-  hair, clothing/accessories, and anatomical proportions (hands, limbs, face, body scale).
+  hair, clothing layers and neckline coverage (e.g. high-neck turtleneck/undershirt vs. open
+  neckline/bare skin, coat, sleeves, accessories), anatomical proportions (hands, limbs, face,
+  body scale), and any visible identity or garment-coverage differences from the reference image
+  when one is provided.
 - setting: visible location, architecture, lighting sources, and mood.
 - props_and_objects: notable foreground/midground objects and their physical state (e.g. lit vs
   unlit, intact vs broken, hands on a clock).
@@ -105,7 +122,10 @@ Score from 0 to 1:
   artifact_free <= 0.2 unless the specification explicitly asks for text; text that physically
   belongs to the scene is penalized only when it is garbled.
 - character_match: whether observed appearance, hair, pinned details, and wardrobe match the
-  character specification (use null when the spec says no singer should be visible).
+  character specification and reference portrait/sheet (use null when the spec says no singer
+  should be visible). If the observer reports a garment-layer or neckline-coverage mismatch
+  against the reference portrait/sheet (such as dropping a turtleneck or undershirt shown in the
+  reference to expose bare skin), score character_match <= 0.4.
 
 List concrete contradictions in 'issues' (empty if none). In 'fix', give one affirmative prompt
 instruction avoiding the worst contradiction without repeating 'no <part>'."""

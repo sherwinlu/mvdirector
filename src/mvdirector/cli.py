@@ -419,6 +419,7 @@ def setup(
     chosen_title = title or _default_project_title(directory)
     chosen_comfy = comfy_url or report.comfy.url
     chosen_comfy_token_env: str | None = comfy_token_env
+    active_comfy_probe = report.comfy
     chosen_provider = setup_mod.normalize_llm_provider(
         llm_provider or setup_mod.DEFAULT_LLM_PROVIDER
     )
@@ -495,6 +496,7 @@ def setup(
                 ).comfy
             except MVDError as exc:
                 raise _fail(exc) from exc
+            active_comfy_probe = reprobe
             if reprobe.reachable:
                 details: list[str] = []
                 if reprobe.devices:
@@ -767,19 +769,27 @@ def setup(
             default=True,
         )
 
-    options = api.SetupOptions(
-        title=chosen_title,
-        mode=mode if is_new else None,
-        comfy_url=chosen_comfy,
-        comfy_token_env=chosen_comfy_token_env,
-        llm_enabled=chosen_llm_enabled,
-        llm_provider=chosen_provider,
-        llm_model=chosen_model,
-        llm_base_url=chosen_llm_base_url,
-        llm_api_key_env=chosen_llm_api_key_env,
-        qc_on_missing_dependency=qc_missing_policy,
-        qc_vision_enabled=chosen_vision,
-        video_preset=chosen_preset,
+    existing_config = None if is_new else setup_mod.read_project_yaml(directory)
+    existing_mode = None if is_new else setup_mod.detect_project_mode(directory)
+
+    options = setup_mod.optimize_setup_options(
+        api.SetupOptions(
+            title=chosen_title,
+            mode=mode if is_new else None,
+            comfy_url=chosen_comfy,
+            comfy_token_env=chosen_comfy_token_env,
+            llm_enabled=chosen_llm_enabled,
+            llm_provider=chosen_provider,
+            llm_model=chosen_model,
+            llm_base_url=chosen_llm_base_url,
+            llm_api_key_env=chosen_llm_api_key_env,
+            qc_on_missing_dependency=qc_missing_policy,
+            qc_vision_enabled=chosen_vision,
+            video_preset=chosen_preset,
+        ),
+        comfy_probe=active_comfy_probe,
+        project_mode=existing_mode,
+        existing_config=existing_config,
     )
 
     try:
@@ -804,6 +814,20 @@ def setup(
 
     action_word = "Created and configured" if is_new else "Updated"
     typer.secho(f"\n{action_word} {directory / CONFIG_FILENAME}", fg=typer.colors.GREEN)
+    comfy_scope = "local" if setup_mod.is_loopback_url(chosen_comfy) else "remote"
+    tuned_values: list[tuple[str, bool | float | None]] = [
+        ("dedup_uploads", options.comfy_dedup_uploads),
+        ("cache_enabled", options.comfy_cache_enabled),
+        ("sort_batch_for_cache", options.comfy_sort_batch_for_cache),
+        ("min_free_vram_gb", options.comfy_min_free_vram_gb),
+    ]
+    tuned_parts = [
+        f"{name}={str(value).lower() if isinstance(value, bool) else value}"
+        for name, value in tuned_values
+        if value is not None
+    ]
+    if tuned_parts:
+        typer.echo(f"Optimized for {comfy_scope} ComfyUI: {', '.join(tuned_parts)}")
 
     # Non-interactive --verify runs live LLM check after writing config.
     verify_failed = False

@@ -288,6 +288,7 @@ def inspect_environment(
     *,
     comfy_url: str | None = None,
     comfy_token_env: str | None = None,
+    comfy_headers: dict[str, str] | None = None,
     ollama_url: str | None = None,
     environ: Mapping[str, str] | None = None,
     project_dir: Path | None = None,
@@ -297,6 +298,7 @@ def inspect_environment(
     return setup_mod.inspect_environment(
         comfy_url=comfy_url,
         comfy_token_env=comfy_token_env,
+        comfy_headers=comfy_headers,
         ollama_url=ollama_url,
         environ=environ,
         project_dir=project_dir,

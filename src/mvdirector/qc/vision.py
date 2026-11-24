@@ -15,7 +15,21 @@ from mvdirector.llm import LLMClient, image_block, text_block
 from mvdirector.models import AssetKind, Framing, Manifest, Shot, ShotType
 from mvdirector.planning.prompts import extract_negative_exclusions, join_names
 
-_SYSTEM = """You are the quality-control supervisor on an AI-generated music video. You are
+_SCORING_CALIBRATION = """Scoring calibration:
+- Score >= 0.85 on a dimension when there are no concrete defects to report in 'issues'.
+- Reserve scores below 0.70 strictly for concrete, named defects listed in 'issues'.
+- Never assign a lukewarm 0.60-0.69 score to a clean image or clip with an empty 'issues' list."""
+
+_VIDEO_SCOPE_NOTE = """
+- Video scope: these frames were animated from an already-approved first frame, so video
+  generation cannot change static framing distance, set layout, or minor left/right accessory
+  placement inherited from frame 1. Judge spec_match and artifact_free on motion, action
+  continuity, lip-sync/expression, and temporal stability (no flicker, morphing, melting,
+  identity drift, or unintended scene cuts) rather than re-penalizing static framing or small
+  left/right mark/jewelry placement already present in frame 1."""
+
+_SYSTEM = (
+    """You are the quality-control supervisor on an AI-generated music video. You are
 shown {subject}. Judge it strictly against the shot specification.
 
 Score from 0 to 1:
@@ -34,6 +48,10 @@ Score from 0 to 1:
     shots, BOTH named vocalists must appear in frame with unobstructed mouths singing together; on
     solo two-shots with a listener, ONLY the named solo vocalist sings while the listener's mouth
     stays closed (score spec_match <= 0.2 if a co-singer is missing or the wrong person is singing).
+  * Reference-image priority: when a character reference image is provided, treat the reference
+    image as the visual ground truth for character appearance and accessory placement; do not
+    penalize spec_match for a left/right side discrepancy between the reference image and the
+    text description when the shot matches the reference image.
 - artifact_free: no malformed hands or fingers, extra or missing limbs, warped faces,
   melted objects, garbled text, watermarks{video_artifacts}.
   * Overlaid text & title cards: any overlaid typography, opening credits, title cards,
@@ -50,14 +68,22 @@ Score from 0 to 1:
   sheet or portrait is given, looks like the same person. A sheet shows the same person from
   several angles. Judge only details large enough to resolve at the stated framing. Check face
   shape, skin tone, hair cut and length, makeup, build and the costume for this shot's wardrobe
-  state (for example a cape must be present or absent exactly as specified). Identifying
-  marks must be on the stated side of the singer's anatomical left or right; a mirror-flipped
-  face or mark is a mismatch.
-  Use null if the specification says no singer should be visible.
+  state (for example a cape must be present or absent exactly as specified). When a reference
+  sheet or portrait is given, treat the reference image as the ground truth for which anatomical
+  side any asymmetric mark or accessory sits on—do not penalize a shot that matches the reference
+  image even if the text description names the opposite side; only flag a mirror-flipped face,
+  mark, or accessory when it contradicts the reference image (or the text description when no
+  reference image is given).
+  Use null if the specification says no singer should be visible.{video_scope}
+
+"""
+    + _SCORING_CALIBRATION
+    + """
 
 List each concrete problem in 'issues' (empty if none). In 'fix', give one short,
 practical instruction for the prompt that would avoid the worst problem; when a 'no <part>'
 exclusion failed, state affirmatively what should appear instead without repeating 'no <part>'."""
+)
 
 
 # What can fairly be judged at each framing. Small marks and jewelry do not resolve in wide
@@ -91,7 +117,8 @@ Describe concretely:
   each piece of text whether it is overlaid on the picture or physically part of the scene (a
   sign, a book cover, a clothing print). Empty list if none."""
 
-_BLIND_AUDITOR_SYSTEM = """You are a strict continuity auditor comparing neutral visual
+_BLIND_AUDITOR_SYSTEM = (
+    """You are a strict continuity auditor comparing neutral visual
 observations (produced by a blind observer who never saw the requirements) against a shot
 specification. You do NOT see the image; rely ONLY on the observed facts and the specification.
 
@@ -105,10 +132,15 @@ Score from 0 to 1:
   artifact_free <= 0.2 unless the specification explicitly asks for text; text that physically
   belongs to the scene is penalized only when it is garbled.
 - character_match: whether observed appearance, hair, pinned details, and wardrobe match the
-  character specification (use null when the spec says no singer should be visible).
+  character specification (use null when the spec says no singer should be visible).{video_scope}
+
+"""
+    + _SCORING_CALIBRATION
+    + """
 
 List concrete contradictions in 'issues' (empty if none). In 'fix', give one affirmative prompt
 instruction avoiding the worst contradiction without repeating 'no <part>'."""
+)
 
 
 class _BlindObservation(BaseModel):
@@ -207,6 +239,7 @@ class VisionJudge:
             video_artifacts=", and no morphing or identity change between frames"
             if is_video
             else "",
+            video_scope=_VIDEO_SCOPE_NOTE if is_video else "",
         )
         show_singer = shot.type.shows_singer
         content = []
@@ -294,7 +327,7 @@ class VisionJudge:
             f"Artifacts/text: {', '.join(observation.artifacts_or_text) or 'none'}"
         )
         verdict = self._llm.complete_json(
-            system=_BLIND_AUDITOR_SYSTEM,
+            system=_BLIND_AUDITOR_SYSTEM.format(video_scope=_VIDEO_SCOPE_NOTE if is_video else ""),
             content=[text_block(obs_summary), text_block(self.specification(shot, manifest))],
             schema=VisionVerdict,
         )

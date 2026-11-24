@@ -450,12 +450,31 @@ class VideoConfig(_Section):
 class ComfyConfig(_Section):
     base_url: str = Field(default="${COMFY_URL:-http://127.0.0.1:8188}", validate_default=True)
     headers: dict[str, str] = Field(default_factory=dict)
+    api_key_comfy_org: str | None = Field(
+        default=None,
+        description=(
+            "Optional Comfy.org API key forwarded in POST /prompt extra_data for paid ComfyUI "
+            "cloud API nodes (may reference ${COMFY_ORG_API_KEY})."
+        ),
+    )
 
-    @field_validator("base_url", "headers", mode="before")
+    @field_validator("base_url", "headers", "api_key_comfy_org", mode="before")
     @classmethod
     def _expand_connection_env(cls, value: Any, info: ValidationInfo) -> Any:
         """Expand ``${NAME}`` here (defaults included) rather than on the raw YAML."""
         return expand_env(value, environ=_context_environ(info))
+
+    @field_validator("api_key_comfy_org")
+    @classmethod
+    def _check_api_key_comfy_org(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in cleaned):
+            raise ValueError("comfy.api_key_comfy_org must not contain control characters.")
+        return cleaned
 
     @field_validator("headers")
     @classmethod
@@ -567,6 +586,14 @@ class LLMConfig(_Section):
         ge=1024,
         description="Context window to request. Used by ollama (default 16384) and for warnings.",
     )
+    stream: bool = Field(
+        default=False,
+        description=(
+            "Stream chat completions over SSE for openai/openai_compatible servers. Prevents "
+            "reverse-proxy idle timeouts (e.g. Cloudflare 100s HTTP 524 on RunPod vLLM) on long "
+            "planning replies."
+        ),
+    )
 
     @field_validator("base_url", mode="before")
     @classmethod
@@ -610,6 +637,15 @@ class PlanningConfig(_Section):
             "singing intercut with performance and b-roll), 'narrative' (no lip-sync: recurring "
             "character(s) in performance shots intercut with b-roll), or 'visual' (no lip-sync "
             "and no recurring characters: 100% b-roll visual/atmospheric film)."
+        ),
+    )
+    vocals: Literal["auto", "solo", "multi"] = Field(
+        default="auto",
+        description=(
+            "How many vocalists sing on camera: 'auto' (and 'multi', which currently behaves "
+            "the same) maps solo, duet and ensemble singers from lyrics and diarized vocal "
+            "turns; 'solo' locks all singing shots to the primary protagonist so secondary story "
+            "characters never lip-sync."
         ),
     )
     wardrobe_monotonic: bool = Field(
@@ -672,6 +708,14 @@ class ReferenceConfig(_Section):
         default=2,
         ge=1,
         description="Candidate turnaround reference videos generated per run.",
+    )
+    closeup_face_panel: bool = Field(
+        default=False,
+        description=(
+            "Use the cropped face-detail panel as reference_image on close_up shots when the "
+            "still workflow binds only a single reference_image (improves close-up framing and "
+            "facial fidelity at the expense of full-outfit visibility)."
+        ),
     )
     panel_inset: float = Field(
         default=0.012,

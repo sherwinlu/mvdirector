@@ -26,6 +26,7 @@ from mvdirector.setup import (
     SetupOptions,
     apply_setup_config,
     is_loopback_url,
+    optimize_setup_options,
     pick_default_ollama_model,
     probe_comfy,
     probe_ollama,
@@ -646,6 +647,9 @@ def test_setup_exact_preset_and_check_only_non_ollama(
     assert cfg.video.size_multiple == 1
     assert cfg.video.max_clip_seconds == 10.0
     assert cfg.comfy.base_url == "http://192.168.1.50:8188"
+    assert cfg.comfy.dedup_uploads is True
+    assert cfg.comfy.cache_enabled is True
+    assert cfg.comfy.sort_batch_for_cache is True
 
 
 def test_cli_setup_cloud_llm_skips_ollama_verifies_key_and_saves_dotenv(
@@ -1051,3 +1055,258 @@ def test_cli_setup_drops_abandoned_provider_secret_on_switch_and_respects_existi
     )
     assert res2.exit_code == 0, res2.output
     assert "Note: export OPENAI_API_KEY" not in res2.stdout
+
+
+def test_optimize_setup_options_local_vs_remote_and_vram() -> None:
+    local_probe = ComfyProbe("http://127.0.0.1:8188", True, vram_total_gb=16.0)
+    local_opts = optimize_setup_options(
+        SetupOptions(comfy_url="http://127.0.0.1:8188", llm_enabled=True),
+        comfy_probe=local_probe,
+    )
+    assert local_opts.comfy_dedup_uploads is False
+    assert local_opts.comfy_cache_enabled is True
+    assert local_opts.comfy_sort_batch_for_cache is True
+    assert local_opts.comfy_min_free_vram_gb == 4.0
+    assert local_opts.qc_vision_blind_observer is False
+    assert local_opts.retry_in_place_repair is True
+
+    remote_probe = ComfyProbe("https://gpu.example.com:8188", True, vram_total_gb=48.0)
+    remote_opts = optimize_setup_options(
+        SetupOptions(
+            comfy_url="https://gpu.example.com:8188",
+            mode=ProjectMode.MIX,
+            llm_enabled=False,
+        ),
+        comfy_probe=remote_probe,
+    )
+    assert remote_opts.comfy_dedup_uploads is True
+    assert remote_opts.comfy_min_free_vram_gb == 6.0
+    assert remote_opts.qc_vision_enabled is False
+    assert remote_opts.qc_vision_blind_observer is False
+    assert remote_opts.retry_in_place_repair is False
+
+    # Small GPU (< 8 GiB) or unreachable probe leaves VRAM floor unset.
+    small_gpu = ComfyProbe("http://127.0.0.1:8188", True, vram_total_gb=6.0)
+    assert (
+        optimize_setup_options(
+            SetupOptions(comfy_url="http://127.0.0.1:8188"), comfy_probe=small_gpu
+        ).comfy_min_free_vram_gb
+        is None
+    )
+
+    # Explicit overrides are always respected.
+    explicit = optimize_setup_options(
+        SetupOptions(
+            comfy_url="https://gpu.example.com:8188",
+            comfy_dedup_uploads=False,
+            comfy_cache_enabled=False,
+            comfy_min_free_vram_gb=8.0,
+        ),
+        comfy_probe=remote_probe,
+    )
+    assert explicit.comfy_dedup_uploads is False
+    assert explicit.comfy_cache_enabled is False
+    assert explicit.comfy_min_free_vram_gb == 8.0
+
+
+def test_apply_setup_config_validates_and_writes_optimized_fields(tmp_path: Path) -> None:
+    project_dir = tmp_path / "opt-song"
+    api.init_project(project_dir)
+
+    for bad_vram in (0.1, 300.0, float("nan"), float("inf")):
+        with pytest.raises(ConfigError, match="min_free_vram_gb"):
+            apply_setup_config(project_dir, SetupOptions(comfy_min_free_vram_gb=bad_vram))
+
+    opts = optimize_setup_options(
+        SetupOptions(comfy_url="http://localhost:8188", llm_enabled=True),
+        comfy_probe=ComfyProbe("http://localhost:8188", True, vram_total_gb=24.0),
+    )
+    apply_setup_config(project_dir, opts)
+    cfg = load_config(project_dir / CONFIG_FILENAME)
+    assert cfg.comfy.dedup_uploads is False
+    assert cfg.comfy.cache_enabled is True
+    assert cfg.comfy.sort_batch_for_cache is True
+    assert cfg.comfy.min_free_vram_gb == 6.0
+    assert cfg.qc.vision_blind_observer is False
+    assert cfg.retry.in_place_repair is True
+
+
+def test_cli_setup_local_disables_dedup_and_remote_enables_dedup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(api, "inspect_environment", lambda **_kw: _fake_report(healthy=True))
+    local_dir = tmp_path / "local-opt"
+    res = runner.invoke(
+        app,
+        ["setup", str(local_dir), "--non-interactive", "--comfy-url", "http://127.0.0.1:8188"],
+    )
+    assert res.exit_code == 0, res.output
+    assert "Optimized for local ComfyUI: dedup_uploads=false" in res.stdout
+    cfg = load_config(local_dir / CONFIG_FILENAME)
+    assert cfg.comfy.dedup_uploads is False
+    assert cfg.comfy.cache_enabled is True
+    assert cfg.comfy.sort_batch_for_cache is True
+    assert cfg.comfy.min_free_vram_gb == 6.0
+    assert cfg.retry.in_place_repair is True
+
+
+def test_inspect_environment_forwards_explicit_comfy_headers() -> None:
+    from mvdirector.setup import inspect_environment
+
+    seen_auth: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_auth.append(request.headers.get("authorization"))
+        return httpx.Response(200, json={"system": {"comfyui_version": "0.45.4"}, "devices": []})
+
+    report = inspect_environment(
+        comfy_url="http://127.0.0.1:8188",
+        comfy_headers={"Authorization": "Basic dXNlcjpwYXNz"},
+        comfy_transport=httpx.MockTransport(handler),
+        ollama_transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={"models": []})),
+    )
+    assert report.comfy.reachable is True
+    assert seen_auth == ["Basic dXNlcjpwYXNz"]
+
+
+def test_comfy_client_sends_api_key_comfy_org_in_extra_data() -> None:
+    import json
+
+    from mvdirector.comfy.client import ComfyClient
+    from mvdirector.config import ComfyConfig
+
+    captured: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(200, json={"prompt_id": "p-123"})
+
+    cfg = ComfyConfig(base_url="http://127.0.0.1:8188", api_key_comfy_org="comfyui-test-key")
+    with ComfyClient(cfg, transport=httpx.MockTransport(handler)) as client:
+        pid = client.queue({"1": {"class_type": "Test", "inputs": {}}})
+
+    assert pid == "p-123"
+    assert captured[0]["extra_data"] == {"api_key_comfy_org": "comfyui-test-key"}
+
+
+def test_url_validation_and_loopback_edge_cases() -> None:
+    from mvdirector.setup import validate_http_url
+
+    for bad in (
+        "http://[invalid",
+        "http://:8188",
+        "http://127.0.0.1:abc",
+        "http://127.0.0.1:99999",
+    ):
+        with pytest.raises(ConfigError):
+            validate_http_url(bad, "ComfyUI URL")
+
+    assert is_loopback_url("http://[invalid") is False
+    assert is_loopback_url("http://localhost.:8188") is True
+    assert is_loopback_url("http://[::ffff:127.0.0.1]:8188") is True
+
+
+def test_inspect_environment_merges_comfy_headers_case_insensitively(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mvdirector.setup import inspect_environment
+
+    monkeypatch.setenv("COMFY_TOKEN", "from-env")
+    seen_auth_headers: list[list[tuple[str, str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_auth_headers.append(
+            [
+                (k.decode(), v.decode())
+                for k, v in request.headers.raw
+                if k.lower() == b"authorization"
+            ]
+        )
+        return httpx.Response(200, json={"devices": []})
+
+    inspect_environment(
+        comfy_url="http://127.0.0.1:8188",
+        comfy_token_env="COMFY_TOKEN",
+        comfy_headers={"authorization": "Basic explicit"},
+        comfy_transport=httpx.MockTransport(handler),
+        ollama_transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={"models": []})),
+    )
+    assert seen_auth_headers == [[("authorization", "Basic explicit")]]
+
+
+def test_cli_setup_preserves_mix_mode_in_place_repair_false_on_existing_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(api, "inspect_environment", lambda **_kw: _fake_report(healthy=True))
+    mix_dir = tmp_path / "existing-mix"
+    api.init_project(mix_dir, mode=ProjectMode.MIX)
+
+    res = runner.invoke(
+        app,
+        ["setup", str(mix_dir), "--non-interactive", "--comfy-url", "http://127.0.0.1:8188"],
+    )
+    assert res.exit_code == 0, res.output
+    cfg = load_config(mix_dir / CONFIG_FILENAME)
+    assert cfg.mode is ProjectMode.MIX
+    assert cfg.retry.in_place_repair is False
+
+
+def test_setup_project_fails_atomically_on_invalid_provider_or_policy(tmp_path: Path) -> None:
+    bad_dir = tmp_path / "never-created"
+    with pytest.raises(ConfigError, match="Invalid configuration"):
+        api.setup_project(bad_dir, SetupOptions(llm_provider="bogus"))
+    assert not bad_dir.exists()
+
+    with pytest.raises(ConfigError, match="Invalid configuration"):
+        api.setup_project(bad_dir, SetupOptions(qc_on_missing_dependency="ignore"))
+    assert not bad_dir.exists()
+
+
+def test_probe_comfy_ignores_ambient_env_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COMFY_ORG_API_KEY", "bad\r\nkey")
+    probe = probe_comfy(
+        "http://127.0.0.1:8188",
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={"devices": []})),
+    )
+    assert probe.reachable is True
+
+
+def test_rerunning_setup_keeps_existing_tuning_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(api, "inspect_environment", lambda **_kw: _fake_report(healthy=True))
+    project_dir = tmp_path / "tuned"
+    args = ["setup", str(project_dir), "--non-interactive", "--comfy-url", "http://127.0.0.1:8188"]
+    assert runner.invoke(app, args).exit_code == 0
+
+    yaml_path = project_dir / CONFIG_FILENAME
+    text = yaml_path.read_text(encoding="utf-8")
+    text = text.replace("cache_enabled: true", "cache_enabled: false")
+    text = text.replace("in_place_repair: true", "in_place_repair: false")
+    text = text.replace("vision_blind_observer: false", "vision_blind_observer: true")
+    yaml_path.write_text(text, encoding="utf-8")
+    before = load_config(yaml_path)
+    assert before.comfy.cache_enabled is False
+    assert before.retry.in_place_repair is False
+    assert before.qc.vision_blind_observer is True
+
+    res = runner.invoke(app, args)
+    assert res.exit_code == 0, res.output
+    after = load_config(yaml_path)
+    assert after.comfy.cache_enabled is False
+    assert after.retry.in_place_repair is False
+    assert after.qc.vision_blind_observer is True
+    assert "cache_enabled=" not in res.stdout
+
+
+def test_detect_project_mode_ignores_symlinked_project_yaml(tmp_path: Path) -> None:
+    from mvdirector.setup import detect_project_mode
+
+    outside = tmp_path / "outside.yaml"
+    outside.write_text("mode: mix\n", encoding="utf-8")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / CONFIG_FILENAME).symlink_to(outside)
+    assert detect_project_mode(proj) is None

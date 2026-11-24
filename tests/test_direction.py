@@ -17,6 +17,7 @@ from mvdirector.models import (
     Analysis,
     AudioSlice,
     Character,
+    Framing,
     LyricLine,
     Manifest,
     SetDesign,
@@ -260,6 +261,16 @@ def test_still_prompt_applies_set_and_the_wardrobe_for_the_shot(sectioned):
     assert "No cape." in late_prompt and "wearing a floor-length" not in late_prompt
     manifest.shots[3].type = ShotType.BROLL
     assert "The singer:" not in prompts.compose_still_prompt(manifest, manifest.shots[3])
+
+
+def test_closeup_broll_still_prompt_omits_full_room_setting_description(sectioned):
+    manifest, _ = _build(sectioned)
+    shot = manifest.shots[0]
+    shot.type = ShotType.BROLL
+    shot.framing = Framing.CLOSE_UP
+    composed = prompts.compose_still_prompt(manifest, shot)
+    assert "a narrow black corridor" not in composed
+    assert f"Setting: {shot.setting} (tight close-up;" in composed
 
 
 def test_character_describe_and_portrait_text():

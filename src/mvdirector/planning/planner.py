@@ -348,15 +348,20 @@ def build_manifest(
             mix_path=mix_path,
             video_style=video_style,
         )
+    solo_vocals = config.planning.vocals == "solo"
     voice_map = (
-        _map_voices_to_characters(analysis, manifest) if video_style is VideoStyle.LIPSYNC else {}
+        _map_voices_to_characters(analysis, manifest)
+        if video_style is VideoStyle.LIPSYNC and not solo_vocals
+        else {}
     )
     if video_style is VideoStyle.LIPSYNC and config.planning.max_lipsync_share is not None:
         # After the bible, so each shot can be matched to its section or acoustic singer.
         _thin_lipsync(
             manifest.shots,
             config.planning.max_lipsync_share,
-            lambda shot: _shot_singer_hint(shot, analysis, manifest.characters, voice_map),
+            lambda shot: _shot_singer_hint(
+                shot, analysis, manifest.characters, voice_map, solo_vocals=solo_vocals
+            ),
         )
     _direct_shots(
         manifest,
@@ -1008,10 +1013,14 @@ def _resolve_shot_singers(
     analysis: Analysis | None,
     characters: dict[str, Character],
     voice_map: dict[str, str] | None = None,
+    *,
+    solo_vocals: bool = False,
 ) -> list[str]:
     """Resolve active singing character ids for ``shot`` (1 = solo, 2+ = singing together)."""
     if not characters:
         return []
+    if solo_vocals:
+        return [next(iter(characters))] if shot.type is ShotType.LIPSYNC else []
     sec_singers = _section_singers_for_shot(shot, characters, voice_map)
     if analysis is None or not analysis.vocal_turns:
         return sec_singers
@@ -1044,10 +1053,14 @@ def _shot_singer_hint(
     analysis: Analysis | None,
     characters: dict[str, Character],
     voice_map: dict[str, str] | None = None,
+    *,
+    solo_vocals: bool = False,
 ) -> str | None:
     """Return the solo singer id for ``shot``, or ``None`` when shared ('both') or untagged."""
     if characters:
-        resolved = _resolve_shot_singers(shot, analysis, characters, voice_map)
+        resolved = _resolve_shot_singers(
+            shot, analysis, characters, voice_map, solo_vocals=solo_vocals
+        )
         return resolved[0] if len(resolved) == 1 else None
     if analysis is None or not analysis.vocal_turns:
         return None
@@ -1198,6 +1211,7 @@ def _direct_shots(
                     voice_map=voice_map,
                     style_text=style_text,
                     video_style=config.planning.video_style,
+                    solo_vocals=config.planning.vocals == "solo",
                 )
             except LLMUnavailableError as exc:
                 log.warning(
@@ -1242,7 +1256,13 @@ def _direct_shots(
                 shot.wardrobe = wardrobe.assign(item.wardrobe if item else None, shot.id)
                 continue
 
-            enforced_singers = _resolve_shot_singers(shot, analysis, manifest.characters, voice_map)
+            enforced_singers = _resolve_shot_singers(
+                shot,
+                analysis,
+                manifest.characters,
+                voice_map,
+                solo_vocals=config.planning.vocals == "solo",
+            )
             section_chars = _characters_in_text(shot.section, manifest.characters)
             requested_char: str | None = None
             if item and item.character:
@@ -1366,6 +1386,7 @@ def _ask_for_batch(
     voice_map: dict[str, str] | None = None,
     style_text: str = "",
     video_style: VideoStyle = VideoStyle.LIPSYNC,
+    solo_vocals: bool = False,
 ) -> dict[str, ShotCreative]:
     bible, character = manifest.visual_bible, manifest.character
     lines = []
@@ -1479,13 +1500,19 @@ def _ask_for_batch(
         last_pace = pace
         singer_hint = ""
         if video_style is VideoStyle.LIPSYNC and len(manifest.characters) > 1:
-            resolved_singers = _resolve_shot_singers(s, analysis, manifest.characters, voice_map)
+            resolved_singers = _resolve_shot_singers(
+                s,
+                analysis,
+                manifest.characters,
+                voice_map,
+                solo_vocals=solo_vocals,
+            )
             if len(resolved_singers) >= 2:
                 joined = ", ".join(repr(cid) for cid in resolved_singers)
                 singer_hint = f"vocal='together' singers=[{joined}] "
             elif len(resolved_singers) == 1:
                 singer_hint = f"vocal='solo' singer={resolved_singers[0]!r} "
-            else:
+            elif not solo_vocals:
                 sec_chars = _characters_in_text(s.section, manifest.characters)
                 if sec_chars:
                     singer_hint = f"vocal='solo' singer={sec_chars[0]!r} "

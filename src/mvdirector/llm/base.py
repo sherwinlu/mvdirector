@@ -169,26 +169,40 @@ def _strip_think(text: str) -> str:
     return cleaned[:unfinished] if unfinished != -1 else cleaned
 
 
-def _extract_bare_list_for_schema(text: str, schema: type[BaseModel]) -> dict[str, Any] | None:
-    """Wrap a bare JSON array ``[...]`` when ``schema`` is a single-field list container."""
+_MAX_BARE_LIST_PROBES = 8
+
+
+def _try_bare_list_for_schema(text: str, schema: type[T]) -> T | None:
+    """Validate a bare JSON array ``[...]`` when ``schema`` is a single-field list container.
+
+    Advances past short bracketed prose like ``Batch [1]:`` without hijacking a valid JSON object
+    that follows it, and returns ``None`` whenever no bare array validates against ``schema``.
+    """
     if len(schema.model_fields) != 1:
         return None
     cleaned = _strip_think(text)
-    arr_start = cleaned.find("[")
-    if arr_start == -1:
-        return None
     obj_start = cleaned.find("{")
-    if obj_start != -1 and obj_start < arr_start:
-        return None
     field_name = next(iter(schema.model_fields))
-    for strict in (True, False):
-        decoder = json.JSONDecoder(strict=strict, parse_constant=_reject_json_constant)
-        try:
-            value, _ = decoder.raw_decode(cleaned, arr_start)
-        except (ValueError, RecursionError):
-            continue
-        if isinstance(value, list):
-            return {field_name: value}
+    pos = cleaned.find("[")
+    probes = 0
+    while pos != -1 and (obj_start == -1 or pos < obj_start) and probes < _MAX_BARE_LIST_PROBES:
+        probes += 1
+        next_search = pos + 1
+        for strict in (True, False):
+            decoder = json.JSONDecoder(strict=strict, parse_constant=_reject_json_constant)
+            try:
+                value, end = decoder.raw_decode(cleaned, pos)
+            except ValueError:
+                continue
+            except RecursionError:
+                raise LLMError("The model reply nested JSON too deeply to parse") from None
+            next_search = end
+            if isinstance(value, list):
+                try:
+                    return schema.model_validate({field_name: value})
+                except ValidationError:
+                    break
+        pos = cleaned.find("[", next_search)
     return None
 
 
@@ -297,9 +311,8 @@ class ChatBackend(ABC):
             reply = self._send(system_prompt, messages, schema)
             log.debug("Model reply (%d characters): %s", len(reply.text), reply.text[:500])
             try:
-                wrapped = _extract_bare_list_for_schema(reply.text, schema)
-                if wrapped is not None:
-                    return schema.model_validate(wrapped)
+                if (bare := _try_bare_list_for_schema(reply.text, schema)) is not None:
+                    return bare
                 raw_json = extract_json(reply.text)
                 try:
                     return schema.model_validate_json(raw_json)

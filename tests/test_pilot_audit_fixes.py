@@ -1107,3 +1107,68 @@ def test_gemini_retries_with_capped_thinking_budget_when_thoughts_hit_max_tokens
     )
     assert fallback.truncated is True
     assert fallback.text == "{"
+
+
+def test_chat_backend_ignores_bracketed_prose_before_json_object_and_bare_array():
+    from mvdirector.llm.base import ChatBackend, Reply
+
+    class _ProseChat(ChatBackend):
+        def __init__(self, text: str):
+            super().__init__(model="test", max_tokens=1024)
+            self._text = text
+            self.calls = 0
+
+        def _send(self, system, messages, schema):
+            self.calls += 1
+            return Reply(text=self._text)
+
+    prose_obj = (
+        'Here is batch [1] of shots:\n```json\n{"shots": [{"id": "s001", "type": "broll", '
+        '"framing": "wide", "setting": "Hall", "still_prompt": "Empty hall.", '
+        '"motion_prompt": "Slow pan."}]}\n```'
+    )
+    c1 = _ProseChat(prose_obj)
+    res1 = c1.complete_json(
+        system="sys", content=[{"type": "text", "text": "go"}], schema=planner.ShotBatchReply
+    )
+    assert c1.calls == 1
+    assert [s.id for s in res1.shots] == ["s001"]
+
+    prose_arr = (
+        'Batch [1]:\n[{"id": "s002", "type": "broll", "framing": "wide", '
+        '"setting": "Hall", "still_prompt": "Empty hall.", "motion_prompt": "Slow pan."}]'
+    )
+    c2 = _ProseChat(prose_arr)
+    res2 = c2.complete_json(
+        system="sys", content=[{"type": "text", "text": "go"}], schema=planner.ShotBatchReply
+    )
+    assert c2.calls == 1
+    assert [s.id for s in res2.shots] == ["s002"]
+
+    # Deeply nested arrays must neither descend into inner [] nor crash with RecursionError.
+    import pytest
+
+    from mvdirector.errors import LLMError
+    from mvdirector.llm.base import _try_bare_list_for_schema
+
+    assert _try_bare_list_for_schema("[" * 500 + "]" * 500, planner.ShotBatchReply) is None
+    with pytest.raises(LLMError, match="nested JSON too deeply"):
+        _try_bare_list_for_schema("[" * 10000 + "]" * 10000, planner.ShotBatchReply)
+
+
+def test_comfy_client_rejects_non_http_and_malformed_base_urls():
+    import pytest
+
+    from mvdirector.comfy.client import ComfyClient
+    from mvdirector.config import ComfyConfig
+    from mvdirector.errors import ConfigError
+
+    for bad_url in (
+        "file:///etc/passwd",
+        "gopher://127.0.0.1:6379/_INFO",
+        "http://127.0.0.1:8188?token=leak",
+        "http://127.0.0.1:8188#frag",
+        "http://127.0.0.1:8188\r\nX-Injected: 1",
+    ):
+        with pytest.raises(ConfigError):
+            ComfyClient(ComfyConfig(base_url=bad_url))

@@ -37,7 +37,7 @@ from mvdirector.comfy.cache import file_sha256
 from mvdirector.comfy.workflow import OutputSpec
 from mvdirector.config import ComfyConfig
 from mvdirector.errors import ComfyConnectionError, ComfyJobError, ComfyResourceError, ConfigError
-from mvdirector.llm.http import redact_url, retry_delay
+from mvdirector.llm.http import redact_url, retry_delay, validate_http_base_url
 
 log = logging.getLogger(__name__)
 
@@ -557,8 +557,9 @@ class ComfyClient:
         if raw_api_key and _has_control_chars(raw_api_key):
             raise ConfigError("comfy.api_key_comfy_org must not contain control characters.")
         self._api_key_comfy_org = raw_api_key or None
+        base_url = validate_http_base_url(config.base_url.strip(), field_name="comfy.base_url")
         self._http = httpx.Client(
-            base_url=config.base_url.rstrip("/"),
+            base_url=base_url.rstrip("/"),
             headers=headers,
             timeout=config.request_timeout,
             transport=transport,

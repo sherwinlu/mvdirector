@@ -93,6 +93,44 @@
           "default": null,
           "description": "Attempt number that upscaled_path was generated from.",
           "title": "Upscaled From Attempt"
+        },
+        "pending_strategy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetryStrategy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Explicit strategy requested for the next pending attempt (repair or recreate)."
+        },
+        "repair_instruction": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Explicit user edit instruction for an in-place still repair.",
+          "title": "Repair Instruction"
+        },
+        "repair_source_attempt": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Attempt number whose rendered image serves as the source for in-place repair.",
+          "title": "Repair Source Attempt"
         }
       },
       "title": "AssetState",
@@ -1210,6 +1248,14 @@
             "type": "string"
           },
           "title": "Rules",
+          "type": "array"
+        },
+        "exclusions": {
+          "description": "Global story exclusions ('never show' list) synced into rules and negative_prompt.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Exclusions",
           "type": "array"
         }
       },

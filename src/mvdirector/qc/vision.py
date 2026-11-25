@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from mvdirector.llm import LLMClient, image_block, text_block
 from mvdirector.models import AssetKind, Framing, Manifest, Shot, ShotType
-from mvdirector.planning.prompts import extract_negative_exclusions, join_names
+from mvdirector.planning.prompts import exclusion_core, extract_negative_exclusions, join_names
 
 _SCORING_CALIBRATION = """Scoring calibration:
 - Score >= 0.85 on a dimension when there are no concrete defects to report in 'issues'.
@@ -442,7 +442,16 @@ class VisionJudge:
         for prop in bible.resolve_props(shot.props):
             desc = f": {prop.description}" if prop.description else ""
             lines.append(f"Hero prop ({prop.name}){desc}")
-        exclusions = extract_negative_exclusions(shot.still_prompt)
+        exclusions: list[str] = []
+        seen_exclusions: set[str] = set()
+        for item in [
+            *(exclusion_core(e) for e in bible.exclusions),
+            *extract_negative_exclusions(shot.still_prompt),
+        ]:
+            cleaned = " ".join(item.split())
+            if cleaned and cleaned.casefold() not in seen_exclusions:
+                seen_exclusions.add(cleaned.casefold())
+                exclusions.append(cleaned)
         if exclusions:
             lines.append(
                 "Must NOT appear in frame (hard fail if visible): " + ", ".join(exclusions)

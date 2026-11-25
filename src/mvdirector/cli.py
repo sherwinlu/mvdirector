@@ -12,6 +12,7 @@ import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
+from typing import Literal
 
 import typer
 
@@ -1028,11 +1029,23 @@ def brief(
     overwrite: bool = typer.Option(
         False, "--overwrite", help="Replace non-starter lyrics.txt / style.md files."
     ),
+    exclude: list[str] = typer.Option(
+        [],
+        "--exclude",
+        help="Subject, prop, or detail that must never appear in any shot (repeatable).",
+    ),
     project_dir: Path = ProjectDir,
 ) -> None:
     """Draft Suno-ready lyrics.txt and style.md from a concept before generating your song."""
     try:
-        result = api.brief(project_dir, idea, duration=duration, vibe=vibe, overwrite=overwrite)
+        result = api.brief(
+            project_dir,
+            idea,
+            duration=duration,
+            vibe=vibe,
+            overwrite=overwrite,
+            exclusions=exclude or None,
+        )
     except MVDError as exc:
         raise _fail(exc) from exc
     typer.echo(f"Wrote {result.lyrics_path} and {result.style_path}.")
@@ -1059,11 +1072,21 @@ def plan(
             "(characters, no lip-sync), or 'visual' (100% b-roll, no characters)."
         ),
     ),
+    exclude: list[str] = typer.Option(
+        [],
+        "--exclude",
+        help="Subject, prop, or detail that must never appear in any shot (repeatable).",
+    ),
 ) -> None:
     """Create the shot manifest from the analysis, lyrics/tracklist and style brief."""
     try:
         project, manifest = api.plan(
-            project_dir, overwrite=overwrite, mode=mode, tracklist=tracklist, video_style=style
+            project_dir,
+            overwrite=overwrite,
+            mode=mode,
+            tracklist=tracklist,
+            video_style=style,
+            exclusions=exclude or None,
         )
     except MVDError as exc:
         raise _fail(exc) from exc
@@ -1659,6 +1682,69 @@ def clean(
         f"({plan.size_bytes / 1e6:.0f} MB)."
     )
     typer.echo(summary + ("" if yes else " Run again with --yes to delete."))
+
+
+@app.command("repair-still")
+def repair_still_cmd(
+    shot_id: str = typer.Argument(..., help="Shot id whose active still should be edited."),
+    instruction: str = typer.Option(
+        "", "--instruction", "-i", help="Targeted edit instruction for the current still."
+    ),
+    skip_preflight: bool = SkipPreflight,
+    draft: bool = DraftOption,
+    concurrency: int | None = ConcurrencyOption,
+    project_dir: Path = ProjectDir,
+) -> None:
+    """Edit a shot's active still frame in place without recreating from scratch."""
+    try:
+        result = api.repair_still(
+            project_dir,
+            shot_id,
+            instruction=instruction,
+            skip_preflight=skip_preflight,
+            draft=draft,
+            observer=_progress,
+            max_concurrency=concurrency,
+        )
+    except MVDError as exc:
+        raise _fail(exc) from exc
+    _print_status(result.project, result.manifest)
+
+
+@app.command("regenerate-still")
+def regenerate_still_cmd(
+    shot_id: str = typer.Argument(..., help="Shot id whose still should be repaired or recreated."),
+    strategy: str = typer.Option(
+        "recreate", "--strategy", "-s", help="Still regeneration strategy: 'repair' or 'recreate'."
+    ),
+    instruction: str = typer.Option(
+        "", "--instruction", "-i", help="Edit instruction (repair) or rewrite note (recreate)."
+    ),
+    skip_preflight: bool = SkipPreflight,
+    draft: bool = DraftOption,
+    concurrency: int | None = ConcurrencyOption,
+    project_dir: Path = ProjectDir,
+) -> None:
+    """Explicitly repair a still in place (--strategy repair) or recreate (--strategy recreate)."""
+    if strategy not in ("repair", "recreate"):
+        raise _fail(MVDError(f"Invalid strategy {strategy!r}; expected 'repair' or 'recreate'."))
+    typed_strategy: Literal["repair", "recreate"] = (
+        "repair" if strategy == "repair" else "recreate"
+    )
+    try:
+        result = api.regenerate_still(
+            project_dir,
+            shot_id,
+            strategy=typed_strategy,
+            instruction=instruction,
+            skip_preflight=skip_preflight,
+            draft=draft,
+            observer=_progress,
+            max_concurrency=concurrency,
+        )
+    except MVDError as exc:
+        raise _fail(exc) from exc
+    _print_status(result.project, result.manifest)
 
 
 @app.command()

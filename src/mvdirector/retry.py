@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pydantic import BaseModel, ConfigDict
 
 from mvdirector.config import RetryConfig
-from mvdirector.errors import LLMError, LLMUnavailableError
+from mvdirector.errors import ConfigError, LLMError, LLMUnavailableError
 from mvdirector.llm import LLMClient, text_block
 from mvdirector.models import AssetKind, AssetState, RetryStrategy, Shot, ShotType
 from mvdirector.planning import prompts
@@ -65,6 +65,39 @@ class RetryPolicy:
         after_fallback = shot.fallback_from is not None and (
             kind is AssetKind.VIDEO or shot.type is ShotType.BROLL
         )
+        pending = state.pending_strategy
+        if pending is RetryStrategy.REPAIR_STILL:
+            if kind is not AssetKind.STILL:
+                raise ConfigError(
+                    f"{shot.id}: pending_strategy='repair_still' is only valid for stills."
+                )
+            if not can_repair:
+                raise ConfigError(
+                    f"{shot.id}: cannot repair still because the active still workflow does not "
+                    "accept 'reference_image'."
+                )
+            return AttemptPlan(
+                number=number,
+                strategy=RetryStrategy.REPAIR_STILL,
+                seed=self.seed_for(shot, kind, number),
+            )
+        if pending is not None:
+            can_repair = False
+            if pending is RetryStrategy.REWRITE_PROMPT:
+                state.prompt_override = self._rewrite(
+                    shot, kind, state, after_fallback=after_fallback
+                )
+                state.director_note = None
+            elif pending is RetryStrategy.ADJUST_PARAMS:
+                state.param_overrides = {
+                    **state.param_overrides,
+                    **self._config.adjust_params.get(kind.value, {}),
+                }
+            return AttemptPlan(
+                number=number,
+                strategy=pending,
+                seed=self.seed_for(shot, kind, number),
+            )
         has_note = bool(state.director_note and state.director_note.strip())
         if (
             kind is AssetKind.STILL

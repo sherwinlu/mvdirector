@@ -45,7 +45,14 @@ from mvdirector.dotenv import (
     merged_project_environ,
 )
 from mvdirector.errors import ConfigError
-from mvdirector.models import Framing, ProjectMode, RetryStrategy, VideoStyle
+from mvdirector.models import (
+    Framing,
+    ProjectMode,
+    RetryStrategy,
+    VideoStyle,
+    accept_do_not_show_alias,
+    normalize_exclusions,
+)
 
 CONFIG_FILENAME = "project.yaml"
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -138,6 +145,23 @@ class InputsConfig(_Section):
             "Optional cue sheet or tracklist (.json, .yaml, .cue, or .txt) used when mode is 'mix'."
         ),
     )
+    exclusions: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Global list of subjects, props, or motifs that must never appear in any shot "
+            "(alias: do_not_show)."
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_do_not_show_alias(cls, data: Any) -> Any:
+        return accept_do_not_show_alias(data)
+
+    @field_validator("exclusions", mode="before")
+    @classmethod
+    def _normalize_exclusions(cls, value: Any) -> list[str]:
+        return normalize_exclusions(value)
 
 
 _SAFE_MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")

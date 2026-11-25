@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
@@ -50,6 +50,44 @@ def validate_safe_id(value: str, label: str = "id") -> str:
             f"Invalid {label} {value!r}: must contain only letters, digits, '_' or '-'."
         )
     return value
+
+
+def normalize_exclusions(raw: Any) -> list[str]:
+    """Normalize a string or sequence of exclusion items into deduplicated phrases."""
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        items: Sequence[str] = re.split(r"[,;\n]+", raw)
+    elif isinstance(raw, (list, tuple, set, frozenset)):
+        items = list(raw)
+    else:
+        raise ValueError("exclusions must be a string or list of strings.")
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, str):
+            raise ValueError("exclusions entries must be strings.")
+        norm = " ".join(item.split())
+        if not norm:
+            continue
+        key = norm.casefold()
+        if key not in seen:
+            seen.add(key)
+            cleaned.append(norm)
+    return cleaned
+
+
+def accept_do_not_show_alias(data: Any) -> Any:
+    """Fold ``do_not_show`` alias into ``exclusions`` before strict extra='forbid' validation."""
+    if not isinstance(data, dict) or "do_not_show" not in data:
+        return data
+    updated = dict(data)
+    alias_val = updated.pop("do_not_show")
+    base_val = updated.get("exclusions")
+    updated["exclusions"] = normalize_exclusions(
+        [*normalize_exclusions(base_val), *normalize_exclusions(alias_val)]
+    )
+    return updated
 
 
 def utc_now() -> str:
@@ -638,6 +676,20 @@ class AssetState(StrictModel):
     upscaled_from_attempt: int | None = Field(
         default=None, description="Attempt number that upscaled_path was generated from."
     )
+    pending_strategy: RetryStrategy | None = Field(
+        default=None,
+        description=(
+            "Explicit strategy requested for the next pending attempt (repair or recreate)."
+        ),
+    )
+    repair_instruction: str | None = Field(
+        default=None,
+        description="Explicit user edit instruction for an in-place still repair.",
+    )
+    repair_source_attempt: int | None = Field(
+        default=None,
+        description="Attempt number whose rendered image serves as the source for in-place repair.",
+    )
 
     @property
     def selected(self) -> Attempt | None:
@@ -645,6 +697,24 @@ class AssetState(StrictModel):
             if attempt.number == self.selected_attempt:
                 return attempt
         return None
+
+    def active_attempt(self) -> Attempt | None:
+        """Current usable attempt: selected attempt, else best_attempt(), else latest with path."""
+        if self.selected is not None and self.selected.path:
+            return self.selected
+        best = self.best_attempt()
+        if best is not None:
+            return best
+        for attempt in reversed(self.attempts):
+            if attempt.path:
+                return attempt
+        return None
+
+    def clear_pending_overrides(self) -> None:
+        """Clear one-shot explicit repair/recreate intent fields after consumption."""
+        self.pending_strategy = None
+        self.repair_instruction = None
+        self.repair_source_attempt = None
 
     def pass_attempts(self, *, after_fallback: bool = False) -> list[Attempt]:
         """Attempts belonging to the active pass (after a fallback conversion, if any)."""
@@ -680,6 +750,7 @@ class AssetState(StrictModel):
         self.upscaled_from_attempt = None
         self.attempts_allowed = len(self.attempts) + extra_attempts
         self.director_note = note
+        self.clear_pending_overrides()
 
 
 class ReviewReason(str, Enum):
@@ -1146,6 +1217,22 @@ class VisualBible(StrictModel):
     rules: list[str] = Field(
         default_factory=list, description="Rules every shot follows, shown to the director model."
     )
+    exclusions: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Global story exclusions ('never show' list) synced into rules and negative_prompt."
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_do_not_show_alias(cls, data: Any) -> Any:
+        return accept_do_not_show_alias(data)
+
+    @field_validator("exclusions", mode="before")
+    @classmethod
+    def _normalize_exclusions(cls, value: Any) -> list[str]:
+        return normalize_exclusions(value)
 
     def find_section_beat(self, section: str | None) -> SectionBeat | None:
         """Look up the section beat for ``section`` (exact match, then base without singer tag)."""

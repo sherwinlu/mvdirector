@@ -16,7 +16,7 @@ import re
 import statistics
 import unicodedata
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -54,6 +54,7 @@ from mvdirector.models import (
     VisualBible,
     WardrobeState,
     ascii_fold,
+    normalize_exclusions,
     validate_safe_id,
 )
 from mvdirector.planning import prompts
@@ -249,6 +250,12 @@ class BibleReply(_Reply):
     wardrobe: list[WardrobeReply] = Field(default_factory=list)
     characters: list[CharacterReply] = Field(default_factory=list)
     rules: list[str] = Field(default_factory=list)
+    exclusions: list[str] = Field(default_factory=list)
+
+    @field_validator("exclusions", mode="before")
+    @classmethod
+    def _normalize_exclusions(cls, value: object) -> list[str]:
+        return normalize_exclusions(value)
 
     @field_validator("interpretation", mode="before")
     @classmethod
@@ -342,6 +349,7 @@ def build_manifest(
     llm: LLMClient | None,
     *,
     mix_path: Path | None = None,
+    exclusions: Sequence[str] | None = None,
 ) -> Manifest:
     config, tuned_adjustments = tuning_mod.tune_config_for_planning(
         config, analysis, lyrics_text=lyrics_text, style_text=style_text
@@ -368,9 +376,18 @@ def build_manifest(
         snap_sections = config.video.snap_sections == "always"
     manifest.shots = _timed_shots(config, analysis, snap_sections=snap_sections)
     video_style = config.planning.video_style
+    merged_exclusions = normalize_exclusions(
+        [
+            *config.inputs.exclusions,
+            *prompts.parse_exclusions_from_style(style_text),
+            *(exclusions or ()),
+        ]
+    )
     if llm is None:
         log.warning("LLM disabled: using rule-based direction. Edit manifest.json to refine it.")
-        manifest.visual_bible = VisualBible(style=" ".join(style_text.split()))
+        manifest.visual_bible = prompts.sync_bible_exclusions(
+            VisualBible(style=" ".join(style_text.split()), exclusions=merged_exclusions)
+        )
     else:
         _write_bible(
             manifest,
@@ -380,6 +397,7 @@ def build_manifest(
             analysis=analysis,
             mix_path=mix_path,
             video_style=video_style,
+            exclusions=merged_exclusions,
         )
     solo_vocals = config.planning.vocals == "solo"
     voice_map = (
@@ -446,6 +464,7 @@ def _write_bible(
     analysis: Analysis | None = None,
     mix_path: Path | None = None,
     video_style: VideoStyle = VideoStyle.LIPSYNC,
+    exclusions: Sequence[str] = (),
 ) -> None:
     section_list = "\n".join(f"- {name}" for name in _section_order(lyrics_text)) or "(none)"
     parts = [f"MUSIC STYLE AND BRIEF:\n{style_text}"]
@@ -465,6 +484,11 @@ def _write_bible(
         reg_summary = describe_vocal_register(analysis.vocal_turns)
         if reg_summary:
             parts.append(f"VOCAL REGISTER:\n{reg_summary}")
+    if exclusions:
+        parts.append(
+            "GLOBAL EXCLUSIONS (NEVER SHOW IN ANY SHOT):\n"
+            + "\n".join(f"- {item}" for item in exclusions)
+        )
     parts.append(f"SONG SECTIONS, IN ORDER:\n{section_list}")
     parts.append(f"LYRICS:\n{lyrics_text}")
     if video_style is VideoStyle.VISUAL:
@@ -540,16 +564,19 @@ def _write_bible(
         )
         for p in bible.props
     ]
-    manifest.visual_bible = VisualBible(
-        interpretation=_build_interpretation(bible.interpretation),
-        concept=bible.concept,
-        style=bible.style,
-        palette=bible.palette,
-        lighting=bible.lighting,
-        negative_prompt=bible.negative_prompt,
-        settings=[SetDesign(**s.model_dump()) for s in bible.settings if s.name.strip()],
-        props=props,
-        rules=bible.rules,
+    manifest.visual_bible = prompts.sync_bible_exclusions(
+        VisualBible(
+            interpretation=_build_interpretation(bible.interpretation),
+            concept=bible.concept,
+            style=bible.style,
+            palette=bible.palette,
+            lighting=bible.lighting,
+            negative_prompt=bible.negative_prompt,
+            settings=[SetDesign(**s.model_dump()) for s in bible.settings if s.name.strip()],
+            props=props,
+            rules=bible.rules,
+            exclusions=normalize_exclusions([*bible.exclusions, *exclusions]),
+        )
     )
 
 

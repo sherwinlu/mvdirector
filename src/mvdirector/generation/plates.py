@@ -107,7 +107,8 @@ def generate_candidates(
     if t2i is None:
         raise ConfigError("A 't2i' workflow is required to generate set plates.")
     scenes = [_find_set(manifest, set_name)] if set_name else bible.settings
-    negative = f"{bible.negative_prompt}, {prompts.PLATE_NEGATIVE}".strip(", ")
+    base_negative = prompts.merge_negative_prompt(bible.negative_prompt, bible.exclusions)
+    negative = f"{base_negative}, {prompts.PLATE_NEGATIVE}".strip(", ")
 
     uploaded_style_ref: str | None = None
     style_template: WorkflowTemplate | None = None

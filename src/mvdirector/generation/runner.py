@@ -614,7 +614,11 @@ class ShotRunner:
         if self._abort_event.is_set():
             return
         state = shot.asset(kind)
-        if shot.continuity is ContinuityMode.CONTINUE and shot.still.status is AssetStatus.PENDING:
+        if (
+            shot.continuity is ContinuityMode.CONTINUE
+            and shot.still.status is AssetStatus.PENDING
+            and shot.still.pending_strategy is None
+        ):
             # A one-take continuation's still is the previous clip's last played frame. The video
             # phase takes it as well, for stills an earlier still-only run had to defer.
             settled = self._take_handoff_still(shot, shot.still)
@@ -645,11 +649,8 @@ class ShotRunner:
                     except BaseException:
                         self._budget.refund()
                         raise
-                still_tpl_key = "still" if shot.type.shows_singer else "t2i"
                 can_repair = (
-                    kind is AssetKind.STILL
-                    and still_tpl_key in self._templates
-                    and self._templates[still_tpl_key].accepts("reference_image")
+                    kind is AssetKind.STILL and self._still_repair_template(shot) is not None
                 )
                 try:
                     # Serialize RetryPolicy.prepare under _qc_lock so prompt rewrites and Vision QC
@@ -678,9 +679,28 @@ class ShotRunner:
                     # reserved slot was never spent.
                     self._budget.refund()
                     raise
-                prev_attempt = state.attempts[-1] if state.attempts else None
+                repair_instruction = state.repair_instruction
+                has_explicit_instruction = bool(
+                    repair_instruction and repair_instruction.strip()
+                )
+                prev_attempt = None
+                if (
+                    plan.strategy is RetryStrategy.REPAIR_STILL
+                    and state.repair_source_attempt is not None
+                ):
+                    prev_attempt = next(
+                        (a for a in state.attempts if a.number == state.repair_source_attempt),
+                        None,
+                    )
+                if prev_attempt is None and state.attempts:
+                    prev_attempt = state.attempts[-1]
                 attempt = self._attempt(
-                    shot, kind, plan, previous_attempt=prev_attempt, client=active_client
+                    shot,
+                    kind,
+                    plan,
+                    previous_attempt=prev_attempt,
+                    repair_instruction=repair_instruction,
+                    client=active_client,
                 )
                 # Anti-regression guard for targeted in-place still repair
                 # (inspired by afj176/open-cinema-studio studio.py:_repair_frame).
@@ -691,21 +711,30 @@ class ShotRunner:
                     and attempt.qc is not None
                     and not attempt.qc.passed
                 ):
-                    old_failed = {c.name for c in prev_attempt.qc.failed_checks}
-                    new_failed = {c.name for c in attempt.qc.failed_checks}
-                    improved = new_failed <= old_failed and len(attempt.qc.issues) < len(
-                        prev_attempt.qc.issues
-                    )
-                    if not improved:
+                    if has_explicit_instruction and not prev_attempt.qc.passed:
+                        regressed = (
+                            attempt.qc.has_hard_failure and not prev_attempt.qc.has_hard_failure
+                        ) or attempt.qc.score < prev_attempt.qc.score
+                    else:
+                        old_failed = {c.name for c in prev_attempt.qc.failed_checks}
+                        new_failed = {c.name for c in attempt.qc.failed_checks}
+                        improved = new_failed <= old_failed and len(attempt.qc.issues) < len(
+                            prev_attempt.qc.issues
+                        )
+                        regressed = not improved
+                    if regressed:
                         attempt.regressed = True
                         log.info(
-                            "%s still repair did not strictly reduce issues (%s -> %s); "
+                            "%s still repair did not improve on attempt %d (%s -> %s); "
                             "excluding regressed repair from best_attempt selection",
                             shot.id,
+                            prev_attempt.number,
                             len(prev_attempt.qc.issues),
                             len(attempt.qc.issues),
                         )
                 with self._manifest_lock:
+                    if attempt.error is None or plan.strategy is not RetryStrategy.REPAIR_STILL:
+                        state.clear_pending_overrides()
                     state.attempts.append(attempt)
                     self._manifest.total_generations += 1
                 self._emit(
@@ -753,6 +782,8 @@ class ShotRunner:
                 ):
                     # A different seed or prompt cannot fix a missing model or a dead network,
                     # so stop here and leave the shot pending for the next run.
+                    with self._manifest_lock:
+                        state.clear_pending_overrides()
                     log.error(
                         "%s %s: the same error twice in a row, so more attempts would not help. "
                         "Fix it and run again: %s",
@@ -775,6 +806,7 @@ class ShotRunner:
         plan: AttemptPlan,
         *,
         previous_attempt: Attempt | None = None,
+        repair_instruction: str | None = None,
         client: ComfyClient | None = None,
     ) -> Attempt:
         state = shot.asset(kind)
@@ -786,37 +818,49 @@ class ShotRunner:
         prop_refs = self._prop_paths(shot)
         repair_source: Path | None = None
         if kind is AssetKind.STILL:
-            still_refs = self._still_reference_paths(shot, plate)
-            bound_ref_roles = [role for _, role, _ in still_refs] if still_refs else None
-            still_tpl = self._templates["still" if shot.type.shows_singer else "t2i"]
+            repair_tpl = (
+                self._still_repair_template(shot)
+                if plan.strategy is RetryStrategy.REPAIR_STILL
+                else None
+            )
             if (
                 plan.strategy is RetryStrategy.REPAIR_STILL
                 and previous_attempt is not None
                 and previous_attempt.path
-                and still_tpl.accepts("reference_image")
+                and repair_tpl is not None
             ):
                 candidate = self._project.path(previous_attempt.path)
                 if candidate.is_file():
                     repair_source = candidate
-                    issues = (
-                        "; ".join(previous_attempt.qc.issues) if previous_attempt.qc else "defects"
-                    )
-                    hints = " ".join(previous_attempt.qc.fix_hints) if previous_attempt.qc else ""
+            if repair_source is not None:
+                cleaned_instruction = (repair_instruction or "").strip()
+                if cleaned_instruction:
                     prompt = (
                         "Keep the exact composition, framing, lighting, pose, and character "
-                        f"identity from the input image. Fix ONLY these defects: {issues}. "
-                        f"{hints}"
+                        "identity from the input image. Apply ONLY this edit: "
+                        f"{cleaned_instruction}"
+                    )
+                elif (
+                    previous_attempt is not None
+                    and previous_attempt.qc is not None
+                    and (previous_attempt.qc.issues or not previous_attempt.qc.passed)
+                ):
+                    issues = "; ".join(previous_attempt.qc.issues) or "defects"
+                    hints = " ".join(previous_attempt.qc.fix_hints)
+                    prompt = (
+                        "Keep the exact composition, framing, lighting, pose, and character "
+                        f"identity from the input image. Fix ONLY these defects: {issues}. {hints}"
                     ).strip()
                 else:
-                    prompt = prompts.compose_still_prompt(
-                        self._manifest,
-                        shot,
-                        plate_attached=plate is not None,
-                        props_attached=bool(prop_refs and still_tpl.accepts("prop_image")),
-                        reference_notation=notation,
-                        bound_references=bound_ref_roles,
+                    prompt = (
+                        "Keep the exact composition, framing, lighting, pose, and character "
+                        "identity from the input image. Refine image quality and fix any subtle "
+                        "visual artifacts."
                     )
             else:
+                still_refs = self._still_reference_paths(shot, plate)
+                bound_ref_roles = [role for _, role, _ in still_refs] if still_refs else None
+                still_tpl = self._templates["still" if shot.type.shows_singer else "t2i"]
                 prompt = prompts.compose_still_prompt(
                     self._manifest,
                     shot,
@@ -1075,6 +1119,19 @@ class ShotRunner:
             exclude_param="image",
         )
 
+    def _still_repair_template(self, shot: Shot) -> WorkflowTemplate | None:
+        """Workflow template capable of in-place still editing (``reference_image``)."""
+        if shot.type.shows_singer:
+            tpl = self._templates.get("still")
+            return tpl if tpl is not None and tpl.accepts("reference_image") else None
+        t2i = self._templates.get("t2i")
+        if t2i is not None and t2i.accepts("reference_image"):
+            return t2i
+        still = self._templates.get("still")
+        if still is not None and still.accepts("reference_image"):
+            return still
+        return None
+
     def _still_negative_prompt(self, shot: Shot) -> str:
         parts = [self._manifest.visual_bible.negative_prompt]
         raw_still = shot.still.prompt_override or shot.still_prompt
@@ -1085,7 +1142,8 @@ class ShotRunner:
             parts.append("vertically squashed body, stubby legs, oversized head")
             if shot.type is not ShotType.LIPSYNC and prompts.is_rear_view_prompt(raw_still):
                 parts.append("frontal face, looking at camera")
-        return ", ".join(p.strip(", ") for p in parts if p and p.strip(", "))
+        combined = ", ".join(p.strip(", ") for p in parts if p and p.strip(", "))
+        return prompts.merge_negative_prompt(combined, self._manifest.visual_bible.exclusions)
 
     def _generate_still(
         self,
@@ -1108,17 +1166,16 @@ class ShotRunner:
             "height": height,
             **attempt.params,
         }
-        if shot.type.shows_singer:
+        if repair_source is not None:
+            template = self._still_repair_template(shot)
+            assert template is not None  # guarded in _attempt
+            params["reference_image"] = self._upload(repair_source, client=client)
+        elif shot.type.shows_singer:
             template = self._templates["still"]
-            if repair_source is not None:
-                params["reference_image"] = self._upload(repair_source, client=client)
-            else:
-                for param, _, ref_path in still_refs:
-                    params[param] = self._upload(ref_path, client=client)
+            for param, _, ref_path in still_refs:
+                params[param] = self._upload(ref_path, client=client)
         else:
             template = self._templates["t2i"]
-            if repair_source is not None and template.accepts("reference_image"):
-                params["reference_image"] = self._upload(repair_source, client=client)
         if (
             repair_source is None
             and shot.continuity is ContinuityMode.REFRAME
@@ -1127,7 +1184,8 @@ class ShotRunner:
             handoff = self._previous_handoff_frame(shot)
             if handoff is not None:
                 params["previous_frame"] = self._upload(handoff, client=client)
-        self._attach_prop_refs(params, template, prop_refs, client=client)
+        if repair_source is None:
+            self._attach_prop_refs(params, template, prop_refs, client=client)
         self._run_comfy(
             template.render(params), template.bindings.output, destination, client=client
         )
@@ -1162,7 +1220,10 @@ class ShotRunner:
         template = self._video_template(shot)
         params: dict[str, Any] = {
             "positive_prompt": attempt.prompt,
-            "negative_prompt": self._manifest.visual_bible.negative_prompt,
+            "negative_prompt": prompts.merge_negative_prompt(
+                self._manifest.visual_bible.negative_prompt,
+                self._manifest.visual_bible.exclusions,
+            ),
             "lyrics": shot.lyrics,
             "seed": attempt.seed,
             "image": self._upload(still_path, client=client),
@@ -1541,6 +1602,7 @@ class ShotRunner:
             best = state.best_attempt()
             state.status = AssetStatus.EXHAUSTED
             state.selected_attempt = best.number if best else None
+            state.clear_pending_overrides()
             self._project.save_manifest(self._manifest)
         self._emit(
             RunEvent(

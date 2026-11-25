@@ -44,7 +44,8 @@ def generate_candidates(
             "The visual bible has no props. Add entries under visual_bible.props in manifest.json."
         )
     targets = [_find_prop(manifest, prop_name)] if prop_name else bible.props
-    negative = f"{bible.negative_prompt}, {prompts.PROP_NEGATIVE}".strip(", ")
+    base_negative = prompts.merge_negative_prompt(bible.negative_prompt, bible.exclusions)
+    negative = f"{base_negative}, {prompts.PROP_NEGATIVE}".strip(", ")
     results: dict[str, list[Path]] = {}
     for index, prop in enumerate(targets):
         safe_id = require_safe_id(prop.id, "prop id")

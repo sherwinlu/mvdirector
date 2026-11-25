@@ -6,13 +6,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from mvdirector import tuning as tuning_mod
 from mvdirector.errors import ConfigError
 from mvdirector.llm import LLMClient, text_block
+from mvdirector.models import accept_do_not_show_alias, normalize_exclusions
 from mvdirector.planning import prompts
 from mvdirector.project import Project
 
@@ -22,6 +25,17 @@ class BriefReply(BaseModel):
     lyrics: str
     suno_style: str
     visual_direction: str
+    exclusions: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_do_not_show_alias(cls, data: Any) -> Any:
+        return accept_do_not_show_alias(data)
+
+    @field_validator("exclusions", mode="before")
+    @classmethod
+    def _normalize_exclusions(cls, value: Any) -> list[str]:
+        return normalize_exclusions(value)
 
 
 def generate_brief(
@@ -30,6 +44,8 @@ def generate_brief(
     llm: LLMClient | None,
     duration_seconds: int | None = None,
     vibe: str | None = None,
+    exclusions: Sequence[str] | None = None,
+    do_not_show: Sequence[str] | None = None,
 ) -> BriefReply:
     """Ask the LLM for Suno-ready lyrics, a Suno style prompt, and visual direction."""
     cleaned = idea.strip()
@@ -40,11 +56,17 @@ def generate_brief(
     if duration_seconds is not None and not (5 <= duration_seconds <= 600):
         raise ConfigError("duration_seconds must be between 5 and 600 seconds.")
 
+    merged_exclusions = normalize_exclusions([*(exclusions or ()), *(do_not_show or ())])
     details = [f"CONCEPT / STORY:\n{cleaned}"]
     if duration_seconds is not None:
         details.append(f"TARGET SONG DURATION: ~{duration_seconds} seconds")
     if vibe and vibe.strip():
         details.append(f"MUSICAL & VISUAL VIBE:\n{vibe.strip()}")
+    if merged_exclusions:
+        details.append(
+            "GLOBAL EXCLUSIONS (NEVER SHOW):\n"
+            + "\n".join(f"- {item}" for item in merged_exclusions)
+        )
 
     reply = llm.complete_json(
         system=prompts.BRIEF_SYSTEM,
@@ -53,6 +75,7 @@ def generate_brief(
     )
     if not reply.lyrics.strip() or not reply.suno_style.strip():
         raise ConfigError("The model returned empty lyrics or Suno style prompt.")
+    reply.exclusions = normalize_exclusions([*reply.exclusions, *merged_exclusions])
     return reply
 
 
@@ -86,7 +109,12 @@ def ensure_writable(project: Project, *, overwrite: bool = False) -> tuple[str, 
 
 
 def write_brief(
-    project: Project, brief: BriefReply, *, overwrite: bool = False
+    project: Project,
+    brief: BriefReply,
+    *,
+    overwrite: bool = False,
+    exclusions: Sequence[str] | None = None,
+    do_not_show: Sequence[str] | None = None,
 ) -> tuple[Path, Path]:
     """Write ``inputs/lyrics.txt`` and ``inputs/style.md`` atomically inside the project."""
     lyrics_rel, style_rel = ensure_writable(project, overwrite=overwrite)
@@ -95,6 +123,11 @@ def write_brief(
     style_parts = [f"Music style: {brief.suno_style.strip()}"]
     if brief.visual_direction.strip():
         style_parts.append(f"Visual direction: {brief.visual_direction.strip()}")
+    merged_exclusions = normalize_exclusions(
+        [*brief.exclusions, *(exclusions or ()), *(do_not_show or ())]
+    )
+    if merged_exclusions:
+        style_parts.append(f"Exclusions: {', '.join(merged_exclusions)}")
     style_text = "\n\n".join(style_parts) + "\n"
     return (
         project.write_text(lyrics_rel, lyrics_text),

@@ -385,3 +385,68 @@ def test_runner_binds_optional_r2v_video_references_and_prunes_broll(
         "mvdirector/upload_"
     )
     assert "@image2 shows the location" in broll_shot.video.attempts[0].prompt
+
+
+def test_motion_prompt_hygiene_and_patina_cues_in_system_prompts() -> None:
+    shots_norm = " ".join(prompts.SHOTS_SYSTEM.split()).lower()
+    assert "never re-describe locked wardrobe" in shots_norm
+    assert "permanent facial features" in shots_norm
+    assert "static room/set decor" in shots_norm
+
+    visual_shots_norm = " ".join(prompts.VISUAL_SHOTS_SYSTEM.split()).lower()
+    assert "never re-describe static architecture" in visual_shots_norm
+
+    rewrite_norm = " ".join(prompts.REWRITE_SYSTEM.split()).lower()
+    assert "when rewriting a video motion_prompt" in rewrite_norm
+    assert "strip any re-described locked wardrobe" in rewrite_norm
+
+    for system in (prompts.BIBLE_SYSTEM, prompts.VISUAL_BIBLE_SYSTEM):
+        norm = " ".join(system.split()).lower()
+        assert "lived-in wear and patina" in norm
+        assert "sleek, pristine, or futuristic" in norm
+
+
+def test_plate_and_prop_prompts_apply_patina_by_default_and_suppress_for_sleek() -> None:
+    from mvdirector.models import PropDesign, VisualBible
+
+    worn_manifest = Manifest(
+        title="Worn",
+        duration=4.0,
+        fps=24,
+        visual_bible=VisualBible(
+            style="35mm gritty neo-noir",
+            palette="amber and slate",
+            lighting="sodium streetlamp",
+            settings=[SetDesign(name="Alley", description="brick alley with wet asphalt")],
+            props=[PropDesign(id="watch", name="Pocket Watch", description="brass 5cm watch")],
+        ),
+    )
+    for rendered in (
+        prompts.plate_prompt(worn_manifest, "Alley"),
+        prompts.plate_style_prompt(worn_manifest, "Alley"),
+        prompts.plate_edit_prompt(worn_manifest, "Alley", "Old Alley"),
+        prompts.prop_prompt(worn_manifest, "watch"),
+    ):
+        assert prompts._SUBTLE_PATINA_CUE in rendered
+    assert "glossy plastic sheen" in prompts.PROP_NEGATIVE
+
+    sleek_manifest = Manifest(
+        title="Sleek",
+        duration=4.0,
+        fps=24,
+        visual_bible=VisualBible(
+            style="sleek futuristic sci-fi chrome minimalism",
+            palette="ice blue and silver",
+            lighting="clean studio edge light",
+            settings=[SetDesign(name="Lab", description="glass corridor")],
+            props=[PropDesign(id="visor", name="Visor", description="mirror visor 18cm wide")],
+        ),
+    )
+    for rendered in (
+        prompts.plate_prompt(sleek_manifest, "Lab"),
+        prompts.plate_style_prompt(sleek_manifest, "Lab"),
+        prompts.plate_edit_prompt(sleek_manifest, "Lab", "Old Lab"),
+        prompts.prop_prompt(sleek_manifest, "visor"),
+    ):
+        assert prompts._SUBTLE_PATINA_CUE not in rendered
+        assert "  " not in rendered

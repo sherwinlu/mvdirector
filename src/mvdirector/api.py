@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from importlib import resources
 from pathlib import Path
+from typing import Literal
 
 from mvdirector import assemble as assemble_mod
 from mvdirector import calibrate as calibrate_mod
@@ -58,9 +59,12 @@ from mvdirector.models import (
     Manifest,
     ProjectMode,
     ReferenceSet,
+    RetryStrategy,
+    Review,
     ShotType,
     TrackProfile,
     VideoStyle,
+    normalize_exclusions,
 )
 from mvdirector.planning.brief import ensure_writable, generate_brief, write_brief
 from mvdirector.planning.mix_planner import build_mix_manifest
@@ -116,7 +120,9 @@ __all__ = [
     "prepare",
     "qc_report",
     "refine_previz",
+    "regenerate_still",
     "reject",
+    "repair_still",
     "setup_project",
     "status_counts",
     "tune",
@@ -616,15 +622,36 @@ def brief(
     duration: int | None = None,
     vibe: str | None = None,
     overwrite: bool = False,
+    *,
+    exclusions: Sequence[str] | None = None,
+    do_not_show: Sequence[str] | None = None,
 ) -> BriefResult:
     """Draft Suno-ready lyrics.txt and style.md from a concept."""
     project = open_project(project_dir)
     ensure_writable(project, overwrite=overwrite)
+    merged_exclusions = normalize_exclusions(
+        [
+            *project.config.inputs.exclusions,
+            *(exclusions or ()),
+            *(do_not_show or ()),
+        ]
+    )
     with _close_llm(_build_project_llm(project)) as llm:
-        generated = generate_brief(idea, llm=llm, duration_seconds=duration, vibe=vibe)
+        generated = generate_brief(
+            idea,
+            llm=llm,
+            duration_seconds=duration,
+            vibe=vibe,
+            exclusions=merged_exclusions,
+        )
     with project.run_lock():
         ensure_writable(project, overwrite=overwrite)  # re-check: another job may have written
-        lyrics_path, style_path = write_brief(project, generated, overwrite=overwrite)
+        lyrics_path, style_path = write_brief(
+            project,
+            generated,
+            overwrite=overwrite,
+            exclusions=merged_exclusions,
+        )
         project.storage.push()
     return BriefResult(lyrics_path, style_path, generated.suno_style)
 
@@ -643,9 +670,12 @@ def plan(
     mode: ProjectMode | None = None,
     tracklist: Path | None = None,
     video_style: VideoStyle | None = None,
+    exclusions: Sequence[str] | None = None,
+    do_not_show: Sequence[str] | None = None,
 ) -> tuple[Project, Manifest]:
     """Create the shot manifest from the analysis, lyrics/tracklist and style brief."""
     project = _with_mode(open_project(project_dir), mode)
+    merged_exclusions = normalize_exclusions([*(exclusions or ()), *(do_not_show or ())])
     with project.run_lock():
         if project.state.has_manifest() and not overwrite:
             raise MVDError("manifest.json already exists. Pass --overwrite to replace it.")
@@ -670,6 +700,7 @@ def plan(
                     analysis,
                     style_text,
                     llm,
+                    exclusions=merged_exclusions,
                 )
         else:
             if tracklist is not None:
@@ -701,6 +732,7 @@ def plan(
                     _read_text_input(project.input_path(inputs.style, "style"), "style"),
                     llm,
                     mix_path=mix_path,
+                    exclusions=merged_exclusions,
                 )
         project.save_manifest(manifest)
     return project, manifest
@@ -991,16 +1023,29 @@ def generate(
         effective_kinds = [k for k in effective_kinds if k is not AssetKind.VIDEO]
 
     with _close_llm(_build_project_llm(project)) as llm:
+        active_shots = [
+            s for s in manifest.shots if selected_shots is None or s.id in selected_shots
+        ]
+        still_wf = project.config.comfy.workflows.get("still")
+        needs_still_for_repair = (
+            AssetKind.STILL in effective_kinds
+            and any(s.still.pending_strategy is RetryStrategy.REPAIR_STILL for s in active_shots)
+            and bool(still_wf)
+            and project.path(Path(project.config.comfy.workflows_dir) / str(still_wf)).is_file()
+        )
         if manifest.mode is ProjectMode.MIX:
             names = ["t2i"] if AssetKind.STILL in effective_kinds else []
+            if needs_still_for_repair:
+                names.append("still")
             names += ["i2v"] if AssetKind.VIDEO in effective_kinds else []
         else:
-            active_shots = [
-                s for s in manifest.shots if selected_shots is None or s.id in selected_shots
-            ]
             names = []
             if AssetKind.STILL in effective_kinds:
-                if not active_shots or any(s.type.shows_singer for s in active_shots):
+                if (
+                    not active_shots
+                    or needs_still_for_repair
+                    or any(s.type.shows_singer for s in active_shots)
+                ):
                     names.append("still")
                 if not active_shots or any(not s.type.shows_singer for s in active_shots):
                     names.append("t2i")
@@ -1086,6 +1131,219 @@ def generate(
         finally:
             gates.close()
         return result
+
+
+def regenerate_still(
+    project_dir: ProjectRef,
+    shot_id: str,
+    *,
+    strategy: Literal["repair", "recreate"] = "recreate",
+    instruction: str = "",
+    prompt_override: str | None = None,
+    attempts: int | None = None,
+    review_mode: ReviewMode | None = None,
+    skip_preflight: bool = False,
+    draft: bool = False,
+    observer: Observer | None = None,
+    comfy_provider: ComfyEndpointProvider | None = None,
+    max_concurrency: int | None = None,
+) -> GenerateResult:
+    """Explicitly repair a shot's active still in place or recreate it from scratch."""
+
+    def emit(event: RunEvent) -> None:
+        if observer is not None:
+            observer(event)
+
+    if strategy not in ("repair", "recreate"):
+        raise ConfigError(
+            f"Invalid still regeneration strategy {strategy!r}; expected 'repair' or 'recreate'."
+        )
+    try:
+        cleaned_instruction = review_policy._checked_note(instruction)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    if prompt_override is not None and "\x00" in prompt_override:
+        raise ConfigError("prompt_override must not contain NUL bytes.")
+    if attempts is not None and attempts < 1:
+        raise ConfigError("attempts must be >= 1.")
+
+    project = open_project(project_dir, review_mode)
+    effective_concurrency = validate_max_concurrency(
+        project.config.comfy.max_concurrency if max_concurrency is None else max_concurrency
+    )
+    manifest = project.load_manifest()
+    _require_known_shots(manifest, [shot_id])
+    shot = manifest.shot(shot_id)
+
+    def _has_workflow(name: str) -> bool:
+        rel = project.config.comfy.workflows.get(name)
+        if not rel:
+            return False
+        return project.path(Path(project.config.comfy.workflows_dir) / rel).is_file()
+
+    if strategy == "repair":
+        source = shot.still.active_attempt()
+        if source is None or not source.path or not project.path(source.path).is_file():
+            raise ConfigError(f"{shot_id}: no active still image on disk to repair.")
+        if manifest.mode is ProjectMode.MIX:
+            names = ["t2i"]
+            if _has_workflow("still"):
+                names.append("still")
+        elif shot.type.shows_singer:
+            names = ["still"]
+        else:
+            names = ["t2i"]
+            if _has_workflow("still"):
+                names.append("still")
+    else:
+        if manifest.mode is ProjectMode.MIX:
+            names = ["t2i"]
+        else:
+            names = ["still"] if shot.type.shows_singer else ["t2i"]
+
+    with _close_llm(_build_project_llm(project)) as llm:
+        templates = load_templates(project, names)
+        if strategy == "repair":
+            if shot.type.shows_singer and manifest.mode is not ProjectMode.MIX:
+                repair_tpl = templates.get("still")
+            else:
+                t2i = templates.get("t2i")
+                repair_tpl = (
+                    t2i
+                    if (t2i is not None and t2i.accepts("reference_image"))
+                    else templates.get("still")
+                )
+            if repair_tpl is None or not repair_tpl.accepts("reference_image"):
+                raise ConfigError(
+                    f"{shot_id}: cannot repair still because no configured still workflow "
+                    "accepts 'reference_image'."
+                )
+        elif manifest.mode is not ProjectMode.MIX:
+            ready = check_assets(project, manifest, templates, [shot_id])
+            for warning in ready.warnings:
+                emit(RunEvent("warning", message=f"Warning: {warning}"))
+            if skip_preflight:
+                for problem in ready.problems:
+                    emit(RunEvent("warning", message=f"Skipping check: {problem}"))
+            else:
+                ready.raise_if_blocked()
+        if llm is not None:
+            try:
+                ping_llm(llm)
+            except LLMError as exc:
+                raise LLMError(
+                    f"The language model is not usable: {exc}\nFix it (`mvd llm-check` tests the "
+                    "settings), or set llm.enabled: false to run without a model."
+                ) from exc
+        result = GenerateResult(project, manifest)
+        gates = build_quality_gates(project.config, llm)
+        try:
+            result.active_checks, result.skipped_checks = gates.check_summary()
+            emit(
+                RunEvent(
+                    "qc_summary",
+                    active_checks=result.active_checks,
+                    skipped_checks=result.skipped_checks,
+                )
+            )
+            policy = RetryPolicy(project.config.retry, project.config.seed, llm)
+            budget = RunBudget(project.config.retry.max_generations_per_run)
+            effective_provider: ComfyEndpointProvider = comfy_provider or StaticComfyProvider()
+            with project.run_lock(), effective_provider.lease(project) as comfy:
+                manifest = result.manifest = project.load_manifest()
+                target_shot = manifest.shot(shot_id)
+                shot_index = next(
+                    i for i, item in enumerate(manifest.shots) if item.id == shot_id
+                )
+                shot_snapshot = target_shot.model_copy(deep=True)
+                attempts_before = len(target_shot.still.attempts)
+                if strategy == "repair":
+                    locked_source = target_shot.still.active_attempt()
+                    if (
+                        locked_source is None
+                        or not locked_source.path
+                        or not project.path(locked_source.path).is_file()
+                    ):
+                        raise ConfigError(f"{shot_id}: no active still image on disk to repair.")
+                    source_number = locked_source.number
+                    target_shot.still.reset(attempts if attempts is not None else 1)
+                    target_shot.still.pending_strategy = RetryStrategy.REPAIR_STILL
+                    target_shot.still.repair_instruction = cleaned_instruction or None
+                    target_shot.still.repair_source_attempt = source_number
+                else:
+                    extra = attempts if attempts is not None else project.config.retry.max_attempts
+                    target_shot.still.reset(extra, note=cleaned_instruction or None)
+                    target_shot.still.prompt_override = None
+                    target_shot.still.param_overrides = {}
+                    target_shot.still.pending_strategy = (
+                        RetryStrategy.REWRITE_PROMPT
+                        if cleaned_instruction
+                        else RetryStrategy.NEW_SEED
+                    )
+                if prompt_override is not None and prompt_override.strip():
+                    target_shot.still_prompt = prompt_override.strip()
+                target_shot.video.reset(project.config.retry.max_attempts)
+                target_shot.review = Review()
+                comfy.ping()
+                runner = ShotRunner(
+                    project,
+                    manifest,
+                    comfy,
+                    gates,
+                    policy,
+                    templates,
+                    budget,
+                    observer=observer,
+                    draft=draft,
+                    max_concurrency=effective_concurrency,
+                    comfy_provider=effective_provider,
+                )
+                try:
+                    runner.run([AssetKind.STILL], [shot_id])
+                except BudgetExceeded as exc:
+                    result.budget_message = str(exc)
+                    if len(target_shot.still.attempts) == attempts_before:
+                        manifest.shots[shot_index] = shot_snapshot
+                except BaseException:
+                    if len(target_shot.still.attempts) == attempts_before:
+                        manifest.shots[shot_index] = shot_snapshot
+                    raise
+                finally:
+                    _save_after_run(project, manifest)
+        finally:
+            gates.close()
+        return result
+
+
+def repair_still(
+    project_dir: ProjectRef,
+    shot_id: str,
+    instruction: str = "",
+    *,
+    prompt_override: str | None = None,
+    attempts: int | None = None,
+    review_mode: ReviewMode | None = None,
+    skip_preflight: bool = False,
+    draft: bool = False,
+    observer: Observer | None = None,
+    comfy_provider: ComfyEndpointProvider | None = None,
+    max_concurrency: int | None = None,
+) -> GenerateResult:
+    """Repair a shot's active still frame in place via ``RetryStrategy.REPAIR_STILL``."""
+    return regenerate_still(
+        project_dir,
+        shot_id,
+        strategy="repair",
+        instruction=instruction,
+        prompt_override=prompt_override,
+        attempts=attempts,
+        review_mode=review_mode,
+        skip_preflight=skip_preflight,
+        draft=draft,
+        observer=observer,
+        comfy_provider=comfy_provider,
+        max_concurrency=max_concurrency,
+    )
 
 
 def _save_after_run(project: Project, manifest: Manifest) -> None:

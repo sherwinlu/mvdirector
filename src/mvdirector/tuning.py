@@ -492,7 +492,10 @@ def _measure_intensity_and_drops(analysis: Analysis | None) -> tuple[float | Non
 
 
 _VISUAL_SECTION_RE = re.compile(
-    r"(?im)^\s*(?:\*{0,2})visual\s+(?:direction|context|brief|notes?)(?:\*{0,2})\s*:"
+    r"(?im)^\s*(?:\*{0,2})visual\s+(?:direction|context|brief|notes?)(?:\*{0,2})\s*:(?:\*{0,2})"
+)
+_EXCLUSIONS_SECTION_RE = re.compile(
+    r"(?im)^\s*(?:\*{0,2})(?:exclusions?|do\s+not\s+show|never\s+show)(?:\*{0,2})\s*:(?:\*{0,2})"
 )
 # Voice-range words also name instruments ("tenor sax", "baritone guitar"); not vocal cues.
 _NOT_AN_INSTRUMENT = (
@@ -512,9 +515,13 @@ _EXPLICIT_FEMALE_VOCAL_RE = re.compile(
 
 
 def _musical_style_portion(style_text: str) -> str:
-    """Return only the musical/style portion of ``style.md`` before any Visual direction section."""
-    m = _VISUAL_SECTION_RE.search(style_text)
-    return style_text[: m.start()].strip() if m else style_text
+    """Return only the musical/style portion of ``style.md`` before Visual/Exclusions sections."""
+    stops = [
+        m.start()
+        for pattern in (_VISUAL_SECTION_RE, _EXCLUSIONS_SECTION_RE)
+        if (m := pattern.search(style_text)) is not None
+    ]
+    return style_text[: min(stops)].strip() if stops else style_text
 
 
 def _detect_vocal_mode(

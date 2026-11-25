@@ -11,6 +11,7 @@ mixes require only a small pool of reusable loop clips (or hero stills) per trac
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -32,6 +33,7 @@ from mvdirector.models import (
     Shot,
     ShotType,
     VisualBible,
+    normalize_exclusions,
     validate_safe_id,
 )
 from mvdirector.planning import prompts
@@ -284,6 +286,8 @@ def _request_llm_themes(
     clips_per_segment: int,
     batch_size: int,
     llm: LLMClient,
+    *,
+    exclusions: Sequence[str] = (),
 ) -> tuple[str, str, dict[str, _ChapterThemeReply]]:
     by_id: dict[str, _ChapterThemeReply] = {}
     chosen_style = ""
@@ -314,6 +318,10 @@ def _request_llm_themes(
             f"GLOBAL STYLE BRIEF:\n{brief}",
             f"CLIPS PER CHAPTER: {clips_per_segment}",
         ]
+        if exclusions:
+            prompt_parts.append(
+                "GLOBAL EXCLUSIONS (NEVER SHOW):\n" + "\n".join(f"- {item}" for item in exclusions)
+            )
         if prev_notes:
             prompt_parts.append(
                 "PREVIOUS CHAPTER LOOKS (avoid repeating palette/environment):\n"
@@ -417,11 +425,20 @@ def build_mix_manifest(
     analysis: Analysis,
     style_text: str,
     llm: LLMClient | None,
+    *,
+    exclusions: Sequence[str] | None = None,
 ) -> Manifest:
     """Create a ``ProjectMode.MIX`` manifest with 1 theme + ``clips_per_segment`` shots/chapter."""
     chapters_in = _ensure_analyzed_chapters(config, analysis)
     clips_per_seg = config.mix.clips_per_segment
     clean_style = " ".join(style_text.split()) or _DEFAULT_STYLE
+    merged_exclusions = normalize_exclusions(
+        [
+            *config.inputs.exclusions,
+            *prompts.parse_exclusions_from_style(style_text),
+            *(exclusions or ()),
+        ]
+    )
 
     llm_style = ""
     llm_neg = ""
@@ -433,6 +450,7 @@ def build_mix_manifest(
             clips_per_seg,
             max(1, config.llm.shots_per_request),
             llm,
+            exclusions=merged_exclusions,
         )
     else:
         log.info("LLM disabled: generating deterministic per-chapter themes for mix mode.")
@@ -547,17 +565,21 @@ def build_mix_manifest(
             )
         )
 
-    bible = VisualBible(
-        concept=(
-            f"Long-form continuous visual mix across {len(mix_chapters)} distinct track chapters."
-        ),
-        style=llm_style or clean_style,
-        negative_prompt=llm_neg or _DEFAULT_NEGATIVE,
-        settings=bible_settings,
-        rules=[
-            "Uninhabited environments only; no performers, faces, or singing.",
-            "Every clip uses continuous loop-friendly ambient motion with no cuts or text.",
-        ],
+    bible = prompts.sync_bible_exclusions(
+        VisualBible(
+            concept=(
+                f"Long-form continuous visual mix across {len(mix_chapters)} "
+                "distinct track chapters."
+            ),
+            style=llm_style or clean_style,
+            negative_prompt=llm_neg or _DEFAULT_NEGATIVE,
+            settings=bible_settings,
+            rules=[
+                "Uninhabited environments only; no performers, faces, or singing.",
+                "Every clip uses continuous loop-friendly ambient motion with no cuts or text.",
+            ],
+            exclusions=merged_exclusions,
+        )
     )
     log.info(
         "Planned mix manifest: %d chapter(s), %d reusable loop unit(s) (visual_source=%s).",

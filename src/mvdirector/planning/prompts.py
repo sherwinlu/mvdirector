@@ -14,7 +14,16 @@ import re
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from mvdirector.models import Character, Framing, Manifest, ProjectMode, Shot, ShotType
+from mvdirector.models import (
+    Character,
+    Framing,
+    Manifest,
+    ProjectMode,
+    Shot,
+    ShotType,
+    VisualBible,
+    normalize_exclusions,
+)
 from mvdirector.planning.world_state import build_ledger_from_facts, filter_look_for_state
 
 if TYPE_CHECKING:
@@ -329,13 +338,17 @@ as id='sakura' with name='さくら').
   an earlier set when this location is a stripped, altered, or nested variant of it. Unless the
   style brief explicitly calls for fantasy, sci-fi, or surreal worlds, ground sets in physically
   shootable real-world locations (everyday streets, apartments, transit, cafés, rooftops) that an
-  indie crew could film on location.
+  indie crew could film on location. Unless the style brief explicitly asks for sleek, pristine, or
+  futuristic looks, give sets subtle lived-in wear and patina (light floor scuffs, weathered paint,
+  handling marks, natural surface imperfections) rather than brand-new CGI perfection.
 - props: 0 to 3 recurring hero objects grounded specifically in this song's lyrics or concept (use
   an empty list if none are needed; never invent generic sci-fi discs or unrelated props). Each
   has id (short lowercase identifier), name, sections, and a purely visual description with
   approximate scale in centimeters, finish, and affirmative descriptions of its visible structure
   (no sound/audio descriptions, and in shot prompts refer to props by natural prose, never by
-  snake_case ids).
+  snake_case ids). Unless the style brief asks for sleek, pristine, or futuristic surfaces, include
+  subtle realistic patina and lived-in wear (faint scuffs, tarnished edges, natural handling wear)
+  rather than factory-fresh CGI sheen.
 - rules: 4 to 10 short rules that every shot follows (camera language, physical camera placement,
   continuity, effects, how much of the video shows the performers). For duets or groups, write
   rules that apply across the cast rather than locking every shot to a single character. Only
@@ -454,7 +467,11 @@ Rules:
   descriptions.
 - motion_prompt: in English, what happens in the clip: performance, body movement, and physical
   camera operation (describe handheld physics such as subtle operator breathing sway, small weight
-  shifts, and soft starts and stops rather than bare labels). Keep camera moves gentle and stable
+  shifts, and soft starts and stops rather than bare labels). Describe movement, acting/expression
+  changes, ambient motion, and camera motion ONLY—never re-describe locked wardrobe items,
+  permanent facial features, hair details, or static room/set decor already fixed in the first
+  frame (re-describing static details causes video models to drift off the starting still). Keep
+  camera moves gentle and stable
   on lipsync shots so the singing mouth stays clearly tracked. On 'broll' and 'performance' clips,
   keep motion physically steady—one continuous camera move plus smooth ambient or body motion—and
   avoid sudden violent impacts, collapses, or multi-stage chaotic events that trigger video-model
@@ -501,10 +518,15 @@ letters, digits, and underscores only.
   sections of the song it serves (sections), a concrete description of how it looks (naming one
   primary mid-depth focal object so the lens has a clear plane of focus), how light/atmosphere and
   the camera move there (movement), and an optional parent_set when a location is an altered
-  variant of an earlier set.
+  variant of an earlier set. Unless the style brief explicitly asks for sleek, pristine, or
+  futuristic looks, give environments subtle lived-in wear and patina (light scuffs, weathered
+  surfaces, natural imperfections) rather than brand-new CGI perfection.
 - props: 0 to 3 recurring hero objects central to the visual storytelling (e.g. a monolith, clock,
   prism, lantern). Each has id (short lowercase identifier), name, sections, and a concrete
   description with approximate scale, finish, and affirmative descriptions of visible structure.
+  Unless the style brief asks for sleek, pristine, or futuristic surfaces, include subtle
+  realistic patina and lived-in wear (faint scuffs, tarnished edges, natural handling wear) rather
+  than factory-fresh CGI sheen.
 - rules: 4 to 10 short actionable visual direction rules (camera language, physical camera
   placement, lighting evolution, motion rhythm, no people in frame)."""
 
@@ -538,9 +560,10 @@ Rules:
   evolve every 2 to 4 seconds (light shifting, particles, water, fog, shadows, camera glide).
 - still_prompt: in English, describes the first frame only—framing, camera placement, subject
   object/environment, lighting, and atmosphere (no people or faces).
-- motion_prompt: in English, describes what moves in the scene and how the camera moves. Every
-  shot MUST remain a single continuous take with no internal cuts and no subtitles or on-screen
-  text."""
+- motion_prompt: in English, describes ONLY what moves in the scene (light, weather, particles,
+  objects) and how the camera moves—never re-describe static architecture, set dressing, or
+  materials fixed in the first frame. Every shot MUST remain a single continuous take with no
+  internal cuts and no subtitles or on-screen text."""
 
 REWRITE_SYSTEM = """You fix prompts for an AI image or video model after a quality check
 rejected the result. Rewrite the prompt in English so the listed problems are less likely, keeping
@@ -555,6 +578,8 @@ the shot's intent, framing and setting.
   stubby-legged, stiffly pasted, or giant against buildings, specify natural full-length human
   proportions (~7.5 heads tall, normal leg-to-torso ratio), an organic in-scene pose, and concrete
   scale against doors, windows, or architecture.
+- When rewriting a video motion_prompt, keep it strictly about movement, acting, and camera
+  motion; strip any re-described locked wardrobe, facial features, or static room details.
 Return the new prompt only, in the 'prompt' field."""
 
 BRIEF_SYSTEM = """You are a music video writer and Suno song producer. Given a short video
@@ -721,15 +746,23 @@ PLATE_CAMERA_LIMITATIONS = (
     "off-focus surfaces resolve as soft shape and tone only. Subtle 35mm film grain and natural "
     "lens vignette."
 )
+_SUBTLE_PATINA_CUE = (
+    "Subtle realistic surface patina, light lived-in wear, and natural material texture."
+)
+_SLEEK_STYLE_RE = re.compile(
+    r"\b(?:sleek|futuristic|sci[\s-]?fi|pristine|sterile|brand[\s-]?new|mint[\s-]?condition|"
+    r"ultra[\s-]?clean|spotless|minimalist\s+chrome)\b",
+    re.IGNORECASE,
+)
 PLATE_TEMPLATE = (
     "A photograph of an empty location, completely empty of people. {description} "
-    f"{PLATE_CAMERA_LIMITATIONS} {{style}} "
+    f"{_SUBTLE_PATINA_CUE} {PLATE_CAMERA_LIMITATIONS} {{style}} "
     "No people, no figures, no faces, no readable text or logos."
 )
 PLATE_STYLE_TEMPLATE = (
     "Create a photograph of an empty location matching the visual style, color palette, and mood "
     "of the reference image, completely empty of people. {description} "
-    f"{PLATE_CAMERA_LIMITATIONS} {{style}} "
+    f"{_SUBTLE_PATINA_CUE} {PLATE_CAMERA_LIMITATIONS} {{style}} "
     "No people, no figures, no faces, no readable text or logos."
 )
 PLATE_EMBED_TEMPLATE = (
@@ -742,7 +775,7 @@ PLATE_EMBED_TEMPLATE = (
 PLATE_EDIT_TEMPLATE = (
     "Edit the existing empty location photograph ({source_name}) to depict '{target_name}', "
     "keeping no people and matching the camera perspective, architecture, and film stock where "
-    "unchanged. Required changes: {description} {style} "
+    f"unchanged. Required changes: {{description}} {_SUBTLE_PATINA_CUE} {{style}} "
     "No people, no figures, no faces, no readable text or logos."
 )
 PLATE_NEGATIVE = (
@@ -757,11 +790,11 @@ PROP_TEMPLATE = (
     "even, flat diffuse lighting. Left panel: the prop seen flat-on from the front, filling most "
     "of the panel. Right panel: the same prop tilted at a three-quarter angle showing thickness, "
     "edge profile and depth. Same object, same scale and lighting in both panels. {description} "
-    "{style} No people, no hands, no readable text, no logos."
+    f"{_SUBTLE_PATINA_CUE} {{style}} No people, no hands, no readable text, no logos."
 )
 PROP_NEGATIVE = (
     "people, hands, fingers, readable text, logos, watermarks, CGI, 3D render, video-game look, "
-    "mismatched proportions between panels, extra parts"
+    "glossy plastic sheen, mismatched proportions between panels, extra parts"
 )
 # Added to a still prompt when a set plate is supplied as a second reference image.
 PLATE_NOTE = (
@@ -1075,15 +1108,134 @@ def reference_video_prompt(
     return " ".join(parts)
 
 
+_EXCLUSIONS_HEADER_RE = re.compile(
+    r"^\s*(?:\*{0,2})(?:exclusions?|do\s+not\s+show|never\s+show)(?:\*{0,2})\s*:(?:\*{0,2})(.*)$",
+    re.IGNORECASE,
+)
+_GENERIC_SECTION_HEADER_RE = re.compile(
+    r"^\s*(?:\*{0,2})[A-Za-z][A-Za-z0-9 _-]{1,40}(?:\*{0,2})\s*:(?:\*{0,2})"
+)
+_BULLET_LINE_RE = re.compile(r"^\s*(?:[-•]\s*|\*\s+)(.+)$")
+_EXCLUSION_PREFIX_RE = re.compile(
+    r"^(?:never\s+show|do\s+not\s+show|don't\s+show|do\s+not\s+include|never\s+include|"
+    r"avoid\s+showing|avoid|no|without)\s+",
+    re.IGNORECASE,
+)
+
+
+def parse_exclusions_from_style(style_text: str) -> list[str]:
+    """Extract global exclusions from ``Exclusions:`` / ``Do not show:`` / ``Never show:``."""
+    if not style_text:
+        return []
+    collected: list[str] = []
+    in_section = False
+    for raw_line in style_text.splitlines():
+        header_match = _EXCLUSIONS_HEADER_RE.match(raw_line)
+        if header_match is not None:
+            in_section = True
+            tail = header_match.group(1).strip()
+            if tail:
+                collected.extend(re.split(r"[,;]+", tail))
+            continue
+        if not in_section:
+            continue
+        stripped = raw_line.strip()
+        if not stripped:
+            in_section = False
+            continue
+        if _GENERIC_SECTION_HEADER_RE.match(raw_line):
+            in_section = False
+            continue
+        bullet_match = _BULLET_LINE_RE.match(raw_line)
+        if bullet_match is not None:
+            collected.append(bullet_match.group(1))
+            continue
+        in_section = False
+    return normalize_exclusions(collected)
+
+
+def exclusion_core(item: str) -> str:
+    """Strip leading imperative/negation prefixes ('never show X' -> 'X')."""
+    cleaned = " ".join(item.split()).strip(" .;,")
+    stripped = _EXCLUSION_PREFIX_RE.sub("", cleaned).strip(" .;,")
+    return stripped or cleaned
+
+
+def exclusion_to_rule(item: str) -> str:
+    """Convert an exclusion phrase into an affirmative shot-director rule."""
+    core = exclusion_core(item)
+    return (
+        f"Never show {core} in any shot; stage and describe visible elements affirmatively "
+        "without it."
+    )
+
+
+def merge_negative_prompt(base_negative: str, exclusions: Sequence[str]) -> str:
+    """Merge ``exclusions`` into ``base_negative`` without case-insensitive duplicates."""
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for part in base_negative.split(","):
+        cleaned = " ".join(part.split())
+        if not cleaned:
+            continue
+        key = cleaned.casefold()
+        if key not in seen:
+            seen.add(key)
+            tokens.append(cleaned)
+    for item in normalize_exclusions(list(exclusions)):
+        core = exclusion_core(item)
+        key = core.casefold()
+        if key and key not in seen:
+            seen.add(key)
+            tokens.append(core)
+    return ", ".join(tokens)
+
+
+def sync_bible_exclusions(
+    bible: VisualBible, extra_exclusions: Sequence[str] = ()
+) -> VisualBible:
+    """Synchronize ``bible.exclusions`` into both ``bible.rules`` and ``bible.negative_prompt``."""
+    merged = normalize_exclusions([*bible.exclusions, *extra_exclusions])
+    bible.exclusions = merged
+    if not merged:
+        return bible
+    bible.negative_prompt = merge_negative_prompt(bible.negative_prompt, merged)
+    existing_rules = [r.strip() for r in bible.rules if r and r.strip()]
+    existing_cf = [r.casefold() for r in existing_rules]
+    for item in merged:
+        rule = exclusion_to_rule(item)
+        rule_cf = rule.casefold()
+        core_cf = exclusion_core(item).casefold()
+        already_covered = any(
+            r_cf == rule_cf
+            or f"never show {core_cf}" in r_cf
+            or f"do not show {core_cf}" in r_cf
+            for r_cf in existing_cf
+        )
+        if not already_covered:
+            existing_rules.append(rule)
+            existing_cf.append(rule_cf)
+    bible.rules = existing_rules
+    return bible
+
+
+def _apply_patina_policy(prompt: str, bible: VisualBible) -> str:
+    """Suppress default patina cues when the visual bible asks for sleek/futuristic looks."""
+    if _SLEEK_STYLE_RE.search(f"{bible.style} {bible.concept}"):
+        prompt = prompt.replace(_SUBTLE_PATINA_CUE, "")
+    return re.sub(r"\s{2,}", " ", prompt).strip()
+
+
 def _format_plate_prompt(manifest: Manifest, set_name: str, template: str, **extra: str) -> str:
     bible = manifest.visual_bible
     scene = bible.find_set(set_name)
-    return template.format(
+    formatted = template.format(
         target_name=scene.name if scene else set_name,
         description=scene.description if scene else set_name,
         style=_style_line(bible.style, bible.palette, bible.lighting),
         **extra,
-    ).replace("  ", " ")
+    )
+    return _apply_patina_policy(formatted, bible)
 
 
 def plate_prompt(manifest: Manifest, set_name: str) -> str:
@@ -1108,10 +1260,11 @@ def prop_prompt(manifest: Manifest, prop_query: str) -> str:
     description = (
         prop.description if prop and prop.description else (prop.name if prop else prop_query)
     )
-    return PROP_TEMPLATE.format(
+    formatted = PROP_TEMPLATE.format(
         description=description,
         style=_style_line(bible.style, bible.palette, bible.lighting),
-    ).replace("  ", " ")
+    )
+    return _apply_patina_policy(formatted, bible)
 
 
 def join_names(names: Sequence[str]) -> str:

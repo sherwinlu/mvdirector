@@ -287,3 +287,33 @@ def test_comfy_subfolder_is_portable_across_host_paths(tmp_path: Path) -> None:
     proj_2.mkdir(parents=True)
     (proj_2 / CONFIG_FILENAME).write_text("title: Song\n", encoding="utf-8")
     assert Project.open(proj_2).comfy_subfolder != sub_1
+
+
+def test_exclusions_and_do_not_show_alias_preserve_strict_forbid(tmp_path: Path) -> None:
+    from pydantic import ValidationError
+
+    from mvdirector.config import InputsConfig
+    from mvdirector.models import VisualBible
+
+    cfg_yaml = tmp_path / "project.yaml"
+    cfg_yaml.write_text(
+        "title: Legacy Song\ninputs:\n  do_not_show:\n    - ghost face\n    - Ghost Face\n"
+        "    - red balloons\n",
+        encoding="utf-8",
+    )
+    loaded = load_config(cfg_yaml)
+    assert loaded.inputs.exclusions == ["ghost face", "red balloons"]
+
+    merged = InputsConfig(
+        exclusions=["skulls"],
+        do_not_show="red balloons; skulls, smoke",  # type: ignore[call-arg]
+    )
+    assert merged.exclusions == ["skulls", "red balloons", "smoke"]
+
+    bible = VisualBible(do_not_show=["the ghost's face", "  the   ghost's face "])  # type: ignore[call-arg]
+    assert bible.exclusions == ["the ghost's face"]
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        InputsConfig(unknown_extra_field="nope")  # type: ignore[call-arg]
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        VisualBible(unknown_extra_field="nope")  # type: ignore[call-arg]

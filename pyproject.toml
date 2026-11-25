@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mvdirector"
-version = "0.8.0b1"
+version = "0.8.0b2"
 description = "Manifest-driven pipeline that plans, generates, quality-checks and assembles lip-synced music videos with ComfyUI."
 readme = "README.md"
 license = { file = "LICENSE" }

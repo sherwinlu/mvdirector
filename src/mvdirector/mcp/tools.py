@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from mvdirector import api
+from mvdirector.assemble import MAX_OUTPUT_DIMENSION
 from mvdirector.comfy.provider import ComfyEndpointProvider
 from mvdirector.config import ReviewMode
 from mvdirector.errors import ConfigError, MVDError
@@ -836,8 +837,8 @@ def build_tool_registry(
         shots = _opt_str_list(args, "shots")
         force = _opt_bool(args, "force", False)
         overwrite = _opt_bool(args, "overwrite", False)
-        width = _opt_int(args, "width", minimum=64)
-        height = _opt_int(args, "height", minimum=64)
+        width = _opt_int(args, "width", minimum=64, maximum=MAX_OUTPUT_DIMENSION)
+        height = _opt_int(args, "height", minimum=64, maximum=MAX_OUTPUT_DIMENSION)
         background = _opt_bool(args, "background", True)
 
         def _work(ctx: JobContext | None) -> dict[str, Any]:
@@ -887,8 +888,8 @@ def build_tool_registry(
         force = _opt_bool(args, "force", False)
         review_mode = _opt_enum(args, "review_mode", ReviewMode)
         draft = _opt_bool(args, "draft", False)
-        width = _opt_int(args, "width", minimum=64)
-        height = _opt_int(args, "height", minimum=64)
+        width = _opt_int(args, "width", minimum=64, maximum=MAX_OUTPUT_DIMENSION)
+        height = _opt_int(args, "height", minimum=64, maximum=MAX_OUTPUT_DIMENSION)
         chapters = _opt_str_list(args, "chapters")
         rebuild_cache = _opt_bool(args, "rebuild_cache", False)
         background = _opt_bool(args, "background", True)
@@ -1330,8 +1331,8 @@ def build_tool_registry(
                     "shots": {"type": "array", "items": {"type": "string"}},
                     "force": {"type": "boolean", "default": False},
                     "overwrite": {"type": "boolean", "default": False},
-                    "width": {"type": "integer", "minimum": 64},
-                    "height": {"type": "integer", "minimum": 64},
+                    "width": {"type": "integer", "minimum": 64, "maximum": MAX_OUTPUT_DIMENSION},
+                    "height": {"type": "integer", "minimum": 64, "maximum": MAX_OUTPUT_DIMENSION},
                     "background": _background_prop(True),
                 }
             ),
@@ -1384,8 +1385,8 @@ def build_tool_registry(
                         "enum": [m.value for m in ReviewMode],
                     },
                     "draft": {"type": "boolean", "default": False},
-                    "width": {"type": "integer", "minimum": 64},
-                    "height": {"type": "integer", "minimum": 64},
+                    "width": {"type": "integer", "minimum": 64, "maximum": MAX_OUTPUT_DIMENSION},
+                    "height": {"type": "integer", "minimum": 64, "maximum": MAX_OUTPUT_DIMENSION},
                     "chapters": {"type": "array", "items": {"type": "string"}},
                     "rebuild_cache": {"type": "boolean", "default": False},
                     "background": _background_prop(True),

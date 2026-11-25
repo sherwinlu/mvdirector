@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import sys
 import unicodedata
@@ -262,8 +263,27 @@ def init_project(directory: Path, *, mode: ProjectMode = ProjectMode.STANDARD) -
     if (directory / CONFIG_FILENAME).exists():
         raise MVDError(f"{directory} already contains {CONFIG_FILENAME}")
     template_root = resources.files("mvdirector") / "templates"
+    kept: list[str] = []
+
+    def _copy_unless_present(src: str, dst: str) -> str:
+        # People often run `mvd init` inside the folder that already holds their song, so a file
+        # they made (inputs/lyrics.txt, style.md, a tuned *.bindings.json) always wins over the
+        # placeholder template instead of being silently overwritten.
+        if os.path.lexists(dst):
+            kept.append(os.path.relpath(dst, directory))
+            return dst
+        return shutil.copy2(src, dst)
+
     with resources.as_file(template_root) as source:
-        shutil.copytree(source, directory, dirs_exist_ok=True, ignore=_ignore_junk_files)
+        shutil.copytree(
+            source,
+            directory,
+            dirs_exist_ok=True,
+            ignore=_ignore_junk_files,
+            copy_function=_copy_unless_present,
+        )
+    if kept:
+        log.info("Kept existing file(s) instead of the starter template: %s", ", ".join(kept))
     for folder in ("inputs", "assets", "output"):
         (directory / folder).mkdir(exist_ok=True)
     if mode is ProjectMode.MIX:
@@ -273,9 +293,10 @@ def init_project(directory: Path, *, mode: ProjectMode = ProjectMode.STANDARD) -
         cfg_text = cfg_text.replace("tracklist: null", "tracklist: inputs/tracklist.json", 1)
         cfg_file.write_text(cfg_text, encoding="utf-8")
         tracklist_file = directory / "inputs" / "tracklist.json"
-        tracklist_file.write_text(
-            json.dumps(_STARTER_MIX_TRACKLIST, indent=2) + "\n", encoding="utf-8"
-        )
+        if not os.path.lexists(tracklist_file):
+            tracklist_file.write_text(
+                json.dumps(_STARTER_MIX_TRACKLIST, indent=2) + "\n", encoding="utf-8"
+            )
     return directory
 
 
@@ -889,11 +910,27 @@ class GenerateResult:
     budget_message: str | None = None
 
 
+def _require_known_shots(manifest: Manifest, shots: Sequence[str]) -> None:
+    """Fail on shot ids the manifest does not have instead of silently doing nothing.
+
+    A mistyped ``--shot s01`` (for ``s001``) used to filter the run down to zero shots and exit
+    successfully, which reads as "done" while no work was attempted.
+    """
+    known = {shot.id for shot in manifest.shots}
+    unknown = [sid for sid in dict.fromkeys(shots) if sid not in known]
+    if unknown:
+        listed = ", ".join(repr(sid) for sid in unknown[:10])
+        more = f" (and {len(unknown) - 10} more)" if len(unknown) > 10 else ""
+        raise MVDError(f"No shot with id {listed}{more} in the manifest.")
+
+
 def _resolve_target_shots(
     manifest: Manifest,
     shots: list[str] | None,
     chapters: list[str] | None,
 ) -> list[str] | None:
+    if shots is not None:
+        _require_known_shots(manifest, shots)
     if chapters is None:
         return list(shots) if shots is not None else None
     if manifest.mode is not ProjectMode.MIX:
@@ -1084,6 +1121,8 @@ def upscale(
         _lease(project, comfy_provider) as comfy,
     ):
         manifest = project.load_manifest()
+        if shots is not None:
+            _require_known_shots(manifest, shots)
         comfy.ping()
         return upscale_mod.upscale_videos(
             project,
@@ -1187,6 +1226,55 @@ def _safe_title(title: str) -> str:
     return "".join(chars).strip("_")[:120].strip("_") or "video"
 
 
+# The muxer always writes an MP4/QuickTime container, so only those names are accepted.
+_ASSEMBLE_OUTPUT_SUFFIXES = frozenset({".mp4", ".m4v", ".mov"})
+
+
+def _enclosing_project_root(path: Path) -> Path | None:
+    """The nearest ancestor of ``path`` holding a ``project.yaml``, if any."""
+    for parent in path.parents:
+        if path_is_file(parent / CONFIG_FILENAME):
+            return parent
+    return None
+
+
+def _validate_assemble_output(project: Project, target: Path) -> Path:
+    """Reject an output that would clobber project state, inputs, or generated clips.
+
+    The final mux is renamed over ``target`` and its temp file is created in ``target.parent``,
+    so an unchecked ``-o manifest.json`` / ``inputs/mix.wav`` replaced that file with MP4 bytes,
+    and an existing directory only failed (as an unhandled IsADirectoryError) after the whole
+    render had run. Inside any mvdirector project only files under its ``output/`` folder may be
+    overwritten; anywhere else a new or existing ``.mp4``/``.m4v``/``.mov`` file is fine.
+    """
+    try:
+        resolved = target.expanduser().resolve()
+    except (OSError, RuntimeError) as exc:
+        raise ConfigError(f"Invalid output path '{target}': {exc}") from exc
+    if resolved.suffix.lower() not in _ASSEMBLE_OUTPUT_SUFFIXES:
+        allowed = ", ".join(sorted(_ASSEMBLE_OUTPUT_SUFFIXES))
+        raise ConfigError(f"Output '{target}' must be a video file ending in one of: {allowed}.")
+    try:
+        is_dir = resolved.is_dir()
+        exists = resolved.exists()
+    except OSError as exc:
+        raise ConfigError(f"Invalid output path '{target}': {exc}") from exc
+    if is_dir:
+        raise ConfigError(f"Output '{target}' is a directory; pass a file name such as video.mp4.")
+    if exists:
+        owner = (
+            project.root
+            if resolved.is_relative_to(project.root)
+            else _enclosing_project_root(resolved)
+        )
+        if owner is not None and not resolved.is_relative_to(owner / "output"):
+            raise ConfigError(
+                f"Refusing to overwrite existing project file '{resolved}'. Write the final cut "
+                f"into {owner / 'output'} or choose a new file name."
+            )
+    return resolved
+
+
 def assemble(
     project_dir: ProjectRef,
     output: Path | None = None,
@@ -1204,7 +1292,9 @@ def assemble(
     manifest = project.load_manifest()
     safe_title = _safe_title(manifest.title)
     suffix = "_draft" if (force or draft) else ""
-    target = output or project.output_dir / f"{safe_title}{suffix}.mp4"
+    target = _validate_assemble_output(
+        project, output or project.output_dir / f"{safe_title}{suffix}.mp4"
+    )
     if manifest.mode is ProjectMode.MIX:
         result = mix_assemble.assemble_mix(
             project,

@@ -35,6 +35,9 @@ log = logging.getLogger(__name__)
 
 # Square or CJK lenticular brackets mark a section. Parenthesised lines are sung adlibs.
 _SECTION_TAG = re.compile(r"^\s*(?:\[([^\]]+)\]|［([^］]+)］|【([^】]+)】)\s*$")
+_INLINE_CUE_TAG = re.compile(r"^\s*(?:\[([^\]]+)\]|［([^］]+)］|【([^】]+)】)\s+(.+)$")
+_ROMANIZATION_PAREN = re.compile(r"\(([A-Za-z'’\s-]+)\)")
+_HYPHENATED_TOKEN = re.compile(r"[A-Za-z]+-[A-Za-z]+")
 _BIDI_AND_BOM = (
     "\ufeff\u200b\u200c\u200d\u200e\u200f\u061c"
     "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
@@ -335,9 +338,9 @@ def _voice_tag_map(turns: list[VocalTurn] | None) -> dict[str, str]:
     if not turns:
         return {}
     voices = list(dict.fromkeys(t.voice for t in turns))
-    if len(voices) < 2 and BOTH_VOICES not in voices:
-        return {}
     solo_voices = [v for v in voices if v != BOTH_VOICES]
+    if len(solo_voices) < 2:
+        return {}
     mapping = {voice: f"Singer {idx}" for idx, voice in enumerate(solo_voices, start=1)}
     if BOTH_VOICES in voices:
         mapping[BOTH_VOICES] = "Both"
@@ -635,6 +638,9 @@ _ENSEMBLE_SECTION_WORDS = frozenset(
         "insieme",
         "together",
         "all",
+        "all voices",
+        "all vocals",
+        "all singers",
         "todos",
         "everyone",
         "choir",
@@ -939,6 +945,16 @@ def singers_in_cue(
             role = words[0] if words[0] in _ENGLISH_NUMBERED_DESIGNATORS else "singer"
             singers.add(f"{role} {words[1]}")
             continue
+        if (
+            len(words) == 3
+            and words[0] in _DESIGNATOR_WORDS
+            and words[1] in _NUMBERED_DESIGNATORS
+            and (words[2].isdigit() or (len(words[2]) == 1 and words[2].isalpha()))
+        ):
+            gender = _canonical_designator([words[0]])
+            role = words[1] if words[1] in _ENGLISH_NUMBERED_DESIGNATORS else "singer"
+            singers.add(f"{gender} {role} {words[2]}")
+            continue
         core = [_strip_section_affixes(w) for w in words]
         core = [w for w in core if w]
         if not core:
@@ -1015,10 +1031,182 @@ def labels_have_multiple_singers(labels: Iterable[str | None]) -> bool:
     return len(singers) >= 2
 
 
+_SECTION_MODIFIER_WORDS = frozenset(
+    {"final", "main", "big", "first", "second", "third", "last", "soft", "quiet", "loud", "double"}
+)
+_ARRANGEMENT_NOTE_WORDS = _NON_SINGER_CUE_WORDS | frozenset(
+    {
+        "bpm",
+        "bassline",
+        "sidechain",
+        "reverb",
+        "echo",
+        "melody",
+        "ambience",
+        "progression",
+        "instrumentation",
+        "pitch",
+        "roll",
+        "accelerating",
+        "pluck",
+        "trance",
+        "festival",
+        "euphoric",
+        "soaring",
+        "pulsing",
+        "breathing",
+        "drops",
+        "fades",
+        "opens",
+        "wider",
+        "peak",
+        "power",
+        "emotional",
+        "massive",
+        "ethereal",
+        "uplifting",
+    }
+)
+
+
+def _cue_head_words(tag: str) -> list[str]:
+    """Casefolded words of ``tag`` before any ``:`` or dash qualifier."""
+    norm = unicodedata.normalize("NFKC", tag).translate(_HYPHEN_TRANS)
+    head = norm.split(":", 1)[0]
+    head = _DASH_SPLIT.split(head, maxsplit=1)[0]
+    words = [re.sub(r"^[^\w]+|[^\w]+$", "", w.casefold()) for w in head.split()]
+    return [w for w in words if w]
+
+
+# Words ``_STRUCTURAL_SECTION_WORDS`` accepts that describe delivery rather than a song part.
+# Inline before a sung line ("[whispered] ...", "[soft vocals] ...") they must not open a section.
+_DELIVERY_CUE_WORDS = frozenset(
+    {
+        "whisper",
+        "whispered",
+        "spoken",
+        "hablado",
+        "parle",
+        "scream",
+        "soft",
+        "softly",
+        "gently",
+        "quiet",
+        "loud",
+        "calm",
+        "heavy",
+        "intense",
+        "emotional",
+        "fast",
+        "slow",
+        "high",
+        "low",
+        "melodic",
+        "melody",
+        "acapella",
+        "capella",
+        "acoustic",
+        "stripped",
+        "vocal",
+        "vocals",
+        "vox",
+        "backing",
+        "backup",
+        "lead",
+        "again",
+        "repeat",
+        "repeated",
+        "adlib",
+        "adlibs",
+        "ad-lib",
+        "ad-libs",
+        "in",
+        "out",
+        "up",
+        "down",
+    }
+)
+
+
+def _names_a_section(words: list[str]) -> bool:
+    """True when a cue starts like a song section (``Verse 2``, ``Final Chorus``)."""
+    if not words:
+        return False
+    if _is_word_structural(words[0]):
+        return True
+    return words[0] in _SECTION_MODIFIER_WORDS and len(words) >= 2 and _is_word_structural(words[1])
+
+
+def _opens_section(cue: str) -> bool:
+    """True when an inline cue names a song part (``Verse 2``, ``Whispered Bridge``).
+
+    Leading modifiers and delivery words are skipped; the next word must be a structural word
+    that is not itself only a delivery cue, so ``[whispered] line`` keeps the current section.
+    """
+    for word in _cue_head_words(cue):
+        core = _strip_section_affixes(word)
+        if core in _DELIVERY_CUE_WORDS or core in _SECTION_MODIFIER_WORDS:
+            continue
+        return _is_word_structural(word)
+    return False
+
+
+def _is_arrangement_note(tag: str) -> bool:
+    """True for Suno arrangement/production cues (e.g. '[Kick drops out]') under a header."""
+    if section_singers(tag) != set():
+        return False
+    words = _cue_head_words(tag)
+    if _names_a_section(words):
+        return False
+    return len(words) >= 2 and any(w in _ARRANGEMENT_NOTE_WORDS for w in words)
+
+
+def strip_romanization_guides(text: str) -> str:
+    """Drop parenthetical hyphenated Latin pronunciation guides on lines with non-Latin script."""
+    if not any(is_syllabic_char(ch) or ord(ch) > 0x024F for ch in text):
+        return text
+
+    def _replace(match: re.Match[str]) -> str:
+        inner = match.group(1).strip()
+        return "" if _HYPHENATED_TOKEN.search(inner) else match.group(0)
+
+    return _ROMANIZATION_PAREN.sub(_replace, text)
+
+
+_PRODUCTION_PAREN_TOKEN_RE = re.compile(
+    r"\b(?:tempo|bpm|piano|drum|drums|snare|kick|bass|sub-bass|synth|strings|cello|violin|"
+    r"violins|guitar|percussion|arpeggio|sidechain|sidechained|crescendo|decelerando|reverb|"
+    r"instrumental|vocals?|beat|beats|drop|groove|harmonies|whispery|whispered|soaring|belted|"
+    r"fades?|sparse|bars|stereo|toms|pad|pads|delivery|swell|swells|stripped|acoustic|electric|"
+    r"chop|chops|breathy|rhythmic|wordless|pitched|noise|filtered)\b",
+    re.IGNORECASE,
+)
+
+
+def _strip_production_parens(text: str) -> str:
+    """Strip parenthetical Suno stage/arrangement directions while keeping sung adlibs."""
+
+    def _replace(match: re.Match[str]) -> str:
+        inner = match.group(1).strip()
+        if re.match(r"^(?:tempo|instrumental)\b", inner, re.IGNORECASE):
+            return ""
+        if len(set(t.lower() for t in _PRODUCTION_PAREN_TOKEN_RE.findall(inner))) >= 2:
+            return ""
+        return match.group(0)
+
+    cleaned = re.sub(r"\*?\(([^()]+)\)\*?", _replace, text)
+    return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+
 def parse_lyrics(text: str) -> list[LyricLine]:
     """Split lyrics into lines, turning ``[Chorus]``-style tags into section labels.
 
-    Lines in parentheses are kept as lyrics (adlibs are sung and need timing too).
+    Lines in parentheses are kept as lyrics (adlibs are sung and need timing too), while
+    parenthetical Suno production/arrangement directions (e.g. ``(Strings swell, slow beat)``)
+    are stripped. Inline leading cues are stripped from the sung text: singer cues such as
+    ``[female voice 1] line`` are attached to the active section label, section names such as
+    ``[Verse 1] line`` start a new section, and delivery cues such as ``[whispered] line`` leave
+    the section unchanged.
     """
     lines: list[LyricLine] = []
     section: str | None = None
@@ -1032,9 +1220,34 @@ def parse_lyrics(text: str) -> list[LyricLine]:
         tag = _SECTION_TAG.match(cleaned_tag_line)
         if tag:
             matched = next((g for g in tag.groups() if g is not None), "")
-            section = matched.strip().strip(_BIDI_AND_BOM).strip() or None
+            candidate = matched.strip().strip(_BIDI_AND_BOM).strip() or None
+            if candidate is not None and not (
+                section is not None and _is_arrangement_note(candidate)
+            ):
+                section = candidate
             continue
-        lines.append(LyricLine(text=stripped.strip("\ufeff"), section=section))
+        line_section = section
+        line_text = stripped.strip("\ufeff")
+        inline = _INLINE_CUE_TAG.match(cleaned_tag_line)
+        if inline:
+            cue = next((g for g in inline.groups()[:3] if g is not None), "")
+            cue = cue.strip().strip(_BIDI_AND_BOM).strip()
+            rest = inline.group(4).strip()
+            if cue and rest:
+                line_text = rest
+                if _opens_section(cue):  # "[Verse 2] ..." or "[Verse 2: Singer 1] ..."
+                    section = cue
+                    line_section = cue
+                elif section_singers(cue) != set():
+                    # Swap any singer qualifier on the header ("Verse 1: Singer 1") for this one.
+                    base = section.split(":", 1)[0].strip() if section else ""
+                    line_section = f"{base}: {cue}" if base else cue
+                # Otherwise a delivery/production cue ("[whispered] ...", "[laughs] ..."):
+                # drop it from the sung text without renaming the surrounding section.
+        line_text = _strip_production_parens(line_text)
+        if not line_text or re.fullmatch(r"[\W_]+", line_text):
+            continue
+        lines.append(LyricLine(text=line_text, section=line_section))
     return lines
 
 
@@ -1060,7 +1273,8 @@ def is_syllabic_char(ch: str) -> bool:
 
 def tokenize(text: str) -> list[str]:
     """Split lyric or transcript text into normalized tokens across any Unicode script."""
-    norm = unicodedata.normalize("NFKC", text).translate(_IGNORED_TOKEN_CHARS).casefold()
+    cleaned = strip_romanization_guides(text)
+    norm = unicodedata.normalize("NFKC", cleaned).translate(_IGNORED_TOKEN_CHARS).casefold()
     tokens: list[str] = []
     buf: list[str] = []
 

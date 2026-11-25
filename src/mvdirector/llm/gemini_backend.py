@@ -16,6 +16,27 @@ from mvdirector.llm.base import ChatBackend, Message, Reply, blocks_of, has_imag
 from mvdirector.llm.http import IMAGE_WORDS, HttpJSON, check_response, json_body
 
 _BLOCKED = {"SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY"}
+_THINKING_RETRY_BUDGET = 1024
+
+
+def _is_thinking_config_error(text: str) -> bool:
+    lowered = text.lower()
+    return (
+        "thinking" in lowered or "thinkingconfig" in lowered or "thinkingbudget" in lowered
+    ) and (
+        "unknown" in lowered
+        or "invalid" in lowered
+        or "unsupported" in lowered
+        or "not support" in lowered
+    )
+
+
+def _thoughts_token_count(data: dict[str, Any]) -> int:
+    usage = data.get("usageMetadata")
+    if not isinstance(usage, dict):
+        return 0
+    raw = usage.get("thoughtsTokenCount")
+    return int(raw) if isinstance(raw, int) and raw > 0 else 0
 
 
 class GeminiChat(ChatBackend):
@@ -90,7 +111,30 @@ class GeminiChat(ChatBackend):
             had_images=images,
             not_found_hint="Check llm.model, for example gemini-... as listed in Google AI Studio.",
         )
-        return self._parse(json_body(response, "Gemini"))
+        data = json_body(response, "Gemini")
+        reply = self._parse(data)
+        if reply.truncated and _thoughts_token_count(data) > 0:
+            retry_config = {**config, "thinkingConfig": {"thinkingBudget": _THINKING_RETRY_BUDGET}}
+            retry_payload = {**payload, "generationConfig": retry_config}
+            retry_response = self._http.post(
+                self._url,
+                retry_payload,
+                unreachable_hint="Check your network connection.",
+                no_retry_words=IMAGE_WORDS if images else (),
+            )
+            if retry_response.status_code == 400 and _is_thinking_config_error(retry_response.text):
+                return reply
+            check_response(
+                retry_response,
+                provider="Gemini",
+                key_hint=self._key_hint,
+                had_images=images,
+                not_found_hint=(
+                    "Check llm.model, for example gemini-... as listed in Google AI Studio."
+                ),
+            )
+            return self._parse(json_body(retry_response, "Gemini"))
+        return reply
 
     @staticmethod
     def _parse(data: dict[str, Any]) -> Reply:

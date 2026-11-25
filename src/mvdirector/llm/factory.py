@@ -10,7 +10,6 @@ import logging
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from urllib.parse import urlsplit
 
 import httpx
 
@@ -19,7 +18,7 @@ from mvdirector.errors import ConfigError
 from mvdirector.llm.anthropic_backend import AnthropicChat
 from mvdirector.llm.base import LLMClient
 from mvdirector.llm.gemini_backend import GeminiChat
-from mvdirector.llm.http import HttpJSON, redact_url
+from mvdirector.llm.http import HttpJSON, redact_url, validate_http_base_url
 from mvdirector.llm.ollama_backend import OllamaChat
 from mvdirector.llm.openai_backend import OpenAIChat
 
@@ -66,21 +65,7 @@ def _api_key(
 
 
 def _validate_base_url(url: str) -> str:
-    if any(ord(ch) < 32 or ord(ch) == 127 or ch.isspace() for ch in url):
-        raise ConfigError("llm.base_url must not contain whitespace or control characters.")
-    try:
-        parts = urlsplit(url)
-        _ = parts.port
-    except ValueError as exc:
-        raise ConfigError(f"Invalid llm.base_url: {exc}") from exc
-    if parts.scheme not in ("http", "https") or not parts.hostname:
-        raise ConfigError(
-            "llm.base_url must be an http:// or https:// URL with a valid host "
-            f"(got {redact_url(url)!r})."
-        )
-    if parts.query or parts.fragment:
-        raise ConfigError("llm.base_url must not include query parameters or fragments.")
-    return url
+    return validate_http_base_url(url, field_name="llm.base_url")
 
 
 def _normalize_base_url(

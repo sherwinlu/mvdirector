@@ -346,7 +346,9 @@ def detect_languages(
     """Return ``(iso_languages, is_multilingual)`` from lyrics, style cues, and transcript hints."""
     pos_style = strip_negative_style_tags(style_text)
     section_headers = " | ".join(lyrics_mod.extract_section_tags(lyrics_text))
-    sung_lines = [ln.text for ln in lyrics_mod.parse_lyrics(lyrics_text)]
+    sung_lines = [
+        lyrics_mod.strip_romanization_guides(ln.text) for ln in lyrics_mod.parse_lyrics(lyrics_text)
+    ]
     sung_text = "\n".join(sung_lines)
 
     langs: list[str] = []
@@ -488,14 +490,41 @@ def _measure_intensity_and_drops(analysis: Analysis | None) -> tuple[float | Non
     return contrast, has_drops
 
 
+_VISUAL_SECTION_RE = re.compile(
+    r"(?im)^\s*(?:\*{0,2})visual\s+(?:direction|context|brief|notes?)(?:\*{0,2})\s*:"
+)
+# Voice-range words also name instruments ("tenor sax", "baritone guitar"); not vocal cues.
+_NOT_AN_INSTRUMENT = (
+    r"(?![\s-]*(?:sax(?:ophone)?s?|guitars?|ukuleles?|ukes?|banjos?|horns?|trombones?|"
+    r"recorders?|clarinets?|flutes?|drums?|violins?)\b)"
+)
+_EXPLICIT_MALE_VOCAL_RE = re.compile(
+    r"\b(?:male\s+(?:lead\s+)?vocals?|male\s+singer|bass\s+vocal|"
+    rf"(?:baritone|tenor)\b{_NOT_AN_INSTRUMENT})",
+    re.IGNORECASE,
+)
+_EXPLICIT_FEMALE_VOCAL_RE = re.compile(
+    r"\b(?:female\s+(?:lead\s+)?vocals?|female\s+singer|alto\s+vocal|"
+    rf"(?:soprano|mezzo|contralto)\b{_NOT_AN_INSTRUMENT})",
+    re.IGNORECASE,
+)
+
+
+def _musical_style_portion(style_text: str) -> str:
+    """Return only the musical/style portion of ``style.md`` before any Visual direction section."""
+    m = _VISUAL_SECTION_RE.search(style_text)
+    return style_text[: m.start()].strip() if m else style_text
+
+
 def _detect_vocal_mode(
     pos_style: str,
     section_tags: list[str],
     sung_line_count: int,
     analysis: Analysis | None,
 ) -> tuple[VocalMode, str | None]:
-    combined_cues = f"{pos_style}\n" + " | ".join(section_tags)
-    if _INSTRUMENTAL_STYLE_RE.search(pos_style):
+    music_style = _musical_style_portion(pos_style)
+    combined_cues = f"{music_style}\n" + " | ".join(section_tags)
+    if _INSTRUMENTAL_STYLE_RE.search(music_style):
         return "instrumental", "style prompt marks track as instrumental"
     if (
         section_tags
@@ -534,6 +563,14 @@ def _detect_vocal_mode(
         return "group", f"{len(named_singers)} distinct singers named in section tags"
     if _DUET_CUE_RE.search(combined_cues) or len(named_singers) == 2 or has_ensemble_tag:
         return "duet", "two-singer / duet cues detected in style or section tags"
+
+    # If the musical style brief explicitly names a single vocal gender (and not both, and no
+    # duet/group cues matched above), respect it instead of letting chest-to-belt acoustic pitch
+    # shifts hallucinate a second vocalist.
+    has_male = bool(_EXPLICIT_MALE_VOCAL_RE.search(music_style))
+    has_female = bool(_EXPLICIT_FEMALE_VOCAL_RE.search(music_style))
+    if has_male ^ has_female:
+        return "solo", None
 
     if analysis is not None and analysis.vocal_turns:
         dur_by_voice: dict[str, float] = {}

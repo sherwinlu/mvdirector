@@ -11,6 +11,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from mvdirector.assemble import validate_override_size
 from mvdirector.comfy.client import ComfyClient
 from mvdirector.comfy.workflow import WorkflowTemplate
 from mvdirector.errors import ConfigError
@@ -41,12 +42,8 @@ def upscale_videos(
     """
     if (width is None) != (height is None):
         raise ConfigError("Set both width and height together when overriding upscale size.")
-    if (
-        width is not None
-        and height is not None
-        and (width < 64 or height < 64 or width % 2 or height % 2)
-    ):
-        raise ConfigError(f"Upscale dimensions must be even integers >= 64, got {width}x{height}.")
+    if width is not None and height is not None:
+        validate_override_size(width, height, "Upscale")
 
     review_policy.refresh_reviews(manifest, project.config)
     video = project.config.video

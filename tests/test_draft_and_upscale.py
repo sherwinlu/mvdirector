@@ -312,13 +312,13 @@ def test_draft_assemble_and_target_resolution_upscale(
         mvd_api.assemble(project, width=1920)
     with pytest.raises(ConfigError):
         mvd_api.assemble(project, width=32, height=32)
-    with pytest.raises(ConfigError, match="even integers >= 64"):
+    with pytest.raises(ConfigError, match="even integers between 64 and 8192"):
         mvd_api.assemble(project, width=641, height=361)
     with pytest.raises(ConfigError):
         upscale.upscale_videos(project, manifest, comfy, tpl, width=1920)
     with pytest.raises(ConfigError):
         upscale.upscale_videos(project, manifest, comfy, tpl, width=32, height=32)
-    with pytest.raises(ConfigError, match="even integers >= 64"):
+    with pytest.raises(ConfigError, match="even integers between 64 and 8192"):
         upscale.upscale_videos(project, manifest, comfy, tpl, width=641, height=361)
     with pytest.raises(ValidationError):
         VideoConfig(width=641, height=360)

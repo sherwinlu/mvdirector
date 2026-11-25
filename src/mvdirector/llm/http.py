@@ -83,6 +83,25 @@ def redact_url(url: str) -> str:
     return f"{parts.scheme}://{host_port}{parts.path}"
 
 
+def validate_http_base_url(url: str, *, field_name: str) -> str:
+    """Validate that ``url`` is a clean ``http://`` or ``https://`` base URL with no query/frag."""
+    if any(ord(ch) < 32 or ord(ch) == 127 or ch.isspace() for ch in url):
+        raise ConfigError(f"{field_name} must not contain whitespace or control characters.")
+    try:
+        parts = urlsplit(url)
+        _ = parts.port
+    except ValueError as exc:
+        raise ConfigError(f"Invalid {field_name}: {exc}") from exc
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ConfigError(
+            f"{field_name} must be an http:// or https:// URL with a valid host "
+            f"(got {redact_url(url)!r})."
+        )
+    if parts.query or parts.fragment:
+        raise ConfigError(f"{field_name} must not include query parameters or fragments.")
+    return url
+
+
 class HttpJSON:
     def __init__(
         self,

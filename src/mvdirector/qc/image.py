@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +23,7 @@ from mvdirector.models import (
     Shot,
     ShotType,
 )
+from mvdirector.planning.prompts import is_rear_view_prompt, is_silhouette_prompt
 from mvdirector.qc.common import dimensions_check, identity_check, vision_checks
 from mvdirector.qc.faces import FaceAnalyzer, IdentityReference, load_rgb
 from mvdirector.qc.scoring import aggregate, linear_score, skipped
@@ -47,6 +49,24 @@ def sharpness(image: np.ndarray) -> float:
         + pixels[1:-1, 2:]
     )
     return float(laplacian.var())
+
+
+_BROLL_MIN_FACE_CONFIDENCE = 0.80
+_NONHUMAN_FACE_RE = re.compile(
+    r"\b(?:skeleton|skeletal|skull|cranium|full[- ]face\s+mask|helmeted|faceless|"
+    r"robotic\s+head|automaton)\b",
+    re.IGNORECASE,
+)
+
+
+def _has_nonhuman_face(manifest: Manifest, shot: Shot) -> bool:
+    """True when the primary visible character has a non-human/masked head (e.g. skeleton)."""
+    visible = manifest.visible_characters(shot)
+    if not visible:
+        return False
+    _, character, _ = visible[0]
+    text = f"{character.name} {character.appearance}"
+    return bool(_NONHUMAN_FACE_RE.search(text))
 
 
 class ImageQC:
@@ -109,7 +129,11 @@ class ImageQC:
     def _broll_face_checks(self, image: np.ndarray) -> list[CheckResult]:
         if self._faces is None:
             return []
-        faces = self._faces.faces(image)
+        faces = [
+            f
+            for f in self._faces.faces(image)
+            if f.confidence is None or f.confidence >= _BROLL_MIN_FACE_CONFIDENCE
+        ]
         biggest = faces[0].height_fraction if faces else 0.0
         unexpected = biggest >= self._cfg.broll_max_face_fraction
         return [
@@ -158,8 +182,24 @@ class ImageQC:
                 skipped(name, "face analysis unavailable")
                 for name in ("face_present", "face_framing", "identity")
             ]
+        raw_prompt = shot.still.prompt_override or shot.still_prompt
+        if shot.type is ShotType.PERFORMANCE and is_rear_view_prompt(raw_prompt):
+            return [
+                skipped(name, "rear-view shot; face not expected to face camera")
+                for name in ("face_present", "face_framing", "identity")
+            ]
+        if shot.type is ShotType.PERFORMANCE and is_silhouette_prompt(raw_prompt):
+            return [
+                skipped(name, "silhouette shot; facial features intentionally obscured")
+                for name in ("face_present", "face_framing", "identity")
+            ]
         faces = self._faces.faces(image)
         if not faces:
+            if shot.type is ShotType.PERFORMANCE and _has_nonhuman_face(manifest, shot):
+                return [
+                    skipped(name, "non-human/masked character; human face detector skipped")
+                    for name in ("face_present", "face_framing", "identity")
+                ]
             return [
                 CheckResult(
                     name="face_present",

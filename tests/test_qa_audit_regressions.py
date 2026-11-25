@@ -15,6 +15,7 @@ import time
 import zipfile
 from email.message import Message
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -253,6 +254,8 @@ def test_mcp_http_header_smuggling_checks() -> None:
                 msg.add_header(k, v)
             self.headers = msg
             self.sent: list[tuple[int, dict[str, str], bytes, bool]] = []
+            # do_POST first asks the server whether the read deadline already fired.
+            self.server = SimpleNamespace(read_expired=lambda _key: False)
 
         def _write_response(
             self,

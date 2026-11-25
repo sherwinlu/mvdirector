@@ -38,8 +38,11 @@ Score from 0 to 1:
   * Explicit exclusions & absences: verify every 'no ...', 'without ...', 'missing ...' or
     'Must NOT appear' constraint in the specification (for example 'no minute hand', 'no cape',
     'no people'). If a forbidden object, clock hand, garment or person is visible anyway—or if
-    any person or face appears when no singer should be visible—score spec_match <= 0.2 and name
-    the offending element in 'issues'.
+    any recognizable human face, named cast member, or unrequested person appears when no singer
+    should be visible (anonymous backlit silhouettes, distant blurred crowds, inanimate figurines,
+    or hands-only inserts are acceptable on b-roll ONLY when the shot description explicitly asks
+    for them, never recognizable faces or named cast)—score spec_match <= 0.2 and name the
+    offending element in 'issues'.
   * Environmental scale: people and props must sit at realistic physical scale relative to doors,
     windows, furniture and buildings (a person near a house or manor must never appear giant or
     nearly as tall as the architecture; score spec_match <= 0.2 if scale is implausible, or if a
@@ -135,7 +138,11 @@ specification. You do NOT see the image; rely ONLY on the observed facts and the
 Score from 0 to 1:
 - spec_match: whether observed framing, people count, setting, props, vocal delivery, and all
   explicit exclusions ('Must NOT appear') satisfy the specification. If a forbidden element was
-  observed, or a required element clearly contradicted the observation, score <= 0.2. Do not
+  observed, or a required element clearly contradicted the observation, score <= 0.2. On b-roll
+  shots ('No singer should be visible'), fail (<= 0.2) if any recognizable human face, named cast
+  member, or unrequested person was observed, but allow anonymous backlit silhouettes, distant
+  blurred crowds, inanimate figurines, or hands-only inserts when the first-frame description
+  explicitly requests them. Do not
   penalize spec_match for minor text-vs-reference discrepancies (such as anatomical left/right
   accessory side or skin details covered by the reference garment) when the observation matches
   the reference portrait/sheet.
@@ -421,7 +428,12 @@ class VisionJudge:
                     if sec_pinned := sec_char.pinned():
                         lines.append(f"Pinned details for {label}: {sec_pinned}")
         else:
-            lines.append("No singer should be visible in this shot.")
+            lines.append(
+                "No singer should be visible in this shot (no recognizable human faces or named "
+                "cast members; anonymous silhouettes, distant backlit crowds, inanimate figurines, "
+                "or hands-only inserts are acceptable only when explicitly requested in the "
+                "first-frame description)."
+            )
         if shot.allow_cuts:
             lines.append(
                 "Multi-angle montage (allow_cuts=true): deliberate camera angle cuts between "

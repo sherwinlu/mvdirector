@@ -56,8 +56,8 @@ def generate_brief(
     return reply
 
 
-def _input_target(project: Project, relative: str, label: str) -> tuple[str, Path]:
-    cleaned = relative.strip()
+def _input_target(project: Project, relative: str | None, label: str) -> tuple[str, Path]:
+    cleaned = (relative or "").strip()
     if not cleaned:
         raise ConfigError(f"inputs.{label} is empty in project.yaml.")
     target = project.path(cleaned)

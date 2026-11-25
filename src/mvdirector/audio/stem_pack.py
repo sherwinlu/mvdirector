@@ -926,7 +926,7 @@ def _format_arrangement_summary(
         parts.append(f"Backing vocals active in {len(backing_windows)} sections ({bv_sec:.1f}s)")
     if rhythm_drops:
         drop_labels = ", ".join(
-            f"{int(t // 60)}:{int(round(t % 60)):02d}" for t in rhythm_drops[:6]
+            f"{m}:{s:02d}" for m, s in (divmod(int(round(t)), 60) for t in rhythm_drops[:6])
         )
         parts.append(f"Rhythm/bass transitions at {drop_labels}")
 

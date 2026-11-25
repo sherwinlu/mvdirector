@@ -254,4 +254,4 @@ def test_vision_failures_drive_retries_and_a_rewrite_over_http(
     assert len(server.of_kind("rewrite")) == 1
     rewrite_text = str(server.of_kind("rewrite")[0].body)
     assert "wrong person" in rewrite_text and "Match the sheet." in rewrite_text
-    assert state.attempts[2].prompt.startswith("A rewritten prompt.")
+    assert "A rewritten prompt." in state.attempts[2].prompt

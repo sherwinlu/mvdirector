@@ -780,14 +780,58 @@ class _Wardrobe:
         return self._ids[index]
 
 
+_GENERIC_NAME_PREFIXES = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "singer",
+        "vocalist",
+        "lead",
+        "voice",
+        "performer",
+        "protagonist",
+        "character",
+        "narrator",
+        "speaker",
+        "soloist",
+        "young",
+        "old",
+        "mr",
+        "mrs",
+        "ms",
+        "dr",
+        "sir",
+        "lady",
+        "lord",
+        "king",
+        "queen",
+        "captain",
+    }
+)
+
+
 def _character_tokens(cid: str, char: Character) -> list[str]:
     tokens = [cid.strip()]
     if char.name and char.name.strip():
         clean_name = unicodedata.normalize("NFC", char.name.strip())
-        tokens.append(clean_name)
-        folded_name = ascii_fold(clean_name).strip()
-        if folded_name and folded_name != clean_name:
-            tokens.append(folded_name)
+        candidates = [clean_name]
+        # Also recognize the base name before parenthetical/comma epithets (e.g. "Eun-ji (The
+        # Kumiho)", "Margot, the Choir Leader").
+        base_name = re.split(r"\s*[(\[,]", clean_name, maxsplit=1)[0].strip()
+        if base_name and base_name != clean_name:
+            candidates.append(base_name)
+        # Only an epithet ("Corbin the Host") marks a leading given name as the character's own;
+        # a plain first name ("Rose Martin", "Kim Ji-woo") is often a common word or shared.
+        epithet = re.match(r"^(.+?)\s+the\s+\S", base_name, flags=re.IGNORECASE)
+        given = epithet.group(1).strip(".,:;'\"-") if epithet else ""
+        if len(given) >= 3 and given.casefold() not in _GENERIC_NAME_PREFIXES:
+            candidates.append(given)
+        for cand in candidates:
+            tokens.append(cand)
+            folded = ascii_fold(cand).strip()
+            if folded and folded != cand:
+                tokens.append(folded)
     return list(dict.fromkeys(t for t in tokens if len(t) >= 2 or not char.name))
 
 

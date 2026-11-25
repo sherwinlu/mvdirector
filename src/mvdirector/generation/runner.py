@@ -941,6 +941,17 @@ class ShotRunner:
             is_rear_view = shot.type is not ShotType.LIPSYNC and prompts.is_rear_view_prompt(
                 raw_still
             )
+            is_profile_view = (
+                shot.type is not ShotType.LIPSYNC
+                and not is_rear_view
+                and prompts.is_profile_view_prompt(raw_still)
+            )
+            is_hands_detail = (
+                shot.type is ShotType.PERFORMANCE
+                and shot.framing is Framing.CLOSE_UP
+                and prompts.is_hands_detail_prompt(raw_still)
+            )
+            avoid_frontal_face = is_rear_view or is_profile_view or is_hands_detail
             front_path: Path | None = None
 
             def _first_existing_panel(
@@ -966,11 +977,11 @@ class ShotRunner:
                 else:
                     # Single-reference workflows lose facial detail and pull framing too wide on
                     # close-ups when given the full-body front panel; prefer the macro face panel
-                    # when available. On rear-view shots, prefer the back panel (columns layout)
-                    # or side profile so the model is not anchored to a frontal stare.
+                    # when available. On rear-view/profile shots, prefer back/profile panels so the
+                    # model is not anchored to a frontal stare; on hands-only inserts, avoid face.
                     face_rel = reference.panel("face")
                     use_face = (
-                        not is_rear_view
+                        not avoid_frontal_face
                         and self._project.config.reference.closeup_face_panel
                         and shot.framing is Framing.CLOSE_UP
                         and not self._has_distinct_ref_target(
@@ -982,6 +993,11 @@ class ShotRunner:
                     if is_rear_view:
                         primary_panel = (
                             _first_existing_panel(reference, ("back", "profile", "front")) or front
+                        )
+                    elif is_profile_view:
+                        primary_panel = (
+                            _first_existing_panel(reference, ("profile", "three_quarter", "front"))
+                            or front
                         )
                     elif use_face and face_rel is not None:
                         primary_panel = face_rel
@@ -996,7 +1012,7 @@ class ShotRunner:
             if reference is not None:
                 extra_panels = (
                     ("profile", "three_quarter")
-                    if is_rear_view
+                    if avoid_frontal_face
                     else ("profile", "three_quarter", "face")
                 )
                 for name in extra_panels:
@@ -1019,11 +1035,14 @@ class ShotRunner:
                     ):
                         continue
                     sec_ref = sec_char.reference_for(sec_state)
-                    sec_panel = (
-                        _first_existing_panel(sec_ref, ("back", "profile", "front"))
-                        if is_rear_view
-                        else (sec_ref.panel("front") if sec_ref else None)
-                    )
+                    if is_rear_view:
+                        sec_panel = _first_existing_panel(sec_ref, ("back", "profile", "front"))
+                    elif is_profile_view:
+                        sec_panel = _first_existing_panel(
+                            sec_ref, ("profile", "three_quarter", "front")
+                        )
+                    else:
+                        sec_panel = sec_ref.panel("front") if sec_ref else None
                     if sec_panel is not None:
                         sec_path = self._project.path(sec_panel)
                         if sec_path.is_file():
@@ -1035,7 +1054,7 @@ class ShotRunner:
                 and self._has_distinct_ref_target(
                     template, "reference_image_2", exclude_param=exclude_param
                 )
-                and not is_rear_view
+                and not avoid_frontal_face
             ):
                 face = reference.panel("face")
                 if face:

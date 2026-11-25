@@ -18,12 +18,17 @@ from mvdirector.models import (
     AssetKind,
     CheckResult,
     CheckStatus,
+    Framing,
     Manifest,
     QCReport,
     Shot,
     ShotType,
 )
-from mvdirector.planning.prompts import is_rear_view_prompt, is_silhouette_prompt
+from mvdirector.planning.prompts import (
+    is_hands_detail_prompt,
+    is_rear_view_prompt,
+    is_silhouette_prompt,
+)
 from mvdirector.qc.common import dimensions_check, identity_check, vision_checks
 from mvdirector.qc.faces import FaceAnalyzer, IdentityReference, load_rgb
 from mvdirector.qc.scoring import aggregate, linear_score, skipped
@@ -193,6 +198,15 @@ class ImageQC:
                 skipped(name, "silhouette shot; facial features intentionally obscured")
                 for name in ("face_present", "face_framing", "identity")
             ]
+        if (
+            shot.type is ShotType.PERFORMANCE
+            and shot.framing is Framing.CLOSE_UP
+            and is_hands_detail_prompt(raw_prompt)
+        ):
+            return [
+                skipped(name, "hands-only detail shot; face intentionally out of frame")
+                for name in ("face_present", "face_framing", "identity")
+            ]
         faces = self._faces.faces(image)
         if not faces:
             if shot.type is ShotType.PERFORMANCE and _has_nonhuman_face(manifest, shot):
@@ -234,17 +248,22 @@ class ImageQC:
         )
         minimum = self._cfg.min_face_fraction.get(shot.framing, 0.0)
         maximum = self._cfg.max_face_fraction.get(shot.framing, 1.0)
+        # Allow a 1-pixel bounding-box quantization tolerance so draft frames (e.g. 320px tall,
+        # where 95px = 29.69%) do not hard-fail with "face is 30%; needs at least 30%".
+        pixel_slack = 1.0 / max(int(image.shape[0]), 1)
+        effective_min = max(0.0, minimum - pixel_slack)
         largest_fraction = (
             max(singer.height_fraction, faces[0].height_fraction)
             if singing_count >= 2
             else singer.height_fraction
         )
         co_singer_minimum = minimum * 0.75
+        effective_co_min = max(0.0, co_singer_minimum - pixel_slack)
         co_singer_small = (
             singing_count >= 2
-            and min(singer.height_fraction, faces[1].height_fraction) < co_singer_minimum
+            and min(singer.height_fraction, faces[1].height_fraction) < effective_co_min
         )
-        too_small = singer.height_fraction < minimum if singing_count < 2 else co_singer_small
+        too_small = singer.height_fraction < effective_min if singing_count < 2 else co_singer_small
         too_large = largest_fraction > maximum
         if too_large:
             framing = CheckResult(

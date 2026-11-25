@@ -1183,6 +1183,164 @@ def test_comfy_client_rejects_non_http_and_malformed_base_urls():
             ComfyClient(ComfyConfig(base_url=bad_url))
 
 
+def test_broll_cast_detection_matches_given_name_for_epithet_cast_names():
+    chars = {
+        "singer_1": Character(name="Corbin the Host", appearance="Man in a dark suit."),
+        "lead": Character(name="Eun-ji (The Kumiho)", appearance="Woman in white hanbok."),
+        "generic": Character(name="The Caretaker", appearance="Woman in woven cloak."),
+    }
+    assert planner._broll_mentions_cast(
+        "Wide shot of the limestone cellar, Corbin stands centered beside a DJ riser.", chars
+    ) == ["singer_1"]
+    assert planner._broll_mentions_cast(
+        "Eun-ji walks slowly through the misty forest glade.", chars
+    ) == ["lead"]
+    # Generic leading article "The" must never falsely trigger cast detection on empty b-roll.
+    assert (
+        planner._broll_mentions_cast(
+            "The empty stone hall glows softly under distant lanterns.", chars
+        )
+        == []
+    )
+
+
+def test_profile_and_hands_detail_panel_routing_and_face_qc(tmp_path):
+    from PIL import Image
+
+    from mvdirector.comfy.workflow import WorkflowTemplate
+    from mvdirector.config import ProjectConfig, QCConfig, VideoConfig
+    from mvdirector.generation.runner import ShotRunner
+    from mvdirector.models import ReferenceSet
+    from mvdirector.project import Project
+    from mvdirector.qc.faces import Face
+    from mvdirector.qc.image import ImageQC
+
+    proj_dir = tmp_path / "profile_hands_proj"
+    ref_dir = proj_dir / "assets" / "reference"
+    ref_dir.mkdir(parents=True)
+    for name in ("front.png", "profile.png", "three_quarter.png", "face.png"):
+        (ref_dir / name).write_bytes(b"PNG")
+    cfg = ProjectConfig()
+    cfg.reference.closeup_face_panel = True
+    proj = Project(root=proj_dir, config=cfg)
+
+    profile_shot = Shot(
+        id="s041",
+        index=0,
+        start=0.0,
+        end=4.0,
+        num_frames=97,
+        type=ShotType.PERFORMANCE,
+        framing=Framing.CLOSE_UP,
+        wardrobe="w1",
+        audio_slice=AudioSlice(path="assets/audio/s041.wav", start=0.0, end=4.0, head_handle=0.0),
+        still_prompt="Close-up of Xiao Ying, her face lit in profile by warm amber candlelight.",
+    )
+    hands_shot = Shot(
+        id="s003",
+        index=1,
+        start=4.0,
+        end=8.0,
+        num_frames=97,
+        type=ShotType.PERFORMANCE,
+        framing=Framing.CLOSE_UP,
+        wardrobe="w1",
+        audio_slice=AudioSlice(path="assets/audio/s003.wav", start=4.0, end=8.0, head_handle=0.0),
+        still_prompt=(
+            "Close-up macro shot angled downward across the workbench. Small child hands with a "
+            "brown leather cord at the left wrist hold an open brass pocket watch."
+        ),
+    )
+    manifest = Manifest(
+        title="Routing Test",
+        duration=20.0,
+        fps=24,
+        character=Character(
+            name="Xiao Ying",
+            appearance="Woman in black velvet qipao.",
+            wardrobe=[WardrobeState(id="w1", description="Velvet qipao.")],
+            references={
+                "w1": ReferenceSet(
+                    sheet="assets/reference/front.png",
+                    panels={
+                        "front": "assets/reference/front.png",
+                        "profile": "assets/reference/profile.png",
+                        "three_quarter": "assets/reference/three_quarter.png",
+                        "face": "assets/reference/face.png",
+                    },
+                )
+            },
+        ),
+        visual_bible=VisualBible(style="Film", palette="Amber", lighting="Candlelight"),
+        shots=[profile_shot, hands_shot],
+    )
+    wf_dir = proj_dir / "workflows"
+    wf_dir.mkdir()
+    (wf_dir / "still.api.json").write_text(
+        json.dumps({"10": {"class_type": "LoadImage", "inputs": {"image": ""}}})
+    )
+    bindings_path = wf_dir / "still.bindings.json"
+    bindings_path.write_text(
+        json.dumps(
+            {
+                "workflow": "still.api.json",
+                "inputs": {"reference_image": [{"node": "10", "field": "image"}]},
+                "required": ["reference_image"],
+                "output": {"node": "10", "extensions": [".png"]},
+            }
+        )
+    )
+    tpl = WorkflowTemplate.load("still", bindings_path)
+    runner = ShotRunner.__new__(ShotRunner)
+    runner._project = proj
+    runner._manifest = manifest
+    runner._templates = {"still": tpl}
+
+    # 1. Side-profile shot routes to profile.png (not face.png or front.png).
+    assert runner._still_reference_paths(profile_shot, plate=None)[0][2].name == "profile.png"
+    assert not prompts.is_profile_view_prompt("Three-quarter profile looking slightly off-lens.")
+    assert not prompts.is_profile_view_prompt("Keeping a low profile in the alley.")
+    assert not prompts.is_profile_view_prompt("A high-profile shot of the red carpet arrival.")
+
+    # 2. Hands-only macro shot avoids face.png (uses front.png) and skips MediaPipe face checks.
+    assert runner._still_reference_paths(hands_shot, plate=None)[0][2].name == "front.png"
+    assert not prompts.is_hands_detail_prompt(
+        "Close-up of her face and eyes while her hands grip the microphone."
+    )
+
+    img_path = tmp_path / "draft.png"
+    Image.new("RGB", (576, 320), (30, 30, 30)).save(img_path)
+
+    class _NoFaces:
+        def faces(self, image):
+            return []
+
+    qc_hands = ImageQC(QCConfig(), VideoConfig(), _NoFaces(), None)
+    rep_hands = qc_hands.evaluate(img_path, hands_shot, manifest, None, expected_size=(576, 320))
+    assert any(c.name == "face_present" and c.status.value == "skipped" for c in rep_hands.checks)
+
+    # 3. 1-pixel draft rounding tolerance (95px/320px = 0.296875 vs 0.30) passes face_framing,
+    # while genuinely small close-up faces (22%) still hard-fail.
+    ls_shot = profile_shot.model_copy(
+        update={"type": ShotType.LIPSYNC, "still_prompt": "Close-up portrait facing camera."}
+    )
+
+    class _OneFace:
+        def __init__(self, frac: float):
+            self._frac = frac
+
+        def faces(self, image):
+            return [Face(self._frac, confidence=0.95)]
+
+    qc_edge = ImageQC(QCConfig(), VideoConfig(), _OneFace(95 / 320), None)
+    rep_edge = qc_edge.evaluate(img_path, ls_shot, manifest, None, expected_size=(576, 320))
+    assert any(c.name == "face_framing" and c.status.value == "passed" for c in rep_edge.checks)
+
+    qc_small = ImageQC(QCConfig(), VideoConfig(), _OneFace(0.22), None)
+    rep_small = qc_small.evaluate(img_path, ls_shot, manifest, None, expected_size=(576, 320))
+    assert any(c.name == "face_framing" and c.status.value == "failed" for c in rep_small.checks)
+
+
 def test_inline_delivery_cue_does_not_rename_the_section():
     parsed = lyrics_mod.parse_lyrics(
         "[Verse 1]\nline a\n[whispered] line b\nline c\n[soft vocals] line d\n"
@@ -1267,3 +1425,72 @@ def test_inline_section_cue_with_singer_starts_section_and_swaps_singer():
         ("f", "Chorus: Both"),
         ("g", "Chorus"),
     ]
+
+
+def test_hands_detail_requires_closeup_cue_so_wider_shots_keep_face_qc(tmp_path):
+    from PIL import Image
+
+    from mvdirector.config import QCConfig, VideoConfig
+    from mvdirector.qc.image import ImageQC
+
+    # Hands merely mentioned in wider shots must not switch off face checks.
+    assert not prompts.is_hands_detail_prompt(
+        "Medium shot of Mia on the rooftop at dusk, hands in her jacket pockets."
+    )
+    assert not prompts.is_hands_detail_prompt(
+        "Wide shot: the singer raises both hands to the crowd under strobe lights."
+    )
+    assert prompts.is_hands_detail_prompt("Close-up macro of hands turning a brass key.")
+
+    medium = Shot(
+        id="s010",
+        index=0,
+        start=0.0,
+        end=4.0,
+        num_frames=97,
+        type=ShotType.PERFORMANCE,
+        framing=Framing.MEDIUM,
+        audio_slice=AudioSlice(path="assets/audio/s010.wav", start=0.0, end=4.0, head_handle=0.0),
+        # Has a close-up cue word, but the shot is framed medium, so the face is in frame.
+        still_prompt="Medium shot, insert of hands strumming a guitar on the porch.",
+    )
+    manifest = Manifest(
+        title="t",
+        duration=4.0,
+        fps=24,
+        character=Character(name="Mia", appearance="Woman."),
+        visual_bible=VisualBible(style="Film"),
+        shots=[medium],
+    )
+    img = tmp_path / "frame.png"
+    Image.new("RGB", (576, 320), (30, 30, 30)).save(img)
+
+    class _NoFaces:
+        def faces(self, image):
+            return []
+
+    report = ImageQC(QCConfig(), VideoConfig(), _NoFaces(), None).evaluate(
+        img, medium, manifest, None, expected_size=(576, 320)
+    )
+    face_present = next(c for c in report.checks if c.name == "face_present")
+    assert face_present.status.value == "failed"
+
+
+def test_plain_first_names_do_not_match_common_words_or_shared_surnames():
+    roses = {
+        "lead": Character(name="Rose Martin", appearance="Woman."),
+        "co": Character(name="Mia", appearance="Woman."),
+    }
+    assert planner._broll_mentions_cast("Rose petals scattered across an empty table.", roses) == []
+    assert planner._broll_mentions_cast("Rose Martin waits by the window.", roses) == ["lead"]
+
+    kims = {
+        "a": Character(name="Kim Ji-woo", appearance="Woman."),
+        "b": Character(name="Kim Min-jun", appearance="Man."),
+    }
+    assert planner._characters_in_text(
+        "Kim Min-jun dances alone.", kims, proper_noun_only=True
+    ) == ["b"]
+    # Epithet names still match on the given name alone.
+    host = {"h": Character(name="Corbin The Host", appearance="Man.")}
+    assert planner._broll_mentions_cast("Corbin stands by the riser.", host) == ["h"]

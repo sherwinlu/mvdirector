@@ -915,3 +915,195 @@ def test_ollama_is_think_error_matches_model_not_supporting_thinking():
     assert _is_think_error('{"error":"\\"gemma3:12b\\" does not support thinking"}')
     assert _is_think_error("unknown field: think")
     assert not _is_think_error("model not found")
+
+
+def test_broll_no_people_ignores_brass_bell_pareidolia_and_catches_real_face(tmp_path):
+    from PIL import Image
+
+    from mvdirector.config import QCConfig, VideoConfig
+    from mvdirector.qc.faces import Face
+    from mvdirector.qc.image import ImageQC
+
+    img_path = tmp_path / "broll.png"
+    Image.new("RGB", (640, 360), (20, 20, 20)).save(img_path)
+
+    class _FakeFaces:
+        def __init__(self, result):
+            self._result = result
+
+        def faces(self, image):
+            return self._result
+
+    shot = Shot(
+        id="s004",
+        index=0,
+        start=0.0,
+        end=4.0,
+        num_frames=97,
+        type=ShotType.BROLL,
+        framing=Framing.MEDIUM,
+        audio_slice=AudioSlice(path="assets/audio/s004.wav", start=0.0, end=4.0, head_handle=0.0),
+        still_prompt="Gloved hands hold a rope of brass sleigh bells across a snowy alley.",
+    )
+    manifest = Manifest(
+        title="Carols",
+        duration=20.0,
+        fps=24,
+        visual_bible=VisualBible(style="Film", palette="Warm", lighting="Dusk"),
+        shots=[shot],
+    )
+    qc_bell = ImageQC(QCConfig(), VideoConfig(), _FakeFaces([Face(0.09, confidence=0.74)]), None)
+    rep_bell = qc_bell.evaluate(img_path, shot, manifest, None, expected_size=(640, 360))
+    assert any(c.name == "no_people" and c.status.value == "passed" for c in rep_bell.checks)
+
+    qc_real = ImageQC(QCConfig(), VideoConfig(), _FakeFaces([Face(0.09, confidence=0.86)]), None)
+    rep_real = qc_real.evaluate(img_path, shot, manifest, None, expected_size=(640, 360))
+    assert any(c.name == "no_people" and c.status.value == "failed" for c in rep_real.checks)
+
+
+def test_silhouette_and_nonhuman_performance_shots_skip_missing_face_check(tmp_path):
+    from PIL import Image
+
+    from mvdirector.config import QCConfig, VideoConfig
+    from mvdirector.qc.image import ImageQC
+
+    img_path = tmp_path / "wide.png"
+    Image.new("RGB", (640, 360), (15, 15, 25)).save(img_path)
+
+    class _NoFaces:
+        def faces(self, image):
+            return []
+
+    qc = ImageQC(QCConfig(), VideoConfig(), _NoFaces(), None)
+
+    sil_shot = Shot(
+        id="s001",
+        index=0,
+        start=0.0,
+        end=4.0,
+        num_frames=97,
+        type=ShotType.PERFORMANCE,
+        framing=Framing.WIDE,
+        audio_slice=AudioSlice(path="assets/audio/s001.wav", start=0.0, end=4.0, head_handle=0.0),
+        still_prompt="The Timekeeper stands in silhouette in the distant midground between gears.",
+    )
+    sil_manifest = Manifest(
+        title="Stay",
+        duration=20.0,
+        fps=24,
+        character=Character(name="The Timekeeper", appearance="Tall man in his 40s."),
+        visual_bible=VisualBible(style="Dark", palette="Blue", lighting="Backlit"),
+        shots=[sil_shot],
+    )
+    rep_sil = qc.evaluate(img_path, sil_shot, sil_manifest, None, expected_size=(640, 360))
+    assert any(c.name == "face_present" and c.status.value == "skipped" for c in rep_sil.checks)
+
+    # Lip-sync still requires a visible face even if "silhouette" appears in prose.
+    ls_shot = sil_shot.model_copy(update={"type": ShotType.LIPSYNC})
+    rep_ls = qc.evaluate(img_path, ls_shot, sil_manifest, None, expected_size=(640, 360))
+    assert any(c.name == "face_present" and c.status.value == "failed" for c in rep_ls.checks)
+
+    skel_shot = Shot(
+        id="s002",
+        index=0,
+        start=0.0,
+        end=4.0,
+        num_frames=97,
+        type=ShotType.PERFORMANCE,
+        framing=Framing.WIDE,
+        audio_slice=AudioSlice(path="assets/audio/s002.wav", start=0.0, end=4.0, head_handle=0.0),
+        still_prompt="The Skeleton Host stands tall beside a candlelit fireplace.",
+    )
+    skel_manifest = Manifest(
+        title="Skeleton",
+        duration=20.0,
+        fps=24,
+        character=Character(
+            name="The Skeleton Host",
+            appearance="An animated, anatomically articulate human skeleton in a tuxedo.",
+        ),
+        visual_bible=VisualBible(style="Gothic", palette="Amber", lighting="Candlelight"),
+        shots=[skel_shot],
+    )
+    rep_skel = qc.evaluate(img_path, skel_shot, skel_manifest, None, expected_size=(640, 360))
+    assert any(c.name == "face_present" and c.status.value == "skipped" for c in rep_skel.checks)
+
+
+def test_gemini_retries_with_capped_thinking_budget_when_thoughts_hit_max_tokens():
+    import httpx
+    from pydantic import BaseModel
+
+    from mvdirector.llm.gemini_backend import _THINKING_RETRY_BUDGET, GeminiChat
+
+    class _Answer(BaseModel):
+        ok: bool
+
+    payloads: list[dict] = []
+
+    class _FakeHttp:
+        def __init__(self, responses):
+            self._responses = list(responses)
+
+        def post(self, url, payload, **kwargs):
+            payloads.append(payload)
+            return self._responses.pop(0)
+
+    truncated_resp = httpx.Response(
+        200,
+        json={
+            "candidates": [
+                {
+                    "content": {"parts": [{"thought": True, "text": "long..."}, {"text": "{"}]},
+                    "finishReason": "MAX_TOKENS",
+                }
+            ],
+            "usageMetadata": {"thoughtsTokenCount": 32000, "candidatesTokenCount": 5},
+        },
+    )
+    ok_resp = httpx.Response(
+        200,
+        json={
+            "candidates": [
+                {
+                    "content": {"parts": [{"text": '{"ok": true}'}]},
+                    "finishReason": "STOP",
+                }
+            ],
+            "usageMetadata": {"thoughtsTokenCount": 200, "candidatesTokenCount": 6},
+        },
+    )
+    chat = GeminiChat(
+        model="gemini-3.8-flash",
+        max_tokens=32768,
+        base_url="https://example.test",
+        http=_FakeHttp([truncated_resp, ok_resp]),  # type: ignore[arg-type]
+        json_mode="auto",
+        key_hint="GEMINI_API_KEY",
+    )
+    reply = chat._send(
+        "sys", [{"role": "user", "content": [{"type": "text", "text": "go"}]}], _Answer
+    )
+    assert not reply.truncated
+    assert reply.text == '{"ok": true}'
+    assert len(payloads) == 2
+    assert "thinkingConfig" not in payloads[0]["generationConfig"]
+    assert payloads[1]["generationConfig"]["thinkingConfig"] == {
+        "thinkingBudget": _THINKING_RETRY_BUDGET
+    }
+
+    # If the retry returns HTTP 400 rejecting thinkingConfig, gracefully keep the original reply.
+    payloads.clear()
+    reject_resp = httpx.Response(400, json={"error": {"message": "Unknown name thinkingConfig"}})
+    chat_old = GeminiChat(
+        model="gemini-old",
+        max_tokens=32768,
+        base_url="https://example.test",
+        http=_FakeHttp([truncated_resp, reject_resp]),  # type: ignore[arg-type]
+        json_mode="auto",
+        key_hint="GEMINI_API_KEY",
+    )
+    fallback = chat_old._send(
+        "sys", [{"role": "user", "content": [{"type": "text", "text": "go"}]}], _Answer
+    )
+    assert fallback.truncated is True
+    assert fallback.text == "{"

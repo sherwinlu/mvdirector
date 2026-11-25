@@ -69,6 +69,11 @@ _EXPLICIT_TIGHT_FRAMING_RE = re.compile(
     r"tight\s+portrait|bust\s+shot)\b",
     re.IGNORECASE,
 )
+_SILHOUETTE_RE = re.compile(
+    r"\b(?:(?:in|as\s+a|backlit|dark|stark|shadowy|full[- ]body)\s+silhouette|"
+    r"silhouetted\s+(?:against|in|by))\b",
+    re.IGNORECASE,
+)
 
 
 def strip_still_words(motion_text: str) -> str:
@@ -85,6 +90,11 @@ def strip_still_words(motion_text: str) -> str:
 def is_rear_view_prompt(text: str) -> bool:
     """True when ``text`` specifies over-the-shoulder or back-of-head staging."""
     return bool(_REAR_VIEW_RE.search(text))
+
+
+def is_silhouette_prompt(text: str) -> bool:
+    """True when ``text`` explicitly stages the subject as a backlit/dark silhouette."""
+    return bool(_SILHOUETTE_RE.search(text))
 
 
 def scrub_frontal_facial_details(description: str) -> str:

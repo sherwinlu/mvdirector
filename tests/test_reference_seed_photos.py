@@ -192,7 +192,8 @@ def test_seed_from_photos_generate_mode_single_and_multislot(
     )
     assert res_3slot.reference is None
     assert len(res_3slot.candidates) == 1
-    assert fake_3slot.upload_files == ["photo_1.png", "photo_2.png", "photo_3.png"]
+    # Metadata-free re-encoded copies are uploaded, never the original photo files.
+    assert fake_3slot.upload_files == [f"base_seed_photo_{n}.png" for n in (1, 2, 3)]
 
     # 3) CLI `mvd reference seed` direct happy path with explicit --angle flags.
     runner = CliRunner()

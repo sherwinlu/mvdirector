@@ -1057,7 +1057,7 @@ def lock_plate_turnaround(
     """Lock a 2x2 multi-angle set turnaround sheet and crop its 4 angle panels."""
     project = open_project(project_dir)
     with project.edit_manifest() as manifest:
-        return plates_mod.lock_turnaround(project, manifest, image, set_name, inset=inset)
+        return plates_mod.lock_turnaround(project, manifest, Path(image), set_name, inset=inset)
 
 
 def generate_props(
@@ -1145,14 +1145,23 @@ def attach_shot_sketch(
     dst = project.sketch_path(shot_id)
     atomic_save_png(sketch_img, dst)
 
-    llm_ctx = _close_llm(_build_project_llm(project)) if analyze_with_llm else nullcontext(None)
-    with llm_ctx as llm, project.edit_manifest() as locked_manifest:
+    guidance = ""
+    if analyze_with_llm:
+        # Ask the model before taking the project lock so a slow request never blocks other jobs.
+        with _close_llm(_build_project_llm(project)) as llm:
+            if llm is not None:
+                guidance = previz_plan_mod.describe_sketch_blocking(
+                    manifest.shot(shot_id), manifest, dst, llm
+                )
+    with project.edit_manifest() as locked_manifest:
         shot = locked_manifest.shot(shot_id)
+        replacing = shot.sketch_image is not None
         shot.sketch_image = project.rel(dst)
-        if analyze_with_llm and llm is not None:
-            guidance = previz_plan_mod.describe_sketch_blocking(shot, locked_manifest, dst, llm)
-            if guidance:
-                shot.sketch_guidance = guidance
+        if guidance:
+            shot.sketch_guidance = guidance
+        elif replacing:
+            # The old guidance described the replaced sketch, not this one.
+            shot.sketch_guidance = ""
         if reset_still:
             shot.still.reset(project.config.retry.max_attempts)
             shot.video.reset(project.config.retry.max_attempts)
@@ -1393,8 +1402,8 @@ def regenerate_still(
         raise ConfigError(str(exc)) from exc
     if prompt_override is not None and "\x00" in prompt_override:
         raise ConfigError("prompt_override must not contain NUL bytes.")
-    if attempts is not None and attempts < 1:
-        raise ConfigError("attempts must be >= 1.")
+    if attempts is not None and (isinstance(attempts, bool) or attempts < 1):
+        raise ConfigError("attempts must be an integer >= 1.")
 
     project = open_project(project_dir, review_mode)
     effective_concurrency = validate_max_concurrency(
@@ -1619,22 +1628,24 @@ def generate_draft_grid(
         try:
             with project.run_lock(), _lease(project, comfy_provider) as comfy:
                 manifest = project.load_manifest()
-                results = draft_grid_mod.generate_section_sheet(
-                    project,
-                    manifest,
-                    comfy,
-                    templates,
-                    section=section,
-                    shot_ids=shots,
-                    layout=layout,
-                    mode=mode,
-                    draft=draft,
-                    overwrite=overwrite,
-                    apply_to_shots=apply_to_shots,
-                    gates=gates,
-                )
-                project.save_manifest(manifest)
-                return results
+                try:
+                    return draft_grid_mod.generate_section_sheet(
+                        project,
+                        manifest,
+                        comfy,
+                        templates,
+                        section=section,
+                        shot_ids=shots,
+                        layout=layout,
+                        mode=mode,
+                        draft=draft,
+                        overwrite=overwrite,
+                        apply_to_shots=apply_to_shots,
+                        gates=gates,
+                    )
+                finally:
+                    # Keep sections that finished even when a later section fails.
+                    _save_after_run(project, manifest)
         finally:
             if gates is not None:
                 gates.close()

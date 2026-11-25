@@ -37,6 +37,7 @@ from mvdirector.models import (
     Manifest,
     QCReport,
     RetryStrategy,
+    Review,
     Shot,
     ShotType,
     ascii_fold,
@@ -544,7 +545,9 @@ def generate_section_sheet(
                 )
                 if apply_to_shots:
                     shot.still.attempts.append(attempt)
+                    shot.still.accepted_by_reviewer = False
                     shot.draft_grid_sheet = rel_sheet
+                    shot.review = Review()  # an earlier review no longer describes this shot
                     if qc_report.passed:
                         shot.still.status = AssetStatus.PASSED
                         shot.still.selected_attempt = number
@@ -696,6 +699,8 @@ def generate_section_sheet(
                     )
                     shot.video.status = AssetStatus.PASSED
                     shot.video.selected_attempt = next_num
+                    shot.video.accepted_by_reviewer = False
+                    shot.review = Review()  # an earlier review no longer describes this shot
 
         sheet_record = DraftGridSheet(
             id=sheet_id,

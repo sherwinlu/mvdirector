@@ -369,7 +369,7 @@ def test_repair_still_error_cases_fail_fast_before_leasing(
         api.repair_still(custom, "no_such_shot", "fix", comfy_provider=provider)
     with pytest.raises(ConfigError, match="NUL bytes"):
         api.repair_still(custom, shot.id, "bad\x00note", comfy_provider=provider)
-    with pytest.raises(ConfigError, match="attempts must be >= 1"):
+    with pytest.raises(ConfigError, match="attempts must be an integer >= 1"):
         api.repair_still(custom, shot.id, "fix", attempts=0, comfy_provider=provider)
     assert provider.trace == []
 

@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from PIL import Image, ImageDraw, ImageOps
+from PIL import Image, ImageDraw, ImageOps, UnidentifiedImageError
 
 from mvdirector import media
 from mvdirector.audio.stems import atomic_copy
@@ -513,6 +513,25 @@ def _mirror_primary_reference(
         manifest.character.references[key] = reference
 
 
+def _load_seed_photo(photo: Path, label: str) -> Image.Image:
+    """Load a seed photo upright (EXIF orientation applied) as metadata-free RGB pixels.
+
+    Phone photos store their rotation in EXIF and often carry GPS/camera tags; the pixels are
+    rotated upright and copied onto a fresh image so no metadata reaches disk or ComfyUI.
+    """
+    image = Path(photo)
+    if not path_is_file(image):
+        raise ConfigError(f"{label} image not found: {image}")
+    try:
+        with Image.open(image) as opened:
+            upright = ImageOps.exif_transpose(opened).convert("RGB")
+    except (OSError, ValueError, UnidentifiedImageError, Image.DecompressionBombError) as exc:
+        raise ConfigError(f"{label} image could not be opened: {image} ({exc})") from exc
+    clean = Image.new("RGB", upright.size)
+    clean.paste(upright)
+    return clean
+
+
 def _normalize_seed_angle(raw: str) -> str:
     cleaned = (
         raw.strip()
@@ -647,8 +666,7 @@ def seed_from_photos(
     char_id, character, key, prefix = _target_state(manifest, state_id, character_id)
     config = project.config.reference
     loaded_images = [
-        load_rgb_candidate(Path(photo), f"Seed photo #{idx + 1}")
-        for idx, photo in enumerate(photos)
+        _load_seed_photo(Path(photo), f"Seed photo #{idx + 1}") for idx, photo in enumerate(photos)
     ]
 
     if mode == "direct":
@@ -752,11 +770,16 @@ def seed_from_photos(
         "height": height,
     }
     slots = _available_ref_slots(still_tpl)
+    project.reference_dir.mkdir(parents=True, exist_ok=True)
     if len(loaded_images) <= len(slots):
-        for slot, photo_path in zip(slots, photos):
-            params[slot] = comfy.upload(Path(photo_path))
+        # Upload re-encoded, metadata-free copies: never the user's original files (EXIF/GPS).
+        for number, (slot, img) in enumerate(zip(slots, loaded_images), start=1):
+            clean_path = project.path(
+                Path("assets") / "reference" / f"{prefix}_seed_photo_{number}.png"
+            )
+            atomic_save_png(img, clean_path)
+            params[slot] = comfy.upload(clean_path)
     else:
-        project.reference_dir.mkdir(parents=True, exist_ok=True)
         collage = _compose_photo_grid(loaded_images, (1536, 1536), background=config.background)
         collage_path = project.path(Path("assets") / "reference" / f"{prefix}_seed_input.png")
         atomic_save_png(collage, collage_path)

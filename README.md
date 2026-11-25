@@ -36,14 +36,16 @@ Everything revolves around one file, `manifest.json`. Each stage reads it, does 
 | Stage | Command | What it does |
 |---|---|---|
 | Prepare *(optional)* | `mvd prepare <audio>` | From a single `.mp3` or `.wav` file: transcodes `inputs/mix.wav`, separates `inputs/vocals.wav` (Demucs), transcribes lyrics, and infers `[Section]`-tagged `inputs/lyrics.txt` + lip-sync-ready `inputs/style.md`. |
-| Brief *(optional)* | `mvd brief` | Drafts `inputs/lyrics.txt` and `inputs/style.md` from an `--idea` prompt. |
+| Brief *(optional)* | `mvd brief` | Drafts `inputs/lyrics.txt` and `inputs/style.md` from an `--idea` prompt; `--exclude` adds things that must never appear on screen. |
 | Analyze | `mvd analyze [--tune] [--mode mix]` | Tempo, beats, bars, per-bar loudness, acoustic `musical_features` (key, brightness, texture, dynamics), vocal activity, lyric timing, and `track_profile` (`analysis.json`); `--tune` persists track-specific settings to `project.yaml`. In `mix` mode, windowed per-chapter BPM, downbeat, and energy from `inputs.tracklist` or fixed intervals. |
 | Tune *(optional)* | `mvd tune [--apply]` | Inspects lyrics, style cues, and `analysis.json` to preview or write recommended transcription, pacing, and lip-sync adjustments into `project.yaml` (`auto_tune: true` applies them automatically at runtime). |
-| Plan | `mvd plan [--mode mix]` | Deterministic bar/phrase cuts + LLM song interpretation, visual bible, and shot direction (`manifest.json`); in `mix` mode, 1 distinct environment + 2–3 loopable visual units per track chapter (optionally guided by per-chapter lyrics excerpts). |
-| Reference | `mvd reference generate`, `lock`, `video`, `lock-video` | Locks 4-panel character sheets (`row`/`grid`/`columns`, `white`/`grey`), derived character variants (`--from-character`), and optional silent turnaround reference videos. |
-| Plates & Props | `mvd plates ...`, `mvd props ...` | Locks empty set plates (including `--from-set`, `--style-ref`, `--embed-set`) and recurring hero props. |
+| Plan | `mvd plan [--mode mix]` | Deterministic bar/phrase cuts + LLM song interpretation, visual bible, and shot direction (`manifest.json`); in `mix` mode, 1 distinct environment + 2–3 loopable visual units per track chapter (optionally guided by per-chapter lyrics excerpts). Global exclusions (`--exclude`, `inputs.exclusions`, or an `Exclusions:` line in `style.md`) become bible rules, negative prompts, and vision checks. |
+| Reference | `mvd reference generate`, `lock`, `seed`, `video`, `lock-video` | Locks 4-panel character sheets (`row`/`grid`/`columns`, `white`/`grey`), derived character variants (`--from-character`), sheets seeded from 1–10 real angle photos (`seed`), and optional silent turnaround reference videos. |
+| Plates & Props | `mvd plates ...`, `mvd props ...` | Locks empty set plates (including `--from-set`, `--style-ref`, `--embed-set`), 2x2 multi-angle set turnarounds (`plates turnaround`, `lock-turnaround`), and recurring hero props. |
 | Previz *(optional)* | `mvd previz generate`, `refine`, `lock` | Generates and refines 3D camera-blocking clips (`previz_video`) for complex camera moves. |
-| Generate | `mvd run` (or `mvd stills`, `mvd videos`) | Renders stills and clips (with optional `--draft` or `--chapter`), runs automated QC, and retries failures. |
+| Sketch *(optional)* | `mvd sketch attach`, `clear` | Attaches a rough hand-drawn framing sketch to a shot as a lightweight alternative to previz. |
+| Draft grid *(optional)* | `mvd draft-grid` | Renders per-section 2x2/3x2 storyboard contact sheets and slices them into draft stills and/or one R2V montage clip per section. |
+| Generate | `mvd run` (or `mvd stills`, `mvd videos`) | Renders stills and clips (with optional `--draft` or `--chapter`), runs automated QC, and retries failures. `mvd repair-still` edits one shot's still in place; `mvd regenerate-still --strategy recreate` renders it from scratch. |
 | Review & Upscale | `mvd review`, `mvd upscale` | Streamlit UI (or CLI `approve`/`reject`), plus optional video upscaling of draft/approved clips. |
 | Assemble | `mvd assemble` | Trims clips to frame-exact lengths, prefers upscaled clips when present, joins them, and muxes the original mix (in `mix` mode, caches per-chapter loop segments in `assets/segments/` and writes a YouTube `.chapters.txt` sidecar). |
 

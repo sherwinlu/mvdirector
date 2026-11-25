@@ -99,6 +99,10 @@ The shot-direction prompt also steers the creative arc: a section arc (restraine
 
 Stills only look like one series if every shot starts from the same approved images. `mvd stills` and `mvd run` refuse to start while any locked asset needed by the selected shots is missing (`--skip-preflight` overrides).
 
+### Global Exclusions ("Never Show")
+
+List subjects, props, or motifs that must never appear with `mvd brief --exclude` / `mvd plan --exclude` (repeatable), `inputs.exclusions` in `project.yaml` (alias `do_not_show`), or an `Exclusions:` / `Do not show:` / `Never show:` section in `style.md`. They are merged and deduplicated into `visual_bible.exclusions`, written into the bible `rules` ("Never show X in any shot…") and `negative_prompt`, added to every still, video, plate, and prop negative prompt, and passed to `vision_spec` as explicit exclusions.
+
 ### Character Reference Sheets & Turnaround Videos
 
 A reference sheet has four panels (front, profile, three-quarter, and macro face detail) on a plain studio background:
@@ -106,6 +110,7 @@ A reference sheet has four panels (front, profile, three-quarter, and macro face
 - **Layouts & background:** `reference.layout` supports `row` (4x1), `grid` (2x2), or `columns` (1x4); `reference.background` supports `white` or `grey` (neutral mid-grey avoids white-halo bleed on dark hair and clothing).
 - **Invariants & derived characters:** `Character.invariants` lists non-negotiable traits (hair style and colour, signature details) carried across every costume and written into every still prompt as `Always: ...`, for each character in the shot, and into the base reference sheet (regenerate the sheet after editing; derived variant sheets ignore them). Use it for anything that drifts between stills: in a two-shot the second character gets only one reference image, so the text is what holds their look. For alternate ages, personas, or close variants of an existing character, set `Character.parent_character` or run `mvd reference generate --from-character <id>` to edit from the parent's locked sheet rather than generating from scratch.
 - **Costume states:** The base sheet comes from `t2i`; later wardrobe states (`mvd reference generate --state <id>`) edit the locked base sheet (`still`) changing only the clothes, without re-describing the face. Lock a single portrait photo with `--single`.
+- **Seeding from real photos (`mvd reference seed <photos...>`):** Builds a sheet from 1–10 angle photos (`--angle front|profile|three_quarter|face|back`, one per photo). By default the photos are composed into a sheet and locked directly as panels; `--generate` instead sends them to the `still` workflow (as `reference_image`, `reference_image_2`, … when bound, otherwise as one collage) to synthesize a clean turnaround, including an inferred back view (`--back`). EXIF rotation is applied, and only re-encoded, metadata-free copies are uploaded to ComfyUI. A seeded `back` panel is preferred on rear-view shots.
 - **Silent turnaround reference videos:** Workflows that bind `reference_video` (such as Seedance) can receive a locked 360-degree expression/turnaround clip generated via `mvd reference video` and locked with `mvd reference lock-video`.
 - **Panel cropping & multi-angle identity:** `mvd reference lock` cuts the sheet into `front`, `profile`, `three_quarter`, and `face` panels. The `front` panel feeds `reference_image` (plus optional `reference_profile`, `reference_three_quarter`, `reference_face`, and `reference_image_2`, `reference_image_3`, … for multi-character/band shots). On a solo shot whose `still` workflow binds `reference_image_2` but not `reference_face`, the `face` panel goes into `reference_image_2` so the edit model sees both the full-body costume and a close facial reference, and the prompt names each picture's role; rear-view shots without lip-sync skip it so a frontal face is not forced onto a back view. The identity check averages `face`, `front`, and `three_quarter` embeddings, and `VisionJudge` inspects the whole sheet.
 
@@ -114,6 +119,7 @@ A reference sheet has four panels (front, profile, three-quarter, and macro face
 - **Set plates (`mvd plates generate` / `mvd plates lock`):** Empty-location plates use an optical lens limitation block (single tack-sharp mid-depth focal plane, progressive optical falloff, highlight bloom) so backgrounds read like photographed locations rather than uniform CGI.
   - **Derived & embedded plates:** Use `SetDesign.parent_set` or `--from-set <set>` to derive a variant lighting/angle plate from an existing locked set. Use `--style-ref <image>` to seed a plate from an external style reference, or `--embed-set <set>` to place an already-locked set inside a screen/window/portal of a new set.
   - When `still` binds `set_image`, each singer still receives its set's locked plate as a second reference image.
+- **Multi-angle set turnarounds (`mvd plates turnaround --set <name>` / `mvd plates lock-turnaround <image> --set <name>`):** From a locked plate, the `still` workflow renders a 2x2 sheet of the same location (`wide`, `reverse`, `side`, `detail`), cropped into `SetDesign.panels`. Each shot gets the panel matching its `plate_angle` override, or else its prompt cues (reverse angle, over-the-shoulder, side view, detail/insert) and framing, falling back to the main plate.
 - **Hero props (`mvd props generate` / `mvd props lock`):** Lock recurring objects (`assets/props/<prop>.png`); shots referencing those props forward `prop_image` / `prop_image_2` to `still` and `VisionJudge`.
 
 ### Matching Detail to Shot Size
@@ -136,10 +142,15 @@ Each candidate persists its `.plan.json` alongside the `.mp4` so `mvd previz ref
 
 ---
 
+### Framing Sketches (`mvd sketch`)
+
+`mvd sketch attach <image> --shot <id>` stores a rough framing/blocking drawing as `assets/sketches/<id>.png` (`Shot.sketch_image`); `--analyze` asks the vision LLM for a one- or two-sentence blocking summary (`sketch_guidance`) that is added to the still prompt, and `--reset-still` sends the shot back for regeneration. Replacing a sketch clears guidance written for the old one. The sketch is also shown to the previz planner. `mvd sketch clear --shot <id>` removes it.
+
 ## Draft Previews, Upscaling & Multi-Cut Montage
 
 - **Draft Mode (`--draft`):** Pass `--draft` to `mvd stills`, `mvd videos`, or `mvd run` to render at reduced draft resolution (with draft-aware QC) before spending full GPU/API credits.
 - **Upscaling (`mvd upscale`):** Promotes approved or selected video clips through your `upscale` ComfyUI workflow (`upscaled_path` in the manifest). `mvd assemble` automatically prefers `upscaled_path` when present.
+- **Storyboard contact sheets (`mvd draft-grid`):** Renders one 2x2 or 3x2 sheet per contiguous section (`--section`, `--shot`, `--layout auto|2x2|3x2`) to `assets/draft_grids/`. `--mode stills` (default) slices it into one draft still per shot, `r2v` renders one montage clip per sheet and cuts it into per-shot clips (setting `allow_cuts`), `both` does both, and `sheet` only renders the sheet. Panels are recorded as passed attempts unless `--run-qc` runs image QC on them, and any earlier review decision on those shots is cleared. Finished sections are saved even if a later section fails; sheets are reused unless `--overwrite`.
 - **Multi-cut montage (`allow_cuts`):** By default, shots are single continuous takes (`motion_single_take`). Enable `planning.allow_multicut_shots: true` (or set `allow_cuts: true` on individual shots in `manifest.json`) for dynamic multi-angle montage clips; `VideoQC` relaxes temporal cut-density penalties on those shots.
 
 ---
@@ -188,6 +199,8 @@ Applied per asset (`retry.strategies`) until one attempt passes or `retry.max_at
 1. `new_seed`: same prompt, new seed (used first on stochastic artifact/sync failures).
 2. `rewrite_prompt`: the LLM rewrites the prompt from the QC failure reasons and fix hints, replacing backfiring `'no <part>'` phrasing with affirmative visual descriptions (jumped to immediately on Attempt 2 when `vision_spec`, `no_people`, or `face_framing` fails).
 3. `adjust_params`: applies `retry.adjust_params` (for example more steps).
+
+**Explicit still fixes:** `mvd repair-still <shot> -i "<edit>"` edits the shot's current still in place (`repair_still`: keep composition, framing, and identity; apply only the edit) through a workflow that binds `reference_image`, and a repair that does worse on QC than its source is marked regressed and never selected over it. `mvd regenerate-still <shot> --strategy recreate [-i "<note>"]` renders the still from scratch, using the note as rewrite direction. Both reset the shot's video and review.
 
 When attempts run out, the best-scoring attempt is kept and the shot is queued for review. A failed ComfyUI job counts as an attempt; an unreachable server stops the run without using any. `retry.max_generations_per_run` caps total spend per run.
 

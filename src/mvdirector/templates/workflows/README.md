@@ -30,14 +30,15 @@ Each workflow needs two files:
 5. Run `mvd validate`. It reports any binding that points at a missing node or input, and lists
    the available input fields on that node if you mistyped a field name.
 
-## The four workflows
+## The workflows
 
 | Name | Used for | Parameters the pipeline sends |
 |---|---|---|
 | `t2i` | Base reference sheet, set plate candidates, b-roll stills | `positive_prompt`, `negative_prompt`, `seed`, `width`, `height` |
 | `still` | Singer stills, and reference sheets for later costumes | the above plus `reference_image` (omit `reference_image` for T2I-only / LoRA models such as Z-Image or Krea T2I) |
-| `lipsync` | Lip-sync clips | `positive_prompt`, `negative_prompt`, `lyrics`, `seed`, `image`, `audio`, `audio_video`, `reference_video`, `previz_video`, optional R2V refs (`reference_image`, `reference_face`, `reference_profile`, `reference_three_quarter`, `reference_image_2`, …, `set_image`, `prop_image`), `width`, `height`, `num_frames`, `duration`, `fps` |
+| `lipsync` | Lip-sync clips | `positive_prompt`, `negative_prompt`, `lyrics`, `seed`, `image`, `audio`, `audio_video`, `reference_video`, `previz_video`, optional R2V refs (`reference_image`, `reference_face`, `reference_profile`, `reference_three_quarter`, `reference_image_2`, …, `set_image`, `prop_image`), optional `draft_grid_image`, `width`, `height`, `num_frames`, `duration`, `fps` |
 | `i2v` | All other clips | as `lipsync`, without `audio` / `audio_video` (unless listed in `required`) |
+| `r2v` (optional) | One montage clip per section storyboard (`mvd draft-grid --mode r2v`); falls back to `lipsync`, then `i2v` | as `lipsync`, plus `draft_grid_image` (the section's contact sheet) |
 | `upscale` (optional) | Selective post-review clip upscaling (`mvd upscale`) | `video`, `width`, `height`, `fps`, `seed`, `positive_prompt`, `negative_prompt`, optional `audio`, optional `image` |
 
 **Dedicated singing lip-sync & latent-refine templates shipped here:** LTX audio-conditioned A2V can drift on fast/sung syllables. Starter bindings for tighter mouth sync and 1080p tiled latent refinement are included alongside the defaults:
@@ -103,6 +104,7 @@ does not receive it:
 | `reference_image_2` | Second character's front panel on two-shots | Your edit model supports two subject images |
 | `set_image` | The set's locked plate | You want the still placed in an approved location |
 | `prop_image` | Primary hero prop sheet for the shot (`prop_image_2` for a second) | Shots feature recurring hero props (`mvd props`) |
+| `sketch_image` | The shot's rough framing sketch (`mvd sketch attach`) | Your model takes a layout/control image; otherwise the sketch uses a free `reference_image_N` slot |
 
 A reference image a shot does not have (for example `prop_image` on a shot without props,
 `reference_image_2` on a solo shot, or `set_image` when running with `--skip-preflight`) is not

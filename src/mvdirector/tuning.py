@@ -31,6 +31,7 @@ from mvdirector.config import (
     ProjectConfig,
     mask_unset_allowed_env_refs,
 )
+from mvdirector.dotenv import merged_project_environ
 from mvdirector.errors import ConfigError
 from mvdirector.models import BOTH_VOICES, Analysis, TrackProfile, VideoStyle, VocalMode
 from mvdirector.project import Project
@@ -1015,7 +1016,7 @@ def _expand_inline_section_if_needed(lines: list[str], section: str) -> list[str
             return lines
         try:
             loaded = yaml.safe_load(val_stripped)
-        except yaml.YAMLError:
+        except (yaml.YAMLError, RecursionError):
             return lines
         if isinstance(loaded, dict):
             dumped = yaml.safe_dump(
@@ -1102,6 +1103,8 @@ def apply_adjustments_to_yaml(yaml_path: Path, adjustments: list[Adjustment]) ->
     to_write = [adj for adj in adjustments if adj.applied]
     if not to_write:
         return []
+    if yaml_path.is_symlink():
+        raise ConfigError(f"Refusing to modify symlinked {CONFIG_FILENAME} at {yaml_path}")
     if not yaml_path.is_file():
         raise ConfigError(f"Config file not found: {yaml_path}")
     text = yaml_path.read_text(encoding="utf-8")
@@ -1109,6 +1112,8 @@ def apply_adjustments_to_yaml(yaml_path: Path, adjustments: list[Adjustment]) ->
         parsed_before = yaml.safe_load(text) or {}
     except yaml.YAMLError as exc:
         raise ConfigError(f"{yaml_path} is not valid YAML: {exc}") from exc
+    except RecursionError:
+        raise ConfigError(f"{yaml_path} nests collections too deeply to parse.") from None
     if not isinstance(parsed_before, dict):
         raise ConfigError(f"{yaml_path} must hold a YAML mapping at top level.")
 
@@ -1154,6 +1159,8 @@ def apply_adjustments_to_yaml(yaml_path: Path, adjustments: list[Adjustment]) ->
         parsed_after = yaml.safe_load(updated_text) or {}
     except yaml.YAMLError as exc:
         raise ConfigError(f"Updated {yaml_path} failed YAML validation: {exc}") from exc
+    except RecursionError:
+        raise ConfigError(f"Updated {yaml_path} nests collections too deeply to parse.") from None
     if not isinstance(parsed_after, dict):
         raise ConfigError(f"Updated {yaml_path} must hold a YAML mapping at top level.")
     for adj in to_write:
@@ -1166,8 +1173,10 @@ def apply_adjustments_to_yaml(yaml_path: Path, adjustments: list[Adjustment]) ->
                 f"expected {adj.recommended!r}, got {actual!r}"
             )
 
+    effective_env = merged_project_environ(yaml_path.parent)
+    to_validate = mask_unset_allowed_env_refs(parsed_after, environ=effective_env)
     try:
-        ProjectConfig.model_validate(mask_unset_allowed_env_refs(parsed_after))
+        ProjectConfig.model_validate(to_validate, context={"environ": effective_env})
     except ValidationError as exc:
         raise ConfigError(f"Invalid configuration after tuning {yaml_path}:\n{exc}") from exc
 

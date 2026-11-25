@@ -166,7 +166,7 @@ class OpenAIChat(ChatBackend):
         for raw in events:
             try:
                 chunk = json.loads(raw)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, RecursionError):
                 continue
             if not isinstance(chunk, dict):
                 continue

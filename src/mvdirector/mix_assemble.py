@@ -225,7 +225,7 @@ def chapter_frame_counts(chapters: Sequence[MixChapter], fps: int) -> list[int]:
 def _read_stamp(marker: Path) -> dict[str, Any] | None:
     try:
         data = json.loads(marker.read_text("utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     return data if isinstance(data, dict) else None
 

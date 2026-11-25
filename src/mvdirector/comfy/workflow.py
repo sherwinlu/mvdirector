@@ -204,10 +204,23 @@ class WorkflowTemplate:
                 continue
             for target in targets:
                 graph[target.node]["inputs"][target.field] = value
+        bound_nodes = {
+            target.node for param in values for target in self.bindings.inputs.get(param, ())
+        }
         for param in self.bindings.inputs.keys() - values.keys():
-            if is_optional_file_param(param) and param not in self.bindings.required:
+            # On video workflows ("image" supplies the starting still), an unbound optional
+            # "reference_image" or "audio" loader (e.g. b-roll or non-lipsync shots) should be
+            # pruned. Likewise on upscale/V2V workflows ("video" supplies the source clip),
+            # unbound optional "audio" or "image" loaders should be pruned.
+            optional_loader = (
+                is_optional_file_param(param)
+                or (param in ("reference_image", "audio") and "image" in values)
+                or (param in ("audio", "image") and "video" in values)
+            )
+            if optional_loader and param not in self.bindings.required:
                 for target in self.bindings.inputs[param]:
-                    _drop_loader(graph, target.node)
+                    if target.node not in bound_nodes:
+                        _drop_loader(graph, target.node)
         return prune_switch_branches(graph, output_node=self.bindings.output.node)
 
 

@@ -307,6 +307,13 @@ def write_project_dotenv_var(project_dir: Path, name: str, value: str) -> Path:
             out_lines[-1] += "\n"
         out_lines.append(new_line)
 
+    payload = "".join(out_lines)
+    if len(payload.encode("utf-8")) > _MAX_DOTENV_BYTES:
+        raise ConfigError(
+            f"{dotenv_path} would exceed the {_MAX_DOTENV_BYTES} byte limit; "
+            f"shorten the value for {name} or remove unused entries."
+        )
+
     fd, tmp_name = tempfile.mkstemp(prefix=".env.", suffix=".tmp", dir=project_dir)
     tmp_path = Path(tmp_name)
     try:
@@ -314,7 +321,7 @@ def write_project_dotenv_var(project_dir: Path, name: str, value: str) -> Path:
             os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             fd = -1
-            handle.write("".join(out_lines))
+            handle.write(payload)
         os.replace(tmp_path, dotenv_path)
         if os.name == "posix":
             os.chmod(dotenv_path, 0o600)

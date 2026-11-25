@@ -51,9 +51,18 @@ def _api_key(
 ) -> tuple[str | None, str]:
     """The key and a hint telling the user where it should come from."""
     name = config.api_key_env or info.key_env
-    value = environ.get(name, "") if name else ""
-    if not value and config.provider == "gemini" and not config.api_key_env:
-        value = environ.get(_GEMINI_FALLBACK_KEY_ENV, "")
+    used_name = name
+    raw_value = environ.get(name, "") if name else ""
+    if not raw_value.strip() and config.provider == "gemini" and not config.api_key_env:
+        fallback_val = environ.get(_GEMINI_FALLBACK_KEY_ENV, "")
+        if fallback_val.strip():
+            raw_value = fallback_val
+            used_name = _GEMINI_FALLBACK_KEY_ENV
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw_value):
+        raise ConfigError(
+            f"API key in {used_name or 'environment'} must not contain control characters."
+        )
+    value = raw_value.strip()
     hint = f"Check the {name} environment variable." if name else ""
     wanted = info.key_required or config.api_key_env is not None
     if wanted and not value:

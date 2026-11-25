@@ -88,7 +88,16 @@ def upscale_videos(
             "fps": video.fps,
             "seed": project.config.seed + shot.index,
             "positive_prompt": selected.prompt,
+            "negative_prompt": manifest.visual_bible.negative_prompt,
         }
+        if template.accepts("audio") and shot.audio_slice.path:
+            audio_path = project.path(shot.audio_slice.path)
+            if audio_path.is_file():
+                params["audio"] = comfy.upload(audio_path)
+        if template.accepts("image") and shot.still.selected and shot.still.selected.path:
+            still_path = project.path(shot.still.selected.path)
+            if still_path.is_file():
+                params["image"] = comfy.upload(still_path)
         comfy.run(template.render(params), template.bindings.output, destination)
         shot.video.upscaled_path = project.rel(destination)
         shot.video.upscaled_from_attempt = selected.number

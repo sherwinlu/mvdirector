@@ -1,0 +1,16 @@
+{
+  "description": "Placeholder starter bindings for two-stage Latent Upscale + 1-Step Tiled Refine post-approval upscaling ('mvd upscale'). Pair with Apache-2.0 video latent upscalers (LTX-2.x / Wan 3D latent upscaler + tiled low-denoise refine sampler) to promote approved draft clips to crisp 1080p masters on 16-24 GB GPUs without RealESRGAN skin smoothing. Replace example node ids with ids from your exported ComfyUI API workflow.",
+  "workflow": "latent_refine_upscale.api.json",
+  "inputs": {
+    "video": [{"node": "10", "field": "video"}],
+    "positive_prompt": [{"node": "12", "field": "text"}],
+    "negative_prompt": [{"node": "13", "field": "text"}],
+    "width": [{"node": "20", "field": "width"}],
+    "height": [{"node": "20", "field": "height"}],
+    "fps": [{"node": "20", "field": "fps"}, {"node": "50", "field": "fps"}],
+    "seed": [{"node": "30", "field": "seed"}]
+  },
+  "required": ["video", "width", "height", "seed"],
+  "defaults": {},
+  "output": {"node": "50", "extensions": [".mp4"]}
+}

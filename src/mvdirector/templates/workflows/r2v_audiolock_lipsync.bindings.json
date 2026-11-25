@@ -1,0 +1,22 @@
+{
+  "description": "Placeholder starter bindings for multi-reference (R2V) audio-locked lip-sync workflows (e.g. Wan VACE/Phantom, LTX-2.x AV Audio-Lock, or licensed MiniMax H3 Audio-Lock). Receives the shot's starting still ('image'), isolated vocal slice ('audio'), and optional character/scene reference images ('reference_image', 'reference_image_2', 'set_image') whose LoadImage nodes are pruned automatically on shots without them. Replace example node ids with ids from your exported ComfyUI API workflow.",
+  "workflow": "r2v_audiolock_lipsync.api.json",
+  "inputs": {
+    "positive_prompt": [{"node": "6", "field": "text"}],
+    "negative_prompt": [{"node": "7", "field": "text"}],
+    "image": [{"node": "20", "field": "image"}],
+    "reference_image": [{"node": "21", "field": "image"}],
+    "reference_image_2": [{"node": "22", "field": "image"}],
+    "set_image": [{"node": "23", "field": "image"}],
+    "audio": [{"node": "24", "field": "audio"}],
+    "seed": [{"node": "30", "field": "seed"}],
+    "width": [{"node": "40", "field": "width"}],
+    "height": [{"node": "40", "field": "height"}],
+    "num_frames": [{"node": "40", "field": "length"}],
+    "duration": [{"node": "40", "field": "duration"}],
+    "fps": [{"node": "41", "field": "frame_rate"}, {"node": "50", "field": "fps"}]
+  },
+  "required": ["positive_prompt", "image", "audio", "seed"],
+  "defaults": {},
+  "output": {"node": "50", "extensions": [".mp4"]}
+}

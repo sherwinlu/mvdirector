@@ -225,6 +225,8 @@ def test_draft_assemble_and_target_resolution_upscale(
         "fps": [{"node": "2", "field": "fps"}],
         "seed": [{"node": "2", "field": "seed"}],
         "positive_prompt": [{"node": "1", "field": "text"}],
+        "negative_prompt": [{"node": "1", "field": "negative"}],
+        "image": [{"node": "3", "field": "image"}],
     }
     write_upscale_workflow(project, extra_inputs=upscale_inputs, length=25)
     project.config.comfy.workflows["upscale"] = "upscale.bindings.json"
@@ -287,6 +289,8 @@ def test_draft_assemble_and_target_resolution_upscale(
     assert len(upscaled) == len(manifest.shots)
     assert fake.queued[0]["2"]["inputs"]["width"] == 1920
     assert fake.queued[0]["2"]["inputs"]["height"] == 1080
+    assert "negative" in fake.queued[0]["1"]["inputs"]
+    assert fake.queued[0]["3"]["inputs"]["image"].startswith("mvdirector/upload_")
     assert len(progress) == len(manifest.shots)
     assert progress[-1][1:] == (len(manifest.shots), len(manifest.shots))
 

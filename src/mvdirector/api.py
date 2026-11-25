@@ -260,7 +260,7 @@ def init_project(directory: Path, *, mode: ProjectMode = ProjectMode.STANDARD) -
     """Create a project folder with a starter config and workflow binding examples."""
     if directory.exists() and not directory.is_dir():
         raise MVDError(f"{directory} already exists and is not a directory")
-    if (directory / CONFIG_FILENAME).exists():
+    if os.path.lexists(directory / CONFIG_FILENAME):
         raise MVDError(f"{directory} already contains {CONFIG_FILENAME}")
     template_root = resources.files("mvdirector") / "templates"
     kept: list[str] = []
@@ -1026,7 +1026,9 @@ def generate(
                     if t2i_bindings.is_file():
                         names.append("t2i")
         templates = load_templates(project, names)
-        if AssetKind.STILL in effective_kinds and manifest.mode is not ProjectMode.MIX:
+        if manifest.mode is not ProjectMode.MIX and (
+            AssetKind.STILL in effective_kinds or AssetKind.VIDEO in effective_kinds
+        ):
             ready = check_assets(project, manifest, templates, selected_shots)
             for warning in ready.warnings:
                 emit(RunEvent("warning", message=f"Warning: {warning}"))

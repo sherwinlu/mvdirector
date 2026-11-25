@@ -240,3 +240,148 @@ def test_seedance_bindings_template_validates() -> None:
     assert "audio_video" in parsed.inputs and "audio_video" in parsed.required
     # Check against ProjectConfig defaults check as well
     assert ProjectConfig().comfy.reference_notation == "prose"
+
+
+def test_r2v_audiolock_and_latent_refine_templates_validate() -> None:
+    from importlib import resources
+
+    from mvdirector.comfy.workflow import WorkflowBindings
+
+    wf_dir = resources.files("mvdirector") / "templates" / "workflows"
+    r2v = WorkflowBindings.model_validate_json(
+        (wf_dir / "r2v_audiolock_lipsync.bindings.json").read_text(encoding="utf-8")
+    )
+    assert {"image", "audio", "reference_image", "reference_image_2", "set_image"} <= set(
+        r2v.inputs
+    )
+    assert "reference_image" not in r2v.required and "set_image" not in r2v.required
+
+    upscale = WorkflowBindings.model_validate_json(
+        (wf_dir / "latent_refine_upscale.bindings.json").read_text(encoding="utf-8")
+    )
+    assert {"video", "width", "height", "positive_prompt", "negative_prompt", "seed"} <= set(
+        upscale.inputs
+    )
+
+
+def test_motion_prompt_includes_r2v_bound_references_in_tags_and_prose() -> None:
+    manifest, shot = _sample_manifest()
+    tagged = prompts.compose_motion_prompt(
+        manifest,
+        shot,
+        reference_notation="tags",
+        bound_references=["reference_image", "reference_image_2", "set_image"],
+    )
+    assert "Animate starting from @image1." in tagged
+    assert "@image2 shows the singer" in tagged
+    assert "@image3 shows the secondary performer" in tagged
+    assert "@image4 shows the location" in tagged
+
+    prose = prompts.compose_motion_prompt(
+        manifest,
+        shot,
+        reference_notation="prose",
+        bound_references=["reference_image", "set_image"],
+    )
+    assert "first attached reference image shows the singer" in prose
+    assert "second attached reference image shows the location" in prose
+
+
+def test_bible_system_prompt_encourages_grounded_people_and_shootable_locations() -> None:
+    normalized = " ".join(prompts.BIBLE_SYSTEM.split()).lower()
+    assert "ordinary, relatable real-world people" in normalized
+    assert "physically shootable real-world locations" in normalized
+
+
+@needs_ffmpeg
+def test_runner_binds_optional_r2v_video_references_and_prunes_broll(
+    project, analysis, tmp_path, sample_png, sample_mp4
+) -> None:
+    from mvdirector.generation import plates
+    from mvdirector.models import Attempt, RetryStrategy
+
+    project.config.video.max_clip_seconds = 4.0
+    project.config.comfy.reference_notation = "tags"
+
+    # Build a video graph with optional LoadImage nodes for reference_image and set_image.
+    graph = copy.deepcopy(WORKFLOW_GRAPH)
+    graph["10"] = {"class_type": "LoadImage", "inputs": {"image": "unused_ref.png"}}
+    graph["11"] = {"class_type": "LoadImage", "inputs": {"image": "unused_set.png"}}
+    graph["2"]["inputs"]["ref_char"] = ["10", 0]
+    graph["2"]["inputs"]["ref_set"] = ["11", 0]
+    wf_dir = project.path("workflows")
+    (wf_dir / "graph.api.json").write_text(json.dumps(graph))
+    for name in ("lipsync", "i2v"):
+        bpath = wf_dir / f"{name}.bindings.json"
+        bdata = json.loads(bpath.read_text())
+        bdata["inputs"]["reference_image"] = [{"node": "10", "field": "image"}]
+        bdata["inputs"]["set_image"] = [{"node": "11", "field": "image"}]
+        bpath.write_text(json.dumps(bdata))
+
+    manifest = build_manifest(project.config, analysis, "lyrics", "style", llm=None)
+    portrait = tmp_path / "portrait.png"
+    portrait.write_bytes(sample_png)
+    reference.lock_reference(project, manifest, portrait)
+
+    # Lock a set plate for the singer shot's setting.
+    singer_shot = next(s for s in manifest.shots if s.type is ShotType.LIPSYNC)
+    if manifest.visual_bible.find_set(singer_shot.setting) is None:
+        manifest.visual_bible.settings.append(
+            SetDesign(name=singer_shot.setting, description="neon performance stage")
+        )
+    plate_img = tmp_path / "plate.png"
+    plate_img.write_bytes(sample_png)
+    plates.lock_plate(project, manifest, plate_img, singer_shot.setting)
+
+    # Also test a b-roll shot with no singer (reference_image LoadImage must be pruned).
+    broll_shot = next(s for s in manifest.shots if s.id != singer_shot.id)
+    broll_shot.type = ShotType.BROLL
+    broll_shot.character = None
+    broll_shot.characters = []
+    broll_shot.setting = singer_shot.setting
+
+    for shot in (singer_shot, broll_shot):
+        still_path = project.asset_path(shot, AssetKind.STILL, 1)
+        still_path.parent.mkdir(parents=True, exist_ok=True)
+        still_path.write_bytes(sample_png)
+        shot.still.status = AssetStatus.PASSED
+        shot.still.attempts = [
+            Attempt(
+                number=1,
+                strategy=RetryStrategy.INITIAL,
+                seed=1,
+                prompt="still",
+                path=project.rel(still_path),
+            )
+        ]
+        shot.still.selected_attempt = 1
+
+    fake = FakeComfy(png=sample_png, mp4=sample_mp4)
+    comfy = ComfyClient(project.config.comfy, transport=fake.transport(), sleep=lambda _: None)
+    gates = QualityGates(
+        image=ScriptedGate([True, True]),
+        video=ScriptedGate([True, True]),
+        face_analyzer=None,
+    )
+    policy = RetryPolicy(project.config.retry, project.config.seed, llm=None)
+    templates = load_templates(project, ["t2i", "still", "lipsync", "i2v"])
+    runner = ShotRunner(project, manifest, comfy, gates, policy, templates, RunBudget(10))
+    runner.run([AssetKind.VIDEO], shot_ids=[singer_shot.id, broll_shot.id])
+
+    assert len(fake.queued) == 2
+    ordered_ids = [s.id for s in manifest.shots if s.id in {singer_shot.id, broll_shot.id}]
+    queued_by_shot = dict(zip(ordered_ids, fake.queued, strict=True))
+    singer_graph = queued_by_shot[singer_shot.id]
+    broll_graph = queued_by_shot[broll_shot.id]
+    assert "10" in singer_graph and "11" in singer_graph
+    assert singer_graph["10"]["inputs"]["image"].startswith("mvdirector/upload_")
+    assert singer_graph["11"]["inputs"]["image"].startswith("mvdirector/upload_")
+    assert "@image2 shows the singer" in singer_shot.video.attempts[0].prompt
+    assert "@image3 shows the location" in singer_shot.video.attempts[0].prompt
+
+    # B-roll has no singer -> reference_image loader node 10 is pruned, while set_image stays.
+    assert "10" not in broll_graph and "ref_char" not in broll_graph["2"]["inputs"]
+    assert "11" in broll_graph and broll_graph["11"]["inputs"]["image"].startswith(
+        "mvdirector/upload_"
+    )
+    assert "@image2 shows the location" in broll_shot.video.attempts[0].prompt

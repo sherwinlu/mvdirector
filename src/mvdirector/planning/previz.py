@@ -89,6 +89,10 @@ class PrevizPlan(_PrevizBase):
     camera: list[CameraKeyframe] = Field(default_factory=list, max_length=128)
 
 
+class SketchBlockingSummary(_PrevizBase):
+    guidance: str = ""
+
+
 _CAMERA_BY_FRAMING: dict[Framing, tuple[tuple[float, float, float], tuple[float, float, float]]] = {
     Framing.CLOSE_UP: ((0.0, 1.48, 1.35), (0.0, 1.45, 0.0)),
     Framing.MEDIUM_CLOSE: ((0.15, 1.42, 2.2), (-0.1, 1.35, 0.0)),
@@ -213,8 +217,9 @@ def plan_previz(
     llm: LLMClient | None,
     *,
     set_plate_path: Path | None = None,
+    sketch_path: Path | None = None,
 ) -> PrevizPlan:
-    """Design a 3D blocking plan for ``shot`` via LLM (using set plate if present) or fallback."""
+    """Design a 3D blocking plan for ``shot`` via LLM (using plate/sketch if present)."""
     if llm is None:
         return default_previz_plan(shot, manifest)
 
@@ -222,6 +227,14 @@ def plan_previz(
     try:
         content = []
         has_image = False
+        if sketch_path is not None and sketch_path.is_file():
+            content.append(
+                text_block(
+                    "ROUGH FRAMING SKETCH (match composition, subject placement, and angle):"
+                )
+            )
+            content.append(image_block(sketch_path))
+            has_image = True
         if set_plate_path is not None and set_plate_path.is_file():
             content.append(text_block("SET PLATE IMAGE (match this room layout and proportions):"))
             content.append(image_block(set_plate_path))
@@ -252,6 +265,7 @@ def refine_previz(
     llm: LLMClient | None,
     *,
     set_plate_path: Path | None = None,
+    sketch_path: Path | None = None,
 ) -> PrevizPlan:
     """Update an existing 3D blocking plan according to explicit user camera/staging feedback."""
     cleaned = feedback.strip()
@@ -267,6 +281,22 @@ def refine_previz(
     )
     content = []
     has_image = False
+    if sketch_path is not None and sketch_path.is_file():
+        try:
+            content.append(
+                text_block(
+                    "ROUGH FRAMING SKETCH (match composition, subject placement, and angle):"
+                )
+            )
+            content.append(image_block(sketch_path))
+            has_image = True
+        except OSError as exc:
+            log.warning(
+                "%s: could not read sketch %s (%s); continuing without it",
+                shot.id,
+                sketch_path,
+                exc,
+            )
     if set_plate_path is not None and set_plate_path.is_file():
         try:
             content.append(text_block("SET PLATE IMAGE (match this room layout and proportions):"))
@@ -279,7 +309,6 @@ def refine_previz(
                 set_plate_path,
                 exc,
             )
-            content.clear()
     content.append(prompt_block)
     try:
         refined = llm.complete_json(system=PREVIZ_SYSTEM, content=content, schema=PrevizPlan)
@@ -290,3 +319,30 @@ def refine_previz(
     if not refined.actors or len(refined.camera) < 1:
         raise ConfigError(f"{shot.id}: LLM returned an incomplete refined previz plan.")
     return refined
+
+
+def describe_sketch_blocking(
+    shot: Shot,
+    manifest: Manifest,
+    sketch_path: Path,
+    llm: LLMClient | None,
+) -> str:
+    """Summarize camera angle, subject placement, and framing from a rough sketch image."""
+    if llm is None or not sketch_path.is_file():
+        return ""
+    system = (
+        "You are a cinematographer reading a rough hand-drawn storyboard sketch. "
+        "Describe ONLY the spatial composition, camera angle, framing scale, foreground/background "
+        "layout, and subject placement/pose in 1-2 concise sentences (no style adjectives)."
+    )
+    try:
+        content = [
+            text_block("Rough framing sketch for shot:"),
+            image_block(sketch_path),
+            text_block(_shot_previz_prompt(shot, manifest)),
+        ]
+        reply = llm.complete_json(system=system, content=content, schema=SketchBlockingSummary)
+        return reply.guidance.strip()
+    except (ImagesNotSupportedError, LLMError, OSError) as exc:
+        log.warning("%s: could not analyze sketch with LLM (%s); skipping", shot.id, exc)
+        return ""

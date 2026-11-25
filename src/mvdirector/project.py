@@ -131,6 +131,14 @@ class Project:
         return self.root / "assets" / "previz"
 
     @property
+    def draft_grids_dir(self) -> Path:
+        return self.root / "assets" / "draft_grids"
+
+    @property
+    def sketches_dir(self) -> Path:
+        return self.root / "assets" / "sketches"
+
+    @property
     def segments_dir(self) -> Path:
         return self.root / "assets" / "segments"
 
@@ -173,6 +181,18 @@ class Project:
     def previz_plan_path(self, shot_id: str) -> Path:
         safe_id = _require_safe_id(shot_id, "shot id")
         return self.path(Path("assets") / "previz" / f"{safe_id}.plan.json")
+
+    def draft_grid_path(self, sheet_id: str, suffix: str = ".png") -> Path:
+        safe_id = _require_safe_id(sheet_id, "draft grid id")
+        if not re.fullmatch(r"(?:_[a-z0-9_]+)?\.[a-z0-9]{1,8}", suffix):
+            raise ConfigError(f"Unsupported draft grid file extension: {suffix!r}")
+        return self.path(Path("assets") / "draft_grids" / f"{safe_id}{suffix}")
+
+    def sketch_path(self, shot_id: str, suffix: str = ".png") -> Path:
+        safe_id = _require_safe_id(shot_id, "shot id")
+        if not re.fullmatch(r"\.[a-z0-9]{1,8}", suffix):
+            raise ConfigError(f"Unsupported sketch file extension: {suffix!r}")
+        return self.path(Path("assets") / "sketches" / f"{safe_id}{suffix}")
 
     def segment_video_path(self, chapter_id: str, *, draft: bool = False) -> Path:
         safe_id = _require_safe_id(chapter_id, "chapter id")

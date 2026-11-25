@@ -12,9 +12,18 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
-from mvdirector.models import Character, Framing, Manifest, ProjectMode, Shot, ShotType
+from mvdirector.models import (
+    Character,
+    Framing,
+    Manifest,
+    ProjectMode,
+    Shot,
+    ShotType,
+    VisualBible,
+    normalize_exclusions,
+)
 from mvdirector.planning.world_state import build_ledger_from_facts, filter_look_for_state
 
 if TYPE_CHECKING:
@@ -366,13 +375,17 @@ as id='sakura' with name='さくら').
   an earlier set when this location is a stripped, altered, or nested variant of it. Unless the
   style brief explicitly calls for fantasy, sci-fi, or surreal worlds, ground sets in physically
   shootable real-world locations (everyday streets, apartments, transit, cafés, rooftops) that an
-  indie crew could film on location.
+  indie crew could film on location. Unless the style brief explicitly asks for sleek, pristine, or
+  futuristic looks, give sets subtle lived-in wear and patina (light floor scuffs, weathered paint,
+  handling marks, natural surface imperfections) rather than brand-new CGI perfection.
 - props: 0 to 3 recurring hero objects grounded specifically in this song's lyrics or concept (use
   an empty list if none are needed; never invent generic sci-fi discs or unrelated props). Each
   has id (short lowercase identifier), name, sections, and a purely visual description with
   approximate scale in centimeters, finish, and affirmative descriptions of its visible structure
   (no sound/audio descriptions, and in shot prompts refer to props by natural prose, never by
-  snake_case ids).
+  snake_case ids). Unless the style brief asks for sleek, pristine, or futuristic surfaces, include
+  subtle realistic patina and lived-in wear (faint scuffs, tarnished edges, natural handling wear)
+  rather than factory-fresh CGI sheen.
 - rules: 4 to 10 short rules that every shot follows (camera language, physical camera placement,
   continuity, effects, how much of the video shows the performers). For duets or groups, write
   rules that apply across the cast rather than locking every shot to a single character. Only
@@ -491,7 +504,11 @@ Rules:
   descriptions.
 - motion_prompt: in English, what happens in the clip: performance, body movement, and physical
   camera operation (describe handheld physics such as subtle operator breathing sway, small weight
-  shifts, and soft starts and stops rather than bare labels). Keep camera moves gentle and stable
+  shifts, and soft starts and stops rather than bare labels). Describe movement, acting/expression
+  changes, ambient motion, and camera motion ONLY—never re-describe locked wardrobe items,
+  permanent facial features, hair details, or static room/set decor already fixed in the first
+  frame (re-describing static details causes video models to drift off the starting still). Keep
+  camera moves gentle and stable
   on lipsync shots so the singing mouth stays clearly tracked. On 'broll' and 'performance' clips,
   keep motion physically steady—one continuous camera move plus smooth ambient or body motion—and
   avoid sudden violent impacts, collapses, or multi-stage chaotic events that trigger video-model
@@ -538,10 +555,15 @@ letters, digits, and underscores only.
   sections of the song it serves (sections), a concrete description of how it looks (naming one
   primary mid-depth focal object so the lens has a clear plane of focus), how light/atmosphere and
   the camera move there (movement), and an optional parent_set when a location is an altered
-  variant of an earlier set.
+  variant of an earlier set. Unless the style brief explicitly asks for sleek, pristine, or
+  futuristic looks, give environments subtle lived-in wear and patina (light scuffs, weathered
+  surfaces, natural imperfections) rather than brand-new CGI perfection.
 - props: 0 to 3 recurring hero objects central to the visual storytelling (e.g. a monolith, clock,
   prism, lantern). Each has id (short lowercase identifier), name, sections, and a concrete
   description with approximate scale, finish, and affirmative descriptions of visible structure.
+  Unless the style brief asks for sleek, pristine, or futuristic surfaces, include subtle
+  realistic patina and lived-in wear (faint scuffs, tarnished edges, natural handling wear) rather
+  than factory-fresh CGI sheen.
 - rules: 4 to 10 short actionable visual direction rules (camera language, physical camera
   placement, lighting evolution, motion rhythm, no people in frame)."""
 
@@ -575,9 +597,10 @@ Rules:
   evolve every 2 to 4 seconds (light shifting, particles, water, fog, shadows, camera glide).
 - still_prompt: in English, describes the first frame only—framing, camera placement, subject
   object/environment, lighting, and atmosphere (no people or faces).
-- motion_prompt: in English, describes what moves in the scene and how the camera moves. Every
-  shot MUST remain a single continuous take with no internal cuts and no subtitles or on-screen
-  text."""
+- motion_prompt: in English, describes ONLY what moves in the scene (light, weather, particles,
+  objects) and how the camera moves—never re-describe static architecture, set dressing, or
+  materials fixed in the first frame. Every shot MUST remain a single continuous take with no
+  internal cuts and no subtitles or on-screen text."""
 
 REWRITE_SYSTEM = """You fix prompts for an AI image or video model after a quality check
 rejected the result. Rewrite the prompt in English so the listed problems are less likely, keeping
@@ -592,6 +615,8 @@ the shot's intent, framing and setting.
   stubby-legged, stiffly pasted, or giant against buildings, specify natural full-length human
   proportions (~7.5 heads tall, normal leg-to-torso ratio), an organic in-scene pose, and concrete
   scale against doors, windows, or architecture.
+- When rewriting a video motion_prompt, keep it strictly about movement, acting, and camera
+  motion; strip any re-described locked wardrobe, facial features, or static room details.
 Return the new prompt only, in the 'prompt' field."""
 
 BRIEF_SYSTEM = """You are a music video writer and Suno song producer. Given a short video
@@ -692,6 +717,14 @@ PANEL_LIST = (
     "Panel 4, MACRO CLOSE-UP of the face, forehead to chin filling the panel, tack-sharp, "
     "showing maximum pore detail, natural skin texture, and iris texture."
 )
+SEED_GRID_PANEL_LIST = (
+    "Panel 1, FULL BODY, straight-on frontal, arms at sides, feet in frame, eyes to camera. "
+    "Panel 2, FULL BODY, 90-degree profile facing frame-right, feet in frame. "
+    "Panel 3, FULL BODY BACK, facing directly away from camera showing back of head, back hair, "
+    "back of outfit, and heels, feet in frame. "
+    "Panel 4, MACRO CLOSE-UP of the face, forehead to chin filling the panel, tack-sharp, "
+    "showing maximum pore detail, natural skin texture, and iris texture."
+)
 PANEL_LIST_COLUMNS = (
     "Left column, TOP, FRONTAL HEADSHOT: head and shoulders, front view, eyes looking straight "
     "into the lens, neck and collar details visible. "
@@ -743,6 +776,12 @@ STATE_SHEET_TEMPLATE = (
     "makeup, instantly recognizable. Only the wardrobe changes.{invariants_note} {layout} "
     "{panels} Wardrobe, identical in all panels: {wardrobe} {studio}"
 )
+SEED_SHEET_TEMPLATE = (
+    "The reference image provides {source_desc} of a single real person. Create a clean "
+    "4-panel character turnaround reference sheet of THIS EXACT PERSON. Keep the face, bone "
+    "structure, skin tone, hairline, hair, and outfit faithful to the reference image across "
+    "every panel; {infer_note}. {layout} {panels} {outfit_note}{invariants_note}{studio}"
+)
 SHEET_NEGATIVE = (
     "duplicate panels, different people in different panels, cropped feet in full-body panels, "
     "colored background, text other than the panel labels, flawless poreless skin, glass-skin "
@@ -758,15 +797,23 @@ PLATE_CAMERA_LIMITATIONS = (
     "off-focus surfaces resolve as soft shape and tone only. Subtle 35mm film grain and natural "
     "lens vignette."
 )
+_SUBTLE_PATINA_CUE = (
+    "Subtle realistic surface patina, light lived-in wear, and natural material texture."
+)
+_SLEEK_STYLE_RE = re.compile(
+    r"\b(?:sleek|futuristic|sci[\s-]?fi|pristine|sterile|brand[\s-]?new|mint[\s-]?condition|"
+    r"ultra[\s-]?clean|spotless|minimalist\s+chrome)\b",
+    re.IGNORECASE,
+)
 PLATE_TEMPLATE = (
     "A photograph of an empty location, completely empty of people. {description} "
-    f"{PLATE_CAMERA_LIMITATIONS} {{style}} "
+    f"{_SUBTLE_PATINA_CUE} {PLATE_CAMERA_LIMITATIONS} {{style}} "
     "No people, no figures, no faces, no readable text or logos."
 )
 PLATE_STYLE_TEMPLATE = (
     "Create a photograph of an empty location matching the visual style, color palette, and mood "
     "of the reference image, completely empty of people. {description} "
-    f"{PLATE_CAMERA_LIMITATIONS} {{style}} "
+    f"{_SUBTLE_PATINA_CUE} {PLATE_CAMERA_LIMITATIONS} {{style}} "
     "No people, no figures, no faces, no readable text or logos."
 )
 PLATE_EMBED_TEMPLATE = (
@@ -779,8 +826,27 @@ PLATE_EMBED_TEMPLATE = (
 PLATE_EDIT_TEMPLATE = (
     "Edit the existing empty location photograph ({source_name}) to depict '{target_name}', "
     "keeping no people and matching the camera perspective, architecture, and film stock where "
-    "unchanged. Required changes: {description} {style} "
+    f"unchanged. Required changes: {{description}} {_SUBTLE_PATINA_CUE} {{style}} "
     "No people, no figures, no faces, no readable text or logos."
+)
+PLATE_TURNAROUND_TEMPLATE = (
+    "Generate a 2x2 multi-angle location turnaround sheet of the EXACT same empty location shown "
+    "in the reference image, completely empty of people. {layout} "
+    "Panel 1 (top-left): wide establishing view matching the reference location's layout, "
+    "architecture, lighting, and color grade. "
+    "Panel 2 (top-right): 180-degree reverse angle looking back across the opposite side of "
+    "the exact same space with consistent materials and practical lights. "
+    "Panel 3 (bottom-left): 90-degree side profile angle showing lateral architecture and "
+    "mid-depth landmarks. "
+    "Panel 4 (bottom-right): tight architectural and surface detail close-up of the exact "
+    "same location's textures and fixtures. "
+    "{description} "
+    f"{_SUBTLE_PATINA_CUE} {PLATE_CAMERA_LIMITATIONS} {{style}} "
+    "No people, no figures, no faces, no readable text, no labels, no watermarks."
+)
+PLATE_TURNAROUND_NEGATIVE = (
+    "people, figures, faces, readable text, labels, captions, logos, watermarks, "
+    "different locations between panels, CGI, 3D-render, video-game look"
 )
 PLATE_NEGATIVE = (
     "people, figures, faces, readable text, logos, CGI, 3D-render, video-game look, glossy "
@@ -794,11 +860,11 @@ PROP_TEMPLATE = (
     "even, flat diffuse lighting. Left panel: the prop seen flat-on from the front, filling most "
     "of the panel. Right panel: the same prop tilted at a three-quarter angle showing thickness, "
     "edge profile and depth. Same object, same scale and lighting in both panels. {description} "
-    "{style} No people, no hands, no readable text, no logos."
+    f"{_SUBTLE_PATINA_CUE} {{style}} No people, no hands, no readable text, no logos."
 )
 PROP_NEGATIVE = (
     "people, hands, fingers, readable text, logos, watermarks, CGI, 3D render, video-game look, "
-    "mismatched proportions between panels, extra parts"
+    "glossy plastic sheen, mismatched proportions between panels, extra parts"
 )
 # Added to a still prompt when a set plate is supplied as a second reference image.
 PLATE_NOTE = (
@@ -901,6 +967,14 @@ _STILL_REF_ROLES = {
         "the location: place the performers in that location and match its layout, "
         "lighting and color grade exactly"
     ),
+    "sketch_image": (
+        "a rough framing and composition sketch: lock subject placement, pose, camera angle, "
+        "and blocking to this guide while rendering photorealistic scene details and textures"
+    ),
+    "draft_grid_image": (
+        "the multi-panel storyboard contact sheet: match the composition, character wardrobe, "
+        "and environment across every cut"
+    ),
 }
 
 
@@ -951,6 +1025,12 @@ def _still_reference_note(
     if reference_notation == "prose":
         if plate_attached and [name for name, _ in active] == ["reference_image", "set_image"]:
             return PLATE_NOTE
+        if len(active) == 1 and active[0][0] == "sketch_image":
+            return (
+                "The attached image is a rough framing and composition sketch: lock layout, "
+                "camera angle, and subject blocking to this guide while rendering photorealistic "
+                "scene details and textures."
+            )
         if len(active) <= 1:
             return None
         clauses = []
@@ -1058,6 +1138,62 @@ def state_sheet_prompt(
     )
 
 
+def seed_sheet_prompt(
+    manifest: Manifest,
+    layout: str,
+    *,
+    state_id: str | None = None,
+    character_id: str | None = None,
+    background: str = "white",
+    photo_count: int = 1,
+    include_back: bool = True,
+    include_grid_back: bool = False,
+) -> str:
+    """Prompt for synthesizing a locked 4-panel turnaround sheet from 1–10 reference photos."""
+    character = manifest.character_for(character_id)
+    state = (
+        character.state(state_id)
+        if state_id
+        else (character.wardrobe[0] if character.wardrobe else None)
+    )
+    outfit_note = (
+        f"Outfit, identical across every panel: {_sentence(state.description)} "
+        if state and state.description.strip()
+        else ""
+    )
+    invariants = character.pinned()
+    invariants_note = f"Keep {_sentence(invariants)} " if invariants else ""
+    source_desc = (
+        f"{photo_count} reference angles arranged in a contact sheet"
+        if photo_count > 1
+        else "a reference photo"
+    )
+    has_back_panel = layout == "columns" or (layout == "grid" and include_grid_back)
+    if include_back and has_back_panel:
+        infer_note = (
+            "consistently infer any unseen angles including the rear/back view from the visible "
+            "hair, silhouette, and clothing"
+        )
+    elif include_back:
+        infer_note = (
+            "consistently infer any unseen angles from the visible hair, silhouette, and clothing"
+        )
+    else:
+        infer_note = "maintain consistent proportions and clothing across all four angles"
+    panels = (
+        SEED_GRID_PANEL_LIST if (layout == "grid" and include_grid_back) else _sheet_panels(layout)
+    )
+    return SEED_SHEET_TEMPLATE.format(
+        source_desc=source_desc,
+        infer_note=infer_note,
+        layout=PANEL_LAYOUT[layout],
+        panels=panels,
+        outfit_note=outfit_note,
+        invariants_note=invariants_note,
+        studio=_sheet_studio(layout, background),
+    )
+
+
 def reference_video_prompt(
     manifest: Manifest,
     state_id: str | None = None,
@@ -1112,15 +1248,130 @@ def reference_video_prompt(
     return " ".join(parts)
 
 
+_EXCLUSIONS_HEADER_RE = re.compile(
+    r"^\s*(?:\*{0,2})(?:exclusions?|do\s+not\s+show|never\s+show)(?:\*{0,2})\s*:(?:\*{0,2})(.*)$",
+    re.IGNORECASE,
+)
+_GENERIC_SECTION_HEADER_RE = re.compile(
+    r"^\s*(?:\*{0,2})[A-Za-z][A-Za-z0-9 _-]{1,40}(?:\*{0,2})\s*:(?:\*{0,2})"
+)
+_BULLET_LINE_RE = re.compile(r"^\s*(?:[-•]\s*|\*\s+)(.+)$")
+_EXCLUSION_PREFIX_RE = re.compile(
+    r"^(?:never\s+show|do\s+not\s+show|don't\s+show|do\s+not\s+include|never\s+include|"
+    r"avoid\s+showing|avoid|no|without)\s+",
+    re.IGNORECASE,
+)
+
+
+def parse_exclusions_from_style(style_text: str) -> list[str]:
+    """Extract global exclusions from ``Exclusions:`` / ``Do not show:`` / ``Never show:``."""
+    if not style_text:
+        return []
+    collected: list[str] = []
+    in_section = False
+    for raw_line in style_text.splitlines():
+        header_match = _EXCLUSIONS_HEADER_RE.match(raw_line)
+        if header_match is not None:
+            in_section = True
+            tail = header_match.group(1).strip()
+            if tail:
+                collected.extend(re.split(r"[,;]+", tail))
+            continue
+        if not in_section:
+            continue
+        stripped = raw_line.strip()
+        if not stripped:
+            in_section = False
+            continue
+        if _GENERIC_SECTION_HEADER_RE.match(raw_line):
+            in_section = False
+            continue
+        bullet_match = _BULLET_LINE_RE.match(raw_line)
+        if bullet_match is not None:
+            collected.append(bullet_match.group(1))
+            continue
+        in_section = False
+    return normalize_exclusions(collected)
+
+
+def exclusion_core(item: str) -> str:
+    """Strip leading imperative/negation prefixes ('never show X' -> 'X')."""
+    cleaned = " ".join(item.split()).strip(" .;,")
+    stripped = _EXCLUSION_PREFIX_RE.sub("", cleaned).strip(" .;,")
+    return stripped or cleaned
+
+
+def exclusion_to_rule(item: str) -> str:
+    """Convert an exclusion phrase into an affirmative shot-director rule."""
+    core = exclusion_core(item)
+    return (
+        f"Never show {core} in any shot; stage and describe visible elements affirmatively "
+        "without it."
+    )
+
+
+def merge_negative_prompt(base_negative: str, exclusions: Sequence[str]) -> str:
+    """Merge ``exclusions`` into ``base_negative`` without case-insensitive duplicates."""
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for part in base_negative.split(","):
+        cleaned = " ".join(part.split())
+        if not cleaned:
+            continue
+        key = cleaned.casefold()
+        if key not in seen:
+            seen.add(key)
+            tokens.append(cleaned)
+    for item in normalize_exclusions(list(exclusions)):
+        core = exclusion_core(item)
+        key = core.casefold()
+        if key and key not in seen:
+            seen.add(key)
+            tokens.append(core)
+    return ", ".join(tokens)
+
+
+def sync_bible_exclusions(bible: VisualBible, extra_exclusions: Sequence[str] = ()) -> VisualBible:
+    """Synchronize ``bible.exclusions`` into both ``bible.rules`` and ``bible.negative_prompt``."""
+    merged = normalize_exclusions([*bible.exclusions, *extra_exclusions])
+    bible.exclusions = merged
+    if not merged:
+        return bible
+    bible.negative_prompt = merge_negative_prompt(bible.negative_prompt, merged)
+    existing_rules = [r.strip() for r in bible.rules if r and r.strip()]
+    existing_cf = [r.casefold() for r in existing_rules]
+    for item in merged:
+        rule = exclusion_to_rule(item)
+        rule_cf = rule.casefold()
+        core_cf = exclusion_core(item).casefold()
+        already_covered = any(
+            r_cf == rule_cf or f"never show {core_cf}" in r_cf or f"do not show {core_cf}" in r_cf
+            for r_cf in existing_cf
+        )
+        if not already_covered:
+            existing_rules.append(rule)
+            existing_cf.append(rule_cf)
+    bible.rules = existing_rules
+    return bible
+
+
+def _apply_patina_policy(prompt: str, bible: VisualBible) -> str:
+    """Suppress default patina cues when the visual bible asks for sleek/futuristic looks."""
+    if _SLEEK_STYLE_RE.search(f"{bible.style} {bible.concept}"):
+        prompt = prompt.replace(_SUBTLE_PATINA_CUE, "")
+    return re.sub(r"\s{2,}", " ", prompt).strip()
+
+
 def _format_plate_prompt(manifest: Manifest, set_name: str, template: str, **extra: str) -> str:
     bible = manifest.visual_bible
     scene = bible.find_set(set_name)
-    return template.format(
+    formatted = template.format(
         target_name=scene.name if scene else set_name,
         description=scene.description if scene else set_name,
         style=_style_line(bible.style, bible.palette, bible.lighting),
         **extra,
-    ).replace("  ", " ")
+    )
+    return _apply_patina_policy(formatted, bible)
 
 
 def plate_prompt(manifest: Manifest, set_name: str) -> str:
@@ -1139,16 +1390,26 @@ def plate_edit_prompt(manifest: Manifest, set_name: str, source_name: str) -> st
     return _format_plate_prompt(manifest, set_name, PLATE_EDIT_TEMPLATE, source_name=source_name)
 
 
+def plate_turnaround_prompt(manifest: Manifest, set_name: str) -> str:
+    return _format_plate_prompt(
+        manifest,
+        set_name,
+        PLATE_TURNAROUND_TEMPLATE,
+        layout=PANEL_LAYOUT["grid"],
+    )
+
+
 def prop_prompt(manifest: Manifest, prop_query: str) -> str:
     bible = manifest.visual_bible
     prop = bible.find_prop(prop_query)
     description = (
         prop.description if prop and prop.description else (prop.name if prop else prop_query)
     )
-    return PROP_TEMPLATE.format(
+    formatted = PROP_TEMPLATE.format(
         description=description,
         style=_style_line(bible.style, bible.palette, bible.lighting),
-    ).replace("  ", " ")
+    )
+    return _apply_patina_policy(formatted, bible)
 
 
 def join_names(names: Sequence[str]) -> str:
@@ -1215,6 +1476,8 @@ def compose_still_prompt(
     props_attached: bool = False,
     reference_notation: str = "prose",
     bound_references: list[str] | None = None,
+    sketch_attached: bool = False,
+    sketch_guidance: str | None = None,
 ) -> str:
     """The prompt for a shot's still.
 
@@ -1234,6 +1497,19 @@ def compose_still_prompt(
     ref_note = _still_reference_note(plate_attached, reference_notation, bound_references)
     if ref_note is not None:
         parts.append(ref_note)
+    effective_sketch_guidance = (
+        sketch_guidance if sketch_guidance is not None else shot.sketch_guidance
+    ).strip()
+    sketch_in_ref_note = bool(
+        ref_note is not None and bound_references and "sketch_image" in bound_references
+    )
+    if effective_sketch_guidance:
+        parts.append(f"Framing and blocking guide (from rough sketch): {effective_sketch_guidance}")
+    elif sketch_attached and not sketch_in_ref_note:
+        parts.append(
+            "Match the exact composition, camera angle, and subject blocking from the attached "
+            "rough framing sketch while rendering photorealistic scene details and textures."
+        )
     if not plate_attached and scene is not None and scene.description:
         if shot.framing is Framing.CLOSE_UP and shot.type is ShotType.BROLL:
             if shot.setting:
@@ -1328,6 +1604,11 @@ def compose_still_prompt(
                     slot_notes.append(f"Picture {slot_idx} defines {s_label}'s appearance")
                 elif param == "set_image":
                     slot_notes.append(f"Picture {slot_idx} defines only the empty location")
+                elif param == "sketch_image":
+                    slot_notes.append(
+                        f"Picture {slot_idx} is a rough composition sketch defining framing, "
+                        "camera angle, and subject blocking only"
+                    )
             if slot_notes:
                 parts.append("; ".join(slot_notes) + ".")
         if len(visible) == 1:
@@ -1486,3 +1767,135 @@ def compose_motion_prompt(
 def _style_line(style: str, palette: str, lighting: str) -> str:
     labelled = [("Style", style), ("Palette", palette), ("Lighting", lighting)]
     return " ".join(f"{label}: {value.rstrip('.')}." for label, value in labelled if value)
+
+
+_DRAFT_GRID_SLOT_LABELS = {
+    "2x2": ("top-left", "top-right", "bottom-left", "bottom-right"),
+    "3x2": (
+        "top-left",
+        "top-center",
+        "top-right",
+        "bottom-left",
+        "bottom-center",
+        "bottom-right",
+    ),
+}
+
+
+def draft_grid_prompt(
+    manifest: Manifest,
+    shots: Sequence[Shot],
+    layout: Literal["2x2", "3x2"],
+    *,
+    reference_notation: str = "prose",
+    bound_references: list[str] | None = None,
+    plate_attached: bool = False,
+) -> str:
+    """Prompt for a per-section 2x2 or 3x2 storyboard contact sheet anchored to refs & plates."""
+    bible = manifest.visual_bible
+    parts: list[str] = []
+    if layout == "2x2":
+        parts.append(
+            "Generate a single storyboard contact sheet with four equal widescreen panels in a "
+            "2x2 grid separated by thin neutral grey dividers (Panel 1 top-left, Panel 2 "
+            "top-right, Panel 3 bottom-left, Panel 4 bottom-right). Photorealistic live-action "
+            "film frames in every panel; zero text, no panel numbers, no borders, no captions, "
+            "no watermarks."
+        )
+    else:
+        parts.append(
+            "Generate a single storyboard contact sheet with six equal widescreen panels in a "
+            "3x2 grid (3 columns across by 2 rows down) separated by thin neutral grey dividers "
+            "(top row Panels 1-3 left to right; bottom row Panels 4-6 left to right). "
+            "Photorealistic live-action film frames in every panel; zero text, no panel numbers, "
+            "no borders, no captions, no watermarks."
+        )
+    ref_note = _still_reference_note(plate_attached, reference_notation, bound_references)
+    if ref_note is not None:
+        parts.append(ref_note)
+
+    slot_labels = _DRAFT_GRID_SLOT_LABELS[layout]
+    for idx, shot in enumerate(shots):
+        slot_name = slot_labels[idx] if idx < len(slot_labels) else f"slot {idx + 1}"
+        framing_label = _FRAMING_LABEL.get(shot.framing, "medium")
+        raw = (shot.still.prompt_override or shot.still_prompt).strip()
+        if shot.type.shows_singer:
+            visible = manifest.visible_characters(shot)
+            cast_bits: list[str] = []
+            for cid, char, state_id in visible:
+                label = char.name or cid or "performer"
+                look = _look(char, state_id, framing=shot.framing)
+                cast_bits.append(f"{label} ({look})" if look else label)
+            cast_note = f" Featuring: {'; '.join(cast_bits)}." if cast_bits else ""
+        else:
+            cast_note = " Empty atmospheric cutaway, no people."
+        scene = bible.find_set(shot.setting)
+        loc_note = (
+            f" Location: {scene.name}."
+            if (plate_attached and scene is not None)
+            else (
+                f" Setting: {scene.description}"
+                if (scene is not None and scene.description)
+                else ""
+            )
+        )
+        parts.append(
+            f"Panel {idx + 1} ({slot_name}, {framing_label} {shot.type.value}): "
+            f"{_sentence(raw)}{cast_note}{loc_note}"
+        )
+
+    parts.append(_style_line(bible.style, bible.palette, bible.lighting))
+    return " ".join(part.strip() for part in parts if part.strip())
+
+
+def draft_grid_motion_prompt(
+    manifest: Manifest,
+    shots: Sequence[Shot],
+    total_duration: float,
+    *,
+    beat_offsets: Sequence[float] = (),
+    video_config: VideoConfig | None = None,
+    reference_notation: str = "prose",
+    has_audio_video: bool = False,
+    bound_references: list[str] | None = None,
+) -> str:
+    """Multi-cut R2V motion prompt driving a single section render across ``shots``."""
+    no_subtitles = video_config.motion_no_subtitles if video_config is not None else True
+    no_music = video_config.motion_no_music if video_config is not None else True
+    parts: list[str] = []
+    sub_descriptions = [
+        strip_still_words((s.video.prompt_override or s.motion_prompt or s.still_prompt).strip())
+        or f"{_FRAMING_LABEL.get(s.framing, 'medium')} shot in {s.setting or 'the scene'}"
+        for s in shots
+    ]
+    timeline = inject_multicut_timestamps(
+        sub_descriptions, total_duration, beat_offsets=beat_offsets
+    )
+    if timeline:
+        parts.append(timeline)
+    if reference_notation == "tags":
+        parts.append("Animate starting from @image1.")
+    video_ref_note = _video_reference_note(reference_notation, bound_references)
+    if video_ref_note is not None:
+        parts.append(video_ref_note)
+    parts.append(
+        "Hard cuts between distinct camera angles within the clip while keeping the "
+        "character, wardrobe, and location consistent across every cut."
+    )
+    if any(s.type is ShotType.LIPSYNC for s in shots):
+        target_audio = (
+            "in time with the vocal in @video1"
+            if (has_audio_video and reference_notation == "tags")
+            else "in time with the vocal"
+        )
+        parts.append(
+            "During singing cuts, the singer sings with clear, natural mouth movement "
+            f"{target_audio}."
+        )
+    if no_subtitles and manifest.mode is not ProjectMode.MIX:
+        parts.append("No subtitles, no text.")
+    if no_music:
+        parts.append("No music.")
+    if manifest.visual_bible.style:
+        parts.append(f"Style: {manifest.visual_bible.style}.")
+    return " ".join(part.strip() for part in parts if part.strip())

@@ -329,17 +329,11 @@ def generate_turnaround(
     plate_path = project.path(scene.plate)
     if not plate_path.is_file():
         raise ConfigError(f"Plate file for '{scene.name}' is missing: {scene.plate}")
-    tpl_map = (
-        templates if isinstance(templates, dict) else {"still": templates}
-    )
-    still_tpl, ref_param = _resolve_ref_workflow(
-        tpl_map, f"generate turnaround for '{scene.name}'"
-    )
+    tpl_map = templates if isinstance(templates, dict) else {"still": templates}
+    still_tpl, ref_param = _resolve_ref_workflow(tpl_map, f"generate turnaround for '{scene.name}'")
     base_negative = prompts.merge_negative_prompt(bible.negative_prompt, bible.exclusions)
     negative = f"{base_negative}, {prompts.PLATE_TURNAROUND_NEGATIVE}".strip(", ")
-    scene_index = next(
-        (i for i, item in enumerate(bible.settings) if item.name == scene.name), 0
-    )
+    scene_index = next((i for i, item in enumerate(bible.settings) if item.name == scene.name), 0)
     base_params = {
         "positive_prompt": prompts.plate_turnaround_prompt(manifest, scene.name),
         "negative_prompt": negative,

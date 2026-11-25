@@ -41,9 +41,7 @@ def _setup_singer_ref(project, manifest) -> None:
     manifest.character.references["base"] = ReferenceSet(sheet=ref_rel, panels={"front": ref_rel})
 
 
-def test_attach_and_clear_shot_sketch_and_workflow_pruning(
-    project, analysis, tmp_path
-) -> None:
+def test_attach_and_clear_shot_sketch_and_workflow_pruning(project, analysis, tmp_path) -> None:
     manifest = build_manifest(project.config, analysis, "lyrics", "style", llm=None)
     project.save_manifest(manifest)
     shot_id = manifest.shots[0].id

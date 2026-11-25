@@ -731,9 +731,7 @@ class ShotRunner:
                     self._budget.refund()
                     raise
                 repair_instruction = state.repair_instruction
-                has_explicit_instruction = bool(
-                    repair_instruction and repair_instruction.strip()
-                )
+                has_explicit_instruction = bool(repair_instruction and repair_instruction.strip())
                 prev_attempt = None
                 if (
                     plan.strategy is RetryStrategy.REPAIR_STILL
@@ -1187,9 +1185,7 @@ class ShotRunner:
                 def _is_free(param: str) -> bool:
                     if param in used_params or not template.accepts(param):
                         return False
-                    targets = {
-                        (t.node, t.field) for t in template.bindings.inputs.get(param, ())
-                    }
+                    targets = {(t.node, t.field) for t in template.bindings.inputs.get(param, ())}
                     return bool(targets) and targets.isdisjoint(used_targets)
 
                 if _is_free("draft_grid_image"):

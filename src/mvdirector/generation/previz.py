@@ -400,9 +400,7 @@ def generate_previz(
         scene = manifest.visual_bible.find_set(shot.setting)
         plate_path = project.path(scene.plate) if (scene and scene.plate) else None
         sketch_path = project.path(shot.sketch_image) if shot.sketch_image else None
-        plan = plan_previz(
-            shot, manifest, llm, set_plate_path=plate_path, sketch_path=sketch_path
-        )
+        plan = plan_previz(shot, manifest, llm, set_plate_path=plate_path, sketch_path=sketch_path)
         written.append(_render_and_save_plan(project, shot, plan))
     return written
 

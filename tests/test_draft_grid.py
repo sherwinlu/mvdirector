@@ -228,10 +228,7 @@ def test_draft_grid_path_b_r2v_multicut_and_runner_attachment(
         assert shot.allow_cuts is True
         assert shot.draft_grid_sheet == project.rel(res.sheet_path)
         assert shot.video.status is AssetStatus.PASSED
-        assert (
-            shot.video.selected is not None
-            and project.path(shot.video.selected.path).is_file()
-        )
+        assert shot.video.selected is not None and project.path(shot.video.selected.path).is_file()
 
     # ShotRunner._video_reference_paths forwards draft_grid_sheet to R2V templates.
     templates = load_templates(project, ["still", "t2i", "lipsync", "i2v", "r2v"])
@@ -349,11 +346,7 @@ def test_draft_grid_subset_calls_use_distinct_sheet_ids_without_collision(
     # Long shot IDs exceeding 64 chars fall back to a deterministic <= 64-char hashed ID.
     for idx, shot in enumerate(reloaded.shots):
         shot.id = f"very_long_custom_shot_identifier_prefix_000000000000_{idx + 1}"
-    long_id_a = draft_grid._build_sheet_id(
-        0, "Chorus", reloaded.shots[:2], is_full_chunk=False
-    )
-    long_id_b = draft_grid._build_sheet_id(
-        0, "Chorus", reloaded.shots[2:4], is_full_chunk=False
-    )
+    long_id_a = draft_grid._build_sheet_id(0, "Chorus", reloaded.shots[:2], is_full_chunk=False)
+    long_id_b = draft_grid._build_sheet_id(0, "Chorus", reloaded.shots[2:4], is_full_chunk=False)
     assert len(long_id_a) <= 64 and len(long_id_b) <= 64
     assert long_id_a != long_id_b

@@ -601,9 +601,7 @@ def generate_section_sheet(
                         video_refs.append(("reference_image", "draft_grid_image", sheet_path))
 
             rel_beats = [
-                round(b - chunk_start, 4)
-                for b in beat_offsets_all
-                if chunk_start <= b <= chunk_end
+                round(b - chunk_start, 4) for b in beat_offsets_all if chunk_start <= b <= chunk_end
             ]
             has_lipsync = any(s.type is ShotType.LIPSYNC for s in chunk_shots)
             uses_audio_video = (
@@ -638,11 +636,7 @@ def generate_section_sheet(
             for param, _, ref_path in video_refs:
                 v_params[param] = comfy.upload(ref_path)
 
-            if (
-                has_lipsync
-                or "audio" in r2v_template.bindings.required
-                or uses_audio_video
-            ):
+            if has_lipsync or "audio" in r2v_template.bindings.required or uses_audio_video:
                 audio_source = (
                     project.input_path(project.config.inputs.vocals, "vocals")
                     if (has_lipsync and project.config.inputs.vocals)

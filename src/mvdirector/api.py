@@ -1481,9 +1481,7 @@ def regenerate_still(
             with project.run_lock(), effective_provider.lease(project) as comfy:
                 manifest = result.manifest = project.load_manifest()
                 target_shot = manifest.shot(shot_id)
-                shot_index = next(
-                    i for i, item in enumerate(manifest.shots) if item.id == shot_id
-                )
+                shot_index = next(i for i, item in enumerate(manifest.shots) if item.id == shot_id)
                 shot_snapshot = target_shot.model_copy(deep=True)
                 attempts_before = len(target_shot.still.attempts)
                 if strategy == "repair":

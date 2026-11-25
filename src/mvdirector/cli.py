@@ -1376,9 +1376,7 @@ def plates_turnaround(
         raise _fail(exc) from exc
     if no_lock:
         typer.echo("Turnaround candidates:\n" + _lines(result.candidates))
-        typer.echo(
-            f'Pick one with: mvd plates lock-turnaround <path> --set "{result.set_name}"'
-        )
+        typer.echo(f'Pick one with: mvd plates lock-turnaround <path> --set "{result.set_name}"')
         return
     typer.echo(
         f"Locked turnaround {result.sheet} for '{result.set_name}' "
@@ -1401,8 +1399,7 @@ def plates_lock_turnaround(
     except MVDError as exc:
         raise _fail(exc) from exc
     typer.echo(
-        f"Locked turnaround {scene.sheet} for '{scene.name}' "
-        f"({len(scene.panels)} angle panel(s))."
+        f"Locked turnaround {scene.sheet} for '{scene.name}' ({len(scene.panels)} angle panel(s))."
     )
 
 
@@ -1853,9 +1850,7 @@ def regenerate_still_cmd(
     """Explicitly repair a still in place (--strategy repair) or recreate (--strategy recreate)."""
     if strategy not in ("repair", "recreate"):
         raise _fail(MVDError(f"Invalid strategy {strategy!r}; expected 'repair' or 'recreate'."))
-    typed_strategy: Literal["repair", "recreate"] = (
-        "repair" if strategy == "repair" else "recreate"
-    )
+    typed_strategy: Literal["repair", "recreate"] = "repair" if strategy == "repair" else "recreate"
     try:
         result = api.regenerate_still(
             project_dir,
@@ -2042,9 +2037,7 @@ def draft_grid_cmd(
     overwrite: bool = typer.Option(
         False, "--overwrite", help="Regenerate contact sheets even if already present on disk."
     ),
-    run_qc: bool = typer.Option(
-        False, "--run-qc", help="Run ImageQC on sliced still panels."
-    ),
+    run_qc: bool = typer.Option(False, "--run-qc", help="Run ImageQC on sliced still panels."),
 ) -> None:
     """Generate per-section 2x2/3x2 storyboard contact sheets (slice stills and/or R2V)."""
     try:
@@ -2063,8 +2056,7 @@ def draft_grid_cmd(
     for res in results:
         extra = f", video={res.video_path.name}" if res.video_path else ""
         typer.echo(
-            f"{res.sheet_id} ({res.layout}, {len(res.shot_ids)} shot(s)): "
-            f"{res.sheet_path}{extra}"
+            f"{res.sheet_id} ({res.layout}, {len(res.shot_ids)} shot(s)): {res.sheet_path}{extra}"
         )
 
 

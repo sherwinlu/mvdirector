@@ -683,16 +683,12 @@ def seed_from_photos(
 
         if len(loaded_images) <= 4:
             sheet_size = (
-                config.size()
-                if config.layout == "grid"
-                else ReferenceConfig(layout="grid").size()
+                config.size() if config.layout == "grid" else ReferenceConfig(layout="grid").size()
             )
         else:
             cols = (len(loaded_images) + 1) // 2
             sheet_size = (cols * 512, 1024)
-        sheet_img = _compose_photo_grid(
-            loaded_images, sheet_size, background=config.background
-        )
+        sheet_img = _compose_photo_grid(loaded_images, sheet_size, background=config.background)
         sheet_path = project.path(Path("assets") / "reference" / f"{prefix}_sheet.png")
         atomic_save_png(sheet_img, sheet_path)
 
@@ -761,9 +757,7 @@ def seed_from_photos(
             params[slot] = comfy.upload(Path(photo_path))
     else:
         project.reference_dir.mkdir(parents=True, exist_ok=True)
-        collage = _compose_photo_grid(
-            loaded_images, (1536, 1536), background=config.background
-        )
+        collage = _compose_photo_grid(loaded_images, (1536, 1536), background=config.background)
         collage_path = project.path(Path("assets") / "reference" / f"{prefix}_seed_input.png")
         atomic_save_png(collage, collage_path)
         params["reference_image"] = comfy.upload(collage_path)
@@ -802,11 +796,7 @@ def seed_from_photos(
     sheet_path = project.path(Path("assets") / "reference" / f"{prefix}_sheet.png")
     atomic_save_png(chosen, sheet_path)
 
-    panel_names = (
-        SEED_GRID_PANEL_NAMES
-        if (effective_layout == "grid" and include_back)
-        else None
-    )
+    panel_names = SEED_GRID_PANEL_NAMES if (effective_layout == "grid" and include_back) else None
     panel_dir = project.path(Path("assets") / "reference" / prefix)
     panel_dir.mkdir(parents=True, exist_ok=True)
     panel_rel_map = {}

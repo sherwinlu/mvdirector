@@ -125,9 +125,7 @@ def check_assets(
                 continue
             for path in [scene.plate, scene.sheet, *scene.panels.values()]:
                 if path and not project.path(path).is_file():
-                    result.problems.append(
-                        f"Plate file for set '{scene.name}' is missing: {path}"
-                    )
+                    result.problems.append(f"Plate file for set '{scene.name}' is missing: {path}")
     else:
         plated = [s.name for s in bible.settings if s.plate or s.panels]
         if plated:

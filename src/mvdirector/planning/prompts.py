@@ -1144,9 +1144,7 @@ def seed_sheet_prompt(
     else:
         infer_note = "maintain consistent proportions and clothing across all four angles"
     panels = (
-        SEED_GRID_PANEL_LIST
-        if (layout == "grid" and include_grid_back)
-        else _sheet_panels(layout)
+        SEED_GRID_PANEL_LIST if (layout == "grid" and include_grid_back) else _sheet_panels(layout)
     )
     return SEED_SHEET_TEMPLATE.format(
         source_desc=source_desc,
@@ -1296,9 +1294,7 @@ def merge_negative_prompt(base_negative: str, exclusions: Sequence[str]) -> str:
     return ", ".join(tokens)
 
 
-def sync_bible_exclusions(
-    bible: VisualBible, extra_exclusions: Sequence[str] = ()
-) -> VisualBible:
+def sync_bible_exclusions(bible: VisualBible, extra_exclusions: Sequence[str] = ()) -> VisualBible:
     """Synchronize ``bible.exclusions`` into both ``bible.rules`` and ``bible.negative_prompt``."""
     merged = normalize_exclusions([*bible.exclusions, *extra_exclusions])
     bible.exclusions = merged
@@ -1312,9 +1308,7 @@ def sync_bible_exclusions(
         rule_cf = rule.casefold()
         core_cf = exclusion_core(item).casefold()
         already_covered = any(
-            r_cf == rule_cf
-            or f"never show {core_cf}" in r_cf
-            or f"do not show {core_cf}" in r_cf
+            r_cf == rule_cf or f"never show {core_cf}" in r_cf or f"do not show {core_cf}" in r_cf
             for r_cf in existing_cf
         )
         if not already_covered:

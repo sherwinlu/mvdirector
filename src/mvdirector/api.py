@@ -824,17 +824,7 @@ def seed_reference_from_photos(
         raise ConfigError(
             f"Provide 1 to {reference_mod.MAX_SEED_PHOTOS} seed photos, got {len(photos)}."
         )
-    if angles is not None:
-        if len(angles) != len(photos):
-            raise ConfigError(
-                f"Expected {len(photos)} angle(s) matching the provided photos, got {len(angles)}."
-            )
-        seen: set[str] = set()
-        for raw_angle in angles:
-            norm = reference_mod._normalize_seed_angle(raw_angle)
-            if norm in seen:
-                raise ConfigError(f"Duplicate seed photo angle: {norm!r}.")
-            seen.add(norm)
+    reference_mod.normalize_seed_angles(angles, len(photos))
     for idx, photo in enumerate(photos):
         load_rgb_candidate(Path(photo), f"Seed photo #{idx + 1}")
 
@@ -856,7 +846,7 @@ def seed_reference_from_photos(
             )
 
     manifest = project.load_manifest()
-    reference_mod._target_state(manifest, state, character)
+    reference_mod.target_state(manifest, state, character)
     templates = load_templates(project, ["still"])
     if not templates["still"].accepts("reference_image"):
         raise ConfigError(
@@ -1006,7 +996,7 @@ def generate_plate_turnaround(
 
     project = open_project(project_dir)
     manifest = project.load_manifest()
-    scene = plates_mod._find_set(manifest, set_name)
+    scene = plates_mod.find_set(manifest, set_name)
     if not scene.plate:
         raise ConfigError(
             f"Lock a plate for '{scene.name}' before generating a turnaround: "
@@ -1015,7 +1005,7 @@ def generate_plate_turnaround(
     if not project.path(scene.plate).is_file():
         raise ConfigError(f"Plate file for '{scene.name}' is missing: {scene.plate}")
     templates = load_templates(project, ["still"])
-    plates_mod._resolve_ref_workflow(templates, f"generate turnaround for '{scene.name}'")
+    plates_mod.resolve_ref_workflow(templates, f"generate turnaround for '{scene.name}'")
 
     if lock:
         with project.run_lock(), _lease(project, comfy_provider) as comfy:
@@ -1620,7 +1610,7 @@ def generate_draft_grid(
     if "t2i" not in templates and "still" not in templates:
         raise ConfigError("A 'still' or 't2i' workflow is required for draft_grid.")
     if mode in ("r2v", "both"):
-        draft_grid_mod._select_r2v_template(templates, [s for _, grp in chunks for s in grp])
+        draft_grid_mod.select_r2v_template(templates, [s for _, grp in chunks for s in grp])
 
     llm_ctx = _close_llm(_build_project_llm(project)) if run_qc else nullcontext(None)
     with llm_ctx as llm:

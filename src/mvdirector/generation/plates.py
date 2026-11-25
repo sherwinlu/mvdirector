@@ -83,7 +83,7 @@ def plate_slug(name: str) -> str:
     return f"{stem[:57].rstrip('_') or 'set'}_{digest}"
 
 
-def _find_set(manifest: Manifest, name: str) -> SetDesign:
+def find_set(manifest: Manifest, name: str) -> SetDesign:
     scene = manifest.visual_bible.find_set(name)
     if scene is None:
         names = ", ".join(s.name for s in manifest.visual_bible.settings) or "(none)"
@@ -91,7 +91,7 @@ def _find_set(manifest: Manifest, name: str) -> SetDesign:
     return scene
 
 
-def _resolve_ref_workflow(
+def resolve_ref_workflow(
     templates: dict[str, WorkflowTemplate], label: str
 ) -> tuple[WorkflowTemplate, str]:
     edit_template = templates.get("still")
@@ -147,7 +147,7 @@ def generate_candidates(
     t2i = templates.get("t2i") or templates.get("still")
     if t2i is None:
         raise ConfigError("A 't2i' workflow is required to generate set plates.")
-    scenes = [_find_set(manifest, set_name)] if set_name else bible.settings
+    scenes = [find_set(manifest, set_name)] if set_name else bible.settings
     base_negative = prompts.merge_negative_prompt(bible.negative_prompt, bible.exclusions)
     negative = f"{base_negative}, {prompts.PLATE_NEGATIVE}".strip(", ")
 
@@ -156,13 +156,13 @@ def generate_candidates(
     style_param: str | None = None
     if style_ref is not None:
         load_rgb_candidate(style_ref, "Style reference")
-        style_template, style_param = _resolve_ref_workflow(templates, "use --style-ref")
+        style_template, style_param = resolve_ref_workflow(templates, "use --style-ref")
         uploaded_style_ref = comfy.upload(style_ref)
 
     results: dict[str, list[Path]] = {}
     for scene_index, scene in enumerate(scenes):
         if embed_set is not None:
-            embedded = _find_set(manifest, embed_set)
+            embedded = find_set(manifest, embed_set)
             if embedded is scene:
                 raise ConfigError(f"Set '{scene.name}' cannot embed itself.")
             if not embedded.plate:
@@ -173,7 +173,7 @@ def generate_candidates(
             embedded_path = project.path(embedded.plate)
             if not embedded_path.is_file():
                 raise ConfigError(f"Plate file for '{embedded.name}' is missing: {embedded.plate}")
-            chosen_template, ref_param = _resolve_ref_workflow(
+            chosen_template, ref_param = resolve_ref_workflow(
                 templates, f"embed '{embedded.name}' into '{scene.name}'"
             )
             base_params = {
@@ -193,7 +193,7 @@ def generate_candidates(
                 style_param: uploaded_style_ref,
             }
         elif source_name := (from_set or scene.parent_set):
-            parent = _find_set(manifest, source_name)
+            parent = find_set(manifest, source_name)
             if parent is scene:
                 raise ConfigError(f"Set '{scene.name}' cannot derive from itself.")
             if not parent.plate:
@@ -204,7 +204,7 @@ def generate_candidates(
             parent_plate_path = project.path(parent.plate)
             if not parent_plate_path.is_file():
                 raise ConfigError(f"Plate file for '{parent.name}' is missing: {parent.plate}")
-            chosen_template, ref_param = _resolve_ref_workflow(
+            chosen_template, ref_param = resolve_ref_workflow(
                 templates, f"derive plate '{scene.name}' from '{parent.name}'"
             )
             base_params = {
@@ -238,7 +238,7 @@ def generate_candidates(
 def lock_plate(project: Project, manifest: Manifest, image: Path, set_name: str) -> Path:
     """Copy the chosen image into the project and record it on the set."""
     plate = load_rgb_candidate(image, "Plate")
-    scene = _find_set(manifest, set_name)
+    scene = find_set(manifest, set_name)
     project.plates_dir.mkdir(parents=True, exist_ok=True)
     locked = project.path(Path("assets") / "plates" / f"{plate_slug(scene.name)}.png")
     atomic_save_png(plate, locked)
@@ -277,7 +277,7 @@ def lock_turnaround(
     if isinstance(inset, bool) or not 0.0 <= inset < 0.2:
         raise ConfigError(f"Turnaround panel inset must be in [0.0, 0.2), got {inset!r}.")
     sheet = load_rgb_candidate(image, "Plate turnaround")
-    scene = _find_set(manifest, set_name)
+    scene = find_set(manifest, set_name)
     low, high = _TURNAROUND_ASPECT_RANGE
     ratio = sheet.width / sheet.height
     if not low <= ratio <= high:
@@ -320,7 +320,7 @@ def generate_turnaround(
     if isinstance(inset, bool) or not 0.0 <= inset < 0.2:
         raise ConfigError(f"Turnaround panel inset must be in [0.0, 0.2), got {inset!r}.")
     bible, video = manifest.visual_bible, project.config.video
-    scene = _find_set(manifest, set_name)
+    scene = find_set(manifest, set_name)
     if not scene.plate:
         raise ConfigError(
             f"Lock a plate for '{scene.name}' before generating a turnaround: "
@@ -330,7 +330,7 @@ def generate_turnaround(
     if not plate_path.is_file():
         raise ConfigError(f"Plate file for '{scene.name}' is missing: {scene.plate}")
     tpl_map = templates if isinstance(templates, dict) else {"still": templates}
-    still_tpl, ref_param = _resolve_ref_workflow(tpl_map, f"generate turnaround for '{scene.name}'")
+    still_tpl, ref_param = resolve_ref_workflow(tpl_map, f"generate turnaround for '{scene.name}'")
     base_negative = prompts.merge_negative_prompt(bible.negative_prompt, bible.exclusions)
     negative = f"{base_negative}, {prompts.PLATE_TURNAROUND_NEGATIVE}".strip(", ")
     scene_index = next((i for i, item in enumerate(bible.settings) if item.name == scene.name), 0)

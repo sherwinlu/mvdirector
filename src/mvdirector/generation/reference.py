@@ -149,7 +149,7 @@ def _check_state(manifest: Manifest, state_id: str | None, character_id: str | N
         raise ConfigError("This character has no wardrobe states; omit --state.")
 
 
-def _target_state(
+def target_state(
     manifest: Manifest, state_id: str | None, character_id: str | None
 ) -> tuple[str | None, Any, str, str]:
     char_id, character = _resolve_character(manifest, character_id)
@@ -206,7 +206,7 @@ def generate_candidates(
     via ``still`` when ``from_character`` (or ``character.parent_character``) is set. Sheets for
     later wardrobe states are edits of this character's locked base sheet via ``still``.
     """
-    char_id, character, key, prefix = _target_state(manifest, state_id, character_id)
+    char_id, character, key, prefix = target_state(manifest, state_id, character_id)
     config = project.config.reference
     if not character.appearance.strip():
         raise ConfigError(
@@ -349,7 +349,7 @@ def generate_video_candidates(
     character_id: str | None = None,
 ) -> list[Path]:
     """Render ``count`` silent character turnaround reference videos from a locked sheet."""
-    char_id, character, key, prefix = _target_state(manifest, state_id, character_id)
+    char_id, character, key, prefix = target_state(manifest, state_id, character_id)
     ref_set = _existing_reference(manifest, character, key, state_id, character_id)
     if ref_set is None or not ref_set.sheet:
         char_flag = f" --character {char_id}" if char_id and len(manifest.characters) > 1 else ""
@@ -432,7 +432,7 @@ def lock_reference_video(
     info = media.probe(video_path)
     if info.width is None or info.height is None:
         raise ConfigError(f"Reference video has no video stream: {video_path}")
-    char_id, character, key, prefix = _target_state(manifest, state_id, character_id)
+    char_id, character, key, prefix = target_state(manifest, state_id, character_id)
     ref_set = _existing_reference(manifest, character, key, state_id, character_id)
     if ref_set is None:
         raise ConfigError(
@@ -467,7 +467,7 @@ def lock_reference(
     portrait or photo that is not a four-panel sheet.
     """
     sheet = load_rgb_candidate(image, "Reference")
-    char_id, character, key, prefix = _target_state(manifest, state_id, character_id)
+    char_id, character, key, prefix = target_state(manifest, state_id, character_id)
     config = project.config.reference
     if split:
         low, high = _ASPECT_RANGE[config.layout]
@@ -546,6 +546,23 @@ def _normalize_seed_angle(raw: str) -> str:
     if normalized not in SEED_ANGLE_NAMES:
         allowed = ", ".join(SEED_ANGLE_NAMES)
         raise ConfigError(f"Unknown seed photo angle {raw!r}; expected one of: {allowed}.")
+    return normalized
+
+
+def normalize_seed_angles(angles: Sequence[str] | None, photo_count: int) -> list[str] | None:
+    """Validate one angle per seed photo and return them normalized (``None`` when not given)."""
+    if angles is None:
+        return None
+    if len(angles) != photo_count:
+        raise ConfigError(
+            f"Expected {photo_count} angle(s) matching the provided photos, got {len(angles)}."
+        )
+    normalized: list[str] = []
+    for raw_angle in angles:
+        norm = _normalize_seed_angle(raw_angle)
+        if norm in normalized:
+            raise ConfigError(f"Duplicate seed photo angle: {norm!r}.")
+        normalized.append(norm)
     return normalized
 
 
@@ -648,22 +665,9 @@ def seed_from_photos(
             f"At most {MAX_SEED_PHOTOS} seed photos are supported, got {len(photos)}."
         )
 
-    normalized_angles: list[str] | None = None
-    if angles is not None:
-        if len(angles) != len(photos):
-            raise ConfigError(
-                f"Expected {len(photos)} angle(s) matching the provided photos, got {len(angles)}."
-            )
-        normalized_angles = []
-        seen_angles: set[str] = set()
-        for raw_angle in angles:
-            norm = _normalize_seed_angle(raw_angle)
-            if norm in seen_angles:
-                raise ConfigError(f"Duplicate seed photo angle: {norm!r}.")
-            seen_angles.add(norm)
-            normalized_angles.append(norm)
+    normalized_angles = normalize_seed_angles(angles, len(photos))
 
-    char_id, character, key, prefix = _target_state(manifest, state_id, character_id)
+    char_id, character, key, prefix = target_state(manifest, state_id, character_id)
     config = project.config.reference
     loaded_images = [
         _load_seed_photo(Path(photo), f"Seed photo #{idx + 1}") for idx, photo in enumerate(photos)

@@ -341,7 +341,7 @@ def _collect_section_refs(
     return refs, plate
 
 
-def _select_r2v_template(
+def select_r2v_template(
     templates: dict[str, WorkflowTemplate], shots: Sequence[Shot]
 ) -> WorkflowTemplate:
     has_lipsync = any(s.type is ShotType.LIPSYNC for s in shots)
@@ -435,7 +435,7 @@ def generate_section_sheet(
         manifest, section=section, shot_ids=shot_ids, max_panels=max_panels
     )
     if mode in ("r2v", "both"):
-        r2v_template = _select_r2v_template(templates, [s for c in chunks for s in c.shots])
+        r2v_template = select_r2v_template(templates, [s for c in chunks for s in c.shots])
     else:
         r2v_template = None
 

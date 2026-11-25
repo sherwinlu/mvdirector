@@ -34,12 +34,39 @@ _STILL_WORDS_RE = re.compile(
 # Credit: afj176/open-cinema-studio (app/staging.py).
 _REAR_VIEW_RE = re.compile(
     r"\b(?:over[\s-]+(?:the[\s-]+)?(?:[a-z]+'s\s+)?shoulder|from\s+behind|rear\s+view|"
-    r"back\s+of\s+(?:their|his|her)\s+head|seen\s+from\s+behind|facing\s+away)\b",
+    r"back\s+of\s+(?:their|his|her)\s+head|seen\s+from\s+behind|facing\s+away|"
+    r"back\s+to\s+(?:the\s+)?(?:camera|lens)|back\s+turned)\b",
     re.IGNORECASE,
 )
 _FRONTAL_FACIAL_CLAUSE_RE = re.compile(
     r"\b(?:eyes?|eyebrows?|brows?|nose|lips?|mouth|jawline|cheeks?|freckles?|beauty\s+mark|"
     r"eyeliner|lipstick|makeup|pupil|gaze)\b",
+    re.IGNORECASE,
+)
+_LOWER_BODY_STRICT_RE = re.compile(
+    r"\b(?:trousers?|pants?|jeans|skirts?|shorts|boots?|shoes?|sandals?|sneakers?|heels?|"
+    r"slippers?|socks?|footwear|barefoot|bare\s+feet|feet|anklets?|soles?|leggings?|tights|"
+    r"stockings?|hemlines?|hem|belts?|gloves?|wrists?|wristbands?|bracelets?|"
+    r"high[\s-]waisted|knee[\s-]high|mid[\s-]calf|ankle[\s-]length|calf[\s-]length|"
+    r"floor[\s-]sweeping|full[\s-]length|gathered\s+skirt)\b",
+    re.IGNORECASE,
+)
+_LOWER_BODY_MEDIUM_RE = re.compile(
+    r"\b(?:trousers?|pants?|jeans|skirts?|shorts|boots?|shoes?|sandals?|sneakers?|heels?|"
+    r"slippers?|socks?|footwear|barefoot|bare\s+feet|feet|anklets?|soles?|leggings?|tights|"
+    r"stockings?|hemlines?|hem|knee[\s-]high|mid[\s-]calf|ankle[\s-]length|calf[\s-]length|"
+    r"floor[\s-]sweeping|full[\s-]length)\b",
+    re.IGNORECASE,
+)
+_UPPER_BODY_WARDROBE_RE = re.compile(
+    r"\b(?:coat|overcoat|jacket|blazer|hoodie|sweater|turtleneck|shirt|blouse|dress|gown|"
+    r"top|vest|corset|collar|neckline|lapels?|sleeves?|shoulders?|hood|scarf|hat|cap|"
+    r"earrings?|necklace|pendant|choker|locket)\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_TIGHT_FRAMING_RE = re.compile(
+    r"\b(?:close[\s_-]*up|head[\s-]+and[\s-]+shoulders|chest[\s-]+up|medium[\s_-]*close|"
+    r"tight\s+portrait|bust\s+shot)\b",
     re.IGNORECASE,
 )
 
@@ -83,6 +110,60 @@ def scrub_frontal_facial_details(description: str) -> str:
         kept.append(part.strip() + sep)
     cleaned = " ".join(kept).strip().rstrip(",;").strip()
     return cleaned or description
+
+
+def scrub_lower_body_wardrobe(
+    description: str, *, include_waist: bool = True, allow_empty: bool = False
+) -> str:
+    """Remove lower-body garment clauses (pants, skirts, boots) from tight-shot prompts.
+
+    Image-edit models zoom out from close-ups/medium-close shots when the prompt names trousers,
+    skirts, belts, or boots. Keeping only upper-body/collar/hair clothing details holds tight
+    framing on the face and shoulders.
+    """
+    pattern = _LOWER_BODY_STRICT_RE if include_waist else _LOWER_BODY_MEDIUM_RE
+    kept: list[str] = []
+    for raw_sentence in re.split(r"(?<=[.;])\s+", description.strip()):
+        sentence = raw_sentence.strip()
+        if not sentence:
+            continue
+        if not pattern.search(sentence):
+            kept.append(sentence)
+            continue
+        # Drop pure lower-body sentences wholesale (e.g. "She wears simple, flat leather shoes.")
+        # instead of leaving dangling stubs like "She wears simple."
+        if not _UPPER_BODY_WARDROBE_RE.search(sentence):
+            continue
+        clauses = re.split(r"([,;.])", sentence)
+        sent_kept: list[str] = []
+        i = 0
+        while i < len(clauses):
+            part = clauses[i]
+            sep = clauses[i + 1] if i + 1 < len(clauses) else ""
+            i += 2
+            if not part.strip():
+                continue
+            if pattern.search(part):
+                # Keep upper-body garment noun phrases when only a length modifier (e.g. mid-calf)
+                # was attached inside the same clause.
+                if _UPPER_BODY_WARDROBE_RE.search(part):
+                    stripped = re.sub(
+                        r"\b(?:mid[\s-]calf|ankle[\s-]length|calf[\s-]length|"
+                        r"floor[\s-]sweeping|full[\s-]length)\b",
+                        "",
+                        part,
+                        flags=re.IGNORECASE,
+                    )
+                    stripped = re.sub(r"\s{2,}", " ", stripped).strip()
+                    if stripped and not pattern.search(stripped):
+                        sent_kept.append(stripped + sep)
+                continue
+            sent_kept.append(part.strip() + sep)
+        rebuilt = " ".join(sent_kept).strip().rstrip(",;").strip()
+        if rebuilt:
+            kept.append(rebuilt)
+    cleaned = " ".join(kept).strip().rstrip(",;").strip()
+    return cleaned if (cleaned or allow_empty) else description
 
 
 def fit_prompt_budget(prompt: str, max_chars: int, *, keep_tail: int = 2) -> str:
@@ -190,11 +271,15 @@ as id='sakura' with name='さくら').
   in 'interpretation' (meaning, tone, music_feel, and visual_motifs).
 - characters: every distinct singer, vocalist, or on-camera band/group member indicated by the
   style brief, section headers, or lyrics (one entry for a solo track; two for a duet; one per
-  member or named character for a band, group, or theatrical piece). Every singer or recurring
-  performer MUST have their own entry in 'characters' with:
-  - id: short ASCII lowercase identifier (letters, digits and underscores, e.g. 'elias', 'odalie',
-    'sakura', 'lead_vocal', 'guitarist').
-  - name: display name or role (e.g. 'Elias', 'Odalie', 'Sakura').
+  member or named character for a band, group, or theatrical piece). Match every character's gender
+  presentation and total cast size strictly to the vocal cues in the style brief and lyrics (for
+  example, a solo female vocal track must have exactly one female lead; never invent unmentioned
+  co-characters or reuse example names). Every singer or recurring performer MUST have their own
+  entry in 'characters' with:
+  - id: short ASCII lowercase identifier (letters, digits and underscores, e.g. 'lead_vocal',
+    'vocalist_1', 'vocalist_2', 'guitarist').
+  - name: display name or role invented specifically for this song (never copy generic example
+    names from instructions).
   - appearance: one dense paragraph on that person's PERMANENT physical look: age range, gender
     presentation, face shape, skin tone, natural skin texture (visible pores, subtle natural
     unevenness, real facial asymmetry), eyes, brows, nose, lips, hair (cut, length, parting,
@@ -204,13 +289,16 @@ as id='sakura' with name='さくら').
     It must be precise enough that an image model draws the same person every time. Do not
     describe a real, identifiable person.
   - wardrobe: that person's costume states in the order they appear in the song. Each has a short
-    id (lowercase letters, digits and underscores) and a complete description of everything worn
-    in that state, including fabric texture, weave, and natural drape. State what is absent
-    compared with their previous state AND describe what is visibly there instead (for example
-    'bare shoulders, no cape'). Only add a new state when clothing actually changes—never for
-    poses, props, or rooms. Use one state if their costume never changes.
+    id (lowercase letters, digits and underscores) and a COMPLETE head-to-toe description of
+    everything worn in that state (outerwear/top, trousers/skirt, footwear, fabric texture, weave,
+    and natural drape — omitting trousers/footwear causes cropped legs on reference sheets). Never
+    contradict the character's 'invariants' (for example, do not write 'no jewelry' if 'invariants'
+    includes a necklace or earrings). When a later state removes an outer layer, still describe the
+    full remaining outfit head to toe alongside what was removed. Only add a new state when
+    clothing actually changes—never for poses, props, or rooms. Use one state if their costume
+    never changes.
   - invariants: optional short phrase listing signature accessories or visual details that must
-    survive across every costume change (e.g. 'glowing cyan hoop earrings in both ears'). Prefer
+    survive across every costume change (e.g. symmetric earrings or a distinctive pendant). Prefer
     symmetric accessories over tiny single-sided jewelry pinned to anatomical left or right unless
     the user's style brief explicitly specifies an asymmetric mark (image-edit models often mirror
     small single-sided accessories). It is added to every still of this character, so never put
@@ -222,15 +310,16 @@ as id='sakura' with name='さくら').
   and color grade across all sets while letting practical light sources vary per location.
 - negative_prompt: comma-separated things to avoid.
 - settings: 3 to 6 distinct sets. Each has a name, the sections of the song it serves
-  (sections), a description of how it looks (for an image model, naming one primary mid-depth
-  focal object so the lens has a clear plane of focus), how the performers move and the camera
-  works there (movement), and an optional parent_set naming an earlier set when this location is
-  a stripped, altered, or nested variant of it.
-- props: 0 to 3 recurring hero objects central to the story or choreography (e.g. a glowing
-  disc, vintage guitar, helmet). Each has id (short lowercase identifier), name, sections, and a
-  description with approximate scale in centimeters, finish, and affirmative descriptions of its
-  visible structure alongside any exclusions (e.g. 'smooth unbroken solid center face, no center
-  hub, no spokes' rather than bare 'no X' phrases alone, since image models attend to named nouns).
+  (sections), a description of how it looks (for an image model, describing the room/environment
+  layout and one mid-depth landmark without camera-framing directives like 'focus on a close-up'),
+  how the performers move and the camera works there (movement), and an optional parent_set naming
+  an earlier set when this location is a stripped, altered, or nested variant of it.
+- props: 0 to 3 recurring hero objects grounded specifically in this song's lyrics or concept (use
+  an empty list if none are needed; never invent generic sci-fi discs or unrelated props). Each
+  has id (short lowercase identifier), name, sections, and a purely visual description with
+  approximate scale in centimeters, finish, and affirmative descriptions of its visible structure
+  (no sound/audio descriptions, and in shot prompts refer to props by natural prose, never by
+  snake_case ids).
 - rules: 4 to 10 short rules that every shot follows (camera language, physical camera placement,
   continuity, effects, how much of the video shows the performers). For duets or groups, write
   rules that apply across the cast rather than locking every shot to a single character. Only
@@ -255,7 +344,9 @@ Rules:
 - characters: list of all character ids visible in the frame (primary 'character' first). On solo
   close_up shots, include only [character]. On medium_close, medium, or wide shots that show a
   simultaneous duet, reaction two-shot, or band/group performance, list every character visible in
-  the frame.
+  the frame — and ONLY list characters who actually appear in still_prompt. Never write raw
+  snake_case character ids (such as 'lead_vocal' or 'vocalist_1') inside still_prompt or
+  motion_prompt; always use the character's display name.
 - setting: use the exact name of one set from the visual bible, chosen for the shot's song
   section. Follow each set's sections and movement notes.
 - props: list of hero prop ids from PROPS visible in this shot (empty list when none appear).
@@ -271,16 +362,25 @@ Rules:
   and performance fallbacks stay consistent.
 - Character close_up framing: frame head-and-shoulders or the full face (forehead to chin) with
   both eyes and mouth clearly inside the frame. Never ask for extreme mouth-only or eye-only
-  macros on character shots, which crop off the head and break face framing checks.
+  macros on character shots, which crop off the head and break face framing checks. On close_up
+  and medium_close shots, describe ONLY face, neck, shoulders, upper torso, and raised hands—never
+  mention boots, shoes, feet, legs, lower skirt hems, or ground/floor at their feet, and never
+  write 'waist up' or 'medium shot' for a medium_close shot.
 - Shots given as 'performance' have no vocals. Keep them as 'performance' (performer visibly on
   camera, not singing) or change them to 'broll' (no performer) where a cutaway serves the song,
   without putting more than two 'broll' shots in a row. Never leave type as 'performance' if
   still_prompt describes only an empty landscape, building, or object with no performer in frame:
   any shot with no performer MUST be 'broll'.
-- Shots given as 'broll' are cutaways: the vocal plays over them and no performer is shown. Keep
-  them 'broll', with character and wardrobe null, and show what the lyric is about (an object, a
-  place, light, weather, or an architectural detail), never a face or performer. Still give
-  every shot a framing (close_up, medium_close, medium or wide): never null, even on a cutaway.
+- Shots given as 'broll' are cutaways: the vocal plays over them and no singer is shown. Keep
+  them 'broll', with character and wardrobe null. NEVER place any named cast member, singer, or
+  recognizable close-up human face in a 'broll' shot (any shot featuring a named character or
+  prominent person MUST be 'performance', not 'broll'). Show what the lyric is about: objects,
+  architecture, light, weather, props, inanimate figurines, or—when the setting genuinely calls
+  for atmosphere (such as a club or concert)—anonymous distant backlit silhouettes, blurred
+  background crowd motion, or hands-only detail inserts with no recognizable faces. Keep the main
+  subject sharply in focus (never ask for a completely out-of-focus or blurry whole frame). Still
+  give every shot a framing (close_up, medium_close, medium or wide): never null, even on a
+  cutaway.
 - Match detail to shot size on BOTH singer shots and 'broll' cutaways. Small details (identifying
   marks, jewelry, cuffs, clock hands, inscriptions, small props, screen content) belong in
   close_up or medium_close shots only; never ask for tiny altered object parts in a wide shot. In
@@ -1012,25 +1112,46 @@ def _sentence(text: str) -> str:
     return text if not text or text[-1] in ".!?" else f"{text}."
 
 
-def _with_pinned(character: Character, text: str) -> str:
+def _with_pinned(character: Character, text: str, *, framing: Framing | None = None) -> str:
     """``text`` followed by the character's pinned details, as one more sentence."""
     text, pinned = text.strip(), character.pinned()
+    if pinned and framing in (Framing.CLOSE_UP, Framing.MEDIUM_CLOSE):
+        pinned = scrub_lower_body_wardrobe(
+            pinned, include_waist=(framing is Framing.CLOSE_UP), allow_empty=True
+        )
     if not pinned:
         return text
     return f"{_sentence(text)} Always: {_sentence(pinned)}".strip()
 
 
-def _look(character: Character, state_id: str | None) -> str:
+def _look(
+    character: Character,
+    state_id: str | None,
+    *,
+    framing: Framing | None = None,
+) -> str:
     """Appearance and costume, plus the details pinned for every still of this character.
 
     The reference images carry identity, but a second character in a two-shot gets fewer of them
     and drifts (hair, sleeves, hair colour). Writing the pinned details into the prompt holds them.
     Empty for a character with no appearance, so callers skip them (pinned details need a look
     to attach to, and a reference sheet is only made for a character with an appearance).
+    If a non-empty ``state_id`` no longer matches any wardrobe state (e.g. after editing a
+    manifest), fall back to the first wardrobe state so the character never loses their outfit.
     """
     if not character.appearance.strip():
         return ""
-    return _with_pinned(character, character.describe(state_id))
+    resolved = state_id
+    if resolved and character.state(resolved) is None and character.wardrobe:
+        resolved = character.wardrobe[0].id
+    described = character.describe(resolved)
+    if framing in (Framing.CLOSE_UP, Framing.MEDIUM_CLOSE) and " Wearing: " in described:
+        app_part, wear_part = described.split(" Wearing: ", 1)
+        trimmed_wear = scrub_lower_body_wardrobe(
+            wear_part, include_waist=(framing is Framing.CLOSE_UP)
+        )
+        described = f"{app_part} Wearing: {trimmed_wear}".strip()
+    return _with_pinned(character, described, framing=framing)
 
 
 def compose_still_prompt(
@@ -1048,7 +1169,14 @@ def compose_still_prompt(
     text description is left out and a note explains the two images instead.
     """
     bible = manifest.visual_bible
-    parts = [shot.still.prompt_override or shot.still_prompt]
+    raw_still = (shot.still.prompt_override or shot.still_prompt).strip()
+    parts: list[str] = []
+    if shot.type.shows_singer and not _EXPLICIT_TIGHT_FRAMING_RE.search(raw_still):
+        if shot.framing is Framing.CLOSE_UP:
+            parts.append("Tight head-and-shoulders close-up portrait (face large in frame).")
+        elif shot.framing is Framing.MEDIUM_CLOSE:
+            parts.append("Chest-up medium close-up shot (head and upper chest fill frame).")
+    parts.append(raw_still)
     scene = bible.find_set(shot.setting)
     ref_note = _still_reference_note(plate_attached, reference_notation, bound_references)
     if ref_note is not None:
@@ -1060,6 +1188,10 @@ def compose_still_prompt(
                     f"Setting: {shot.setting} "
                     "(tight close-up; keep distant room elements out of frame)."
                 )
+        elif shot.framing is Framing.CLOSE_UP:
+            first_sent = re.split(r"(?<=[.!?])\s+", scene.description.strip(), maxsplit=1)[0]
+            first_sent = first_sent.rstrip(".!?").strip()
+            parts.append(f"Setting: {first_sent} (tight close-up; soft-focus background only).")
         else:
             parts.append(f"Setting: {scene.description}")
     resolved_props = bible.resolve_props(shot.props)
@@ -1104,7 +1236,14 @@ def compose_still_prompt(
         parts.append(_FRAMING_SCALE_NOTE.get(shot.framing, CAMERA_PLACEMENT_NOTE))
         raw_still_text = shot.still.prompt_override or shot.still_prompt
         rear_view = shot.type is not ShotType.LIPSYNC and is_rear_view_prompt(raw_still_text)
-        hide_facial = rear_view
+        if rear_view:
+            parts.append(
+                "Camera behind subject (rear view): show only the back of the head and back of "
+                "the outfit, turned completely away from the camera with face out of view."
+            )
+        hide_facial = rear_view or shot.framing is Framing.WIDE
+        has_lipsync = any(s.type is ShotType.LIPSYNC for s in manifest.shots)
+        lead_noun = "The singer" if has_lipsync else "The character"
         if (
             bound_references
             and len(bound_references) > 1
@@ -1140,23 +1279,23 @@ def compose_still_prompt(
                 parts.append("; ".join(slot_notes) + ".")
         if len(visible) == 1:
             char_id, character, state_id = visible[0]
-            if look := _look(character, state_id):
+            if look := _look(character, state_id, framing=shot.framing):
                 if hide_facial:
                     look = scrub_frontal_facial_details(look)
                 if len(manifest.characters) <= 1 or char_id is None:
-                    parts.append(f"The singer: {look}")
+                    parts.append(f"{lead_noun}: {look}")
                 else:
                     label = character.name or char_id
-                    parts.append(f"The singer ({label}): {look}")
+                    parts.append(f"{lead_noun} ({label}): {look}")
         elif len(visible) > 1:
             primary_id, primary_char, primary_state = visible[0]
-            if look := _look(primary_char, primary_state):
+            if look := _look(primary_char, primary_state, framing=shot.framing):
                 if hide_facial:
                     look = scrub_frontal_facial_details(look)
                 label = primary_char.name or primary_id or "lead"
-                parts.append(f"The singer ({label}, matches reference portrait): {look}")
+                parts.append(f"{lead_noun} ({label}, matches reference portrait): {look}")
             for sec_id, sec_char, sec_state in visible[1:]:
-                if look := _look(sec_char, sec_state):
+                if look := _look(sec_char, sec_state, framing=shot.framing):
                     if hide_facial:
                         look = scrub_frontal_facial_details(look)
                     sec_label = sec_char.name or sec_id or "performer"

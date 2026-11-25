@@ -163,6 +163,35 @@ def _reject_json_constant(token: str) -> Any:
     raise ValueError(f"Non-standard JSON constant not allowed: {token!r}")
 
 
+def _strip_think(text: str) -> str:
+    cleaned = _THINK_BLOCK.sub("", text)
+    unfinished = cleaned.lower().find("<think>")  # reasoning that never ended: nothing follows
+    return cleaned[:unfinished] if unfinished != -1 else cleaned
+
+
+def _extract_bare_list_for_schema(text: str, schema: type[BaseModel]) -> dict[str, Any] | None:
+    """Wrap a bare JSON array ``[...]`` when ``schema`` is a single-field list container."""
+    if len(schema.model_fields) != 1:
+        return None
+    cleaned = _strip_think(text)
+    arr_start = cleaned.find("[")
+    if arr_start == -1:
+        return None
+    obj_start = cleaned.find("{")
+    if obj_start != -1 and obj_start < arr_start:
+        return None
+    field_name = next(iter(schema.model_fields))
+    for strict in (True, False):
+        decoder = json.JSONDecoder(strict=strict, parse_constant=_reject_json_constant)
+        try:
+            value, _ = decoder.raw_decode(cleaned, arr_start)
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(value, list):
+            return {field_name: value}
+    return None
+
+
 def extract_json(text: str) -> str:
     """Pull the JSON object out of a reply that may include fences, prose or reasoning.
 
@@ -171,13 +200,11 @@ def extract_json(text: str) -> str:
     the outermost braces are returned instead, so validation reports the real syntax error and
     the correction request can quote it.
     """
-    cleaned = _THINK_BLOCK.sub("", text)
-    unfinished = cleaned.lower().find("<think>")  # reasoning that never ended: nothing follows
-    if unfinished != -1:
-        cleaned = cleaned[:unfinished]
+    cleaned = _strip_think(text)
     first_start = cleaned.find("{")
     if first_start == -1:
         raise LLMError("The model reply contained no JSON object")
+    outer_looks_like_json = bool(re.match(r'^\{\s*"', cleaned[first_start:]))
     for strict in (True, False):
         decoder = json.JSONDecoder(strict=strict, parse_constant=_reject_json_constant)
         pos = first_start
@@ -192,6 +219,8 @@ def extract_json(text: str) -> str:
                 raise LLMError("The model reply nested JSON too deeply to parse") from None
             if isinstance(value, dict) and end is not None:
                 return cleaned[pos:end]
+            if outer_looks_like_json:
+                break
             pos = cleaned.find("{", pos + 1)
     last = cleaned.rfind("}")
     if last <= first_start:
@@ -268,6 +297,9 @@ class ChatBackend(ABC):
             reply = self._send(system_prompt, messages, schema)
             log.debug("Model reply (%d characters): %s", len(reply.text), reply.text[:500])
             try:
+                wrapped = _extract_bare_list_for_schema(reply.text, schema)
+                if wrapped is not None:
+                    return schema.model_validate(wrapped)
                 raw_json = extract_json(reply.text)
                 try:
                     return schema.model_validate_json(raw_json)

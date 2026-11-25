@@ -898,7 +898,21 @@ class ShotRunner:
         refs: list[tuple[str, str, Path]] = []
         reference = self._reference_set(shot)
         front = reference.panel("front") if reference else None
+        raw_still = shot.still.prompt_override or shot.still_prompt
+        is_rear_view = shot.type is not ShotType.LIPSYNC and prompts.is_rear_view_prompt(raw_still)
         front_path: Path | None = None
+
+        def _first_existing_panel(
+            ref_set: ReferenceSet | None, names: tuple[str, ...]
+        ) -> str | None:
+            if ref_set is None:
+                return None
+            for panel_name in names:
+                rel = ref_set.panel(panel_name)
+                if rel is not None and self._project.path(rel).is_file():
+                    return rel
+            return None
+
         if template.accepts("reference_image"):
             if reference is None or front is None:
                 raise ConfigError(
@@ -907,21 +921,36 @@ class ShotRunner:
                 )
             # Single-reference workflows lose facial detail and pull framing too wide on close-ups
             # when given the full-body front panel; prefer the macro face panel when available.
+            # On rear-view shots, prefer the back panel (columns layout) or side profile so the
+            # edit model is not anchored to a frontal stare.
             face_rel = reference.panel("face")
             use_face = (
-                self._project.config.reference.closeup_face_panel
+                not is_rear_view
+                and self._project.config.reference.closeup_face_panel
                 and shot.framing is Framing.CLOSE_UP
                 and not template.accepts("reference_face")
                 and face_rel is not None
                 and self._project.path(face_rel).is_file()
             )
-            primary_panel = face_rel if use_face and face_rel is not None else front
+            if is_rear_view:
+                primary_panel = (
+                    _first_existing_panel(reference, ("back", "profile", "front")) or front
+                )
+            elif use_face and face_rel is not None:
+                primary_panel = face_rel
+            else:
+                primary_panel = front
             front_path = self._project.path(primary_panel)
             refs.append(("reference_image", "reference_image", front_path))
         # Extra angles go only to workflows that bind them, so nothing is uploaded for nothing.
         has_face_ref = False
         if reference is not None:
-            for name in ("profile", "three_quarter", "face"):
+            extra_panels = (
+                ("profile", "three_quarter")
+                if is_rear_view
+                else ("profile", "three_quarter", "face")
+            )
+            for name in extra_panels:
                 path = reference.panel(name)
                 param = f"reference_{name}"
                 if path and template.accepts(param):
@@ -937,9 +966,13 @@ class ShotRunner:
                 if not template.accepts(param):
                     continue
                 sec_ref = sec_char.reference_for(sec_state)
-                sec_front = sec_ref.panel("front") if sec_ref else None
-                if sec_front is not None:
-                    sec_path = self._project.path(sec_front)
+                sec_panel = (
+                    _first_existing_panel(sec_ref, ("back", "profile", "front"))
+                    if is_rear_view
+                    else (sec_ref.panel("front") if sec_ref else None)
+                )
+                if sec_panel is not None:
+                    sec_path = self._project.path(sec_panel)
                     if sec_path.is_file():
                         refs.append((param, param, sec_path))
         elif (
@@ -947,10 +980,7 @@ class ShotRunner:
             and not has_face_ref
             and reference is not None
             and template.accepts("reference_image_2")
-            and not (
-                shot.type is not ShotType.LIPSYNC
-                and prompts.is_rear_view_prompt(shot.still.prompt_override or shot.still_prompt)
-            )
+            and not is_rear_view
         ):
             face = reference.panel("face")
             if face:
@@ -972,6 +1002,8 @@ class ShotRunner:
             parts.append("people, human figures, faces")
         else:
             parts.append("vertically squashed body, stubby legs, oversized head")
+            if shot.type is not ShotType.LIPSYNC and prompts.is_rear_view_prompt(raw_still):
+                parts.append("frontal face, looking at camera")
         return ", ".join(p.strip(", ") for p in parts if p and p.strip(", "))
 
     def _generate_still(

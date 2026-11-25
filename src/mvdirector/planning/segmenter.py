@@ -365,10 +365,8 @@ def cut_points(
     if not math.isfinite(duration) or duration <= 0.0:
         return [0.0]
     max_clip_seconds = max(0.1, video.max_clip_seconds)
-    voices = {t.voice for t in analysis.vocal_turns}
-    use_handoffs = (
-        snap_sections or video.cut_mode == "phrases" or len(voices) >= 2 or BOTH_VOICES in voices
-    )
+    solo_voices = {t.voice for t in analysis.vocal_turns if t.voice != BOTH_VOICES}
+    use_handoffs = snap_sections or video.cut_mode == "phrases" or len(solo_voices) >= 2
     handoff_cuts = (
         [
             cut

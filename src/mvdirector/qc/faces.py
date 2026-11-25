@@ -129,6 +129,7 @@ class Face:
     height_fraction: float  # face box height / frame height
     embedding: np.ndarray | None = None  # L2-normalised identity vector, when available
     bbox: tuple[int, int, int, int] | None = None  # (x1, y1, x2, y2) in frame pixels, when known
+    confidence: float | None = None  # detector confidence in [0, 1], when reported
 
 
 class FaceAnalyzer(Protocol):
@@ -248,7 +249,12 @@ class MediaPipeFaceAnalyzer:
                 y2 = max(y1, min(frame_height, int(round(origin_y + box.height))))
                 if x2 > x1 and y2 > y1:
                     bbox = (x1, y1, x2, y2)
-            found.append(Face(height_fraction=height_fraction, embedding=None, bbox=bbox))
+            cats = getattr(detection, "categories", None) or []
+            raw_score = getattr(cats[0], "score", None) if cats else None
+            conf = float(raw_score) if raw_score is not None else None
+            found.append(
+                Face(height_fraction=height_fraction, embedding=None, bbox=bbox, confidence=conf)
+            )
         return sorted(found, key=lambda face: face.height_fraction, reverse=True)
 
 

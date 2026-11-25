@@ -14,6 +14,7 @@ import logging
 import math
 import re
 import warnings
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
 
@@ -529,17 +530,31 @@ def _cluster_two_solo_voices(
 
     oct_0 = float(np.median(oct_vals[labels == 0]))
     oct_1 = float(np.median(oct_vals[labels == 1]))
+    hz_0, hz_1 = 2.0**oct_0, 2.0**oct_1
     delta_semitones = 12.0 * abs(oct_0 - oct_1)
     inter_dist = float(np.linalg.norm(c0 - c1))
     intra_0 = float(np.mean(np.linalg.norm(features[labels == 0] - c0, axis=1)))
     intra_1 = float(np.mean(np.linalg.norm(features[labels == 1] - c1, axis=1)))
     fisher = inter_dist / max(0.5 * (intra_0 + intra_1), 0.25)
 
-    distinct = (
-        (delta_semitones >= 2.0 or inter_dist >= 0.75)
-        if force_two_voices
-        else ((delta_semitones >= 4.5 and fisher >= 1.5) or (inter_dist >= 1.6 and fisher >= 2.4))
-    )
+    # A single singer shifting from chest voice to chorus belt stays within one vocal register
+    # (both >=250 Hz or both <=210 Hz) with nearly identical vocal-tract MFCCs. Require stronger
+    # pitch or timbral separation before splitting same-register vocals into two singers.
+    m0 = mfcc_mat[labels == 0].mean(axis=0)
+    m1 = mfcc_mat[labels == 1].mean(axis=0)
+    mfcc_cos = float(np.dot(m0, m1) / max(float(np.linalg.norm(m0) * np.linalg.norm(m1)), 1e-12))
+    same_register = (hz_0 >= 250.0 and hz_1 >= 250.0) or (hz_0 <= 210.0 and hz_1 <= 210.0)
+
+    if force_two_voices:
+        distinct = delta_semitones >= 2.0 or inter_dist >= 0.75
+    elif same_register:
+        distinct = (delta_semitones >= 10.5 and fisher >= 1.8) or (
+            delta_semitones >= 4.5 and mfcc_cos < 0.88 and fisher >= 1.6
+        )
+    else:
+        distinct = (delta_semitones >= 4.5 and fisher >= 1.5) or (
+            inter_dist >= 1.6 and fisher >= 2.4
+        )
     if not distinct:
         return None
     low_label = 0 if oct_0 <= oct_1 else 1
@@ -740,6 +755,60 @@ def detect_vocal_turns(
         )
         for s, e, v, hw in merged
     ]
+
+
+def estimate_vocal_pitch_hz(vocals: np.ndarray, sr: int = ANALYSIS_SR) -> float | None:
+    """Return the median voiced fundamental frequency (Hz) of a vocal track, or None if silent."""
+    if vocals.size == 0 or sr < 12000 or not np.isfinite(vocals).all():
+        return None
+    import librosa
+
+    rms = librosa.feature.rms(y=vocals, frame_length=2048, hop_length=512)[0]
+    peak_rms = float(np.max(rms)) if rms.size else 0.0
+    if peak_rms < 1e-4:
+        return None
+    f0 = librosa.yin(vocals, fmin=70.0, fmax=700.0, sr=sr, frame_length=2048, hop_length=512)
+    n = min(len(rms), len(f0))
+    active = (
+        (rms[:n] >= peak_rms * 0.08) & np.isfinite(f0[:n]) & (f0[:n] >= 75.0) & (f0[:n] <= 650.0)
+    )
+    voiced = f0[:n][active]
+    if voiced.size < 10:
+        return None
+    return round(float(np.median(voiced)), 1)
+
+
+def describe_vocal_register(
+    turns: Sequence[VocalTurn], solo_f0_hz: float | None = None
+) -> str | None:
+    """Summarize the detected acoustic vocal register for style/bible casting cues."""
+    by_voice: dict[str, list[float]] = {}
+    for turn in turns:
+        if turn.voice != BOTH_VOICES and turn.median_f0_hz is not None and turn.median_f0_hz > 0:
+            by_voice.setdefault(turn.voice, []).append(turn.median_f0_hz)
+    if len(by_voice) >= 2:
+        meds = sorted((float(np.median(vals)), voice) for voice, vals in by_voice.items() if vals)
+        if len(meds) >= 2:
+            low_hz, high_hz = meds[0][0], meds[-1][0]
+            return (
+                f"2 vocal registers (lower register ~{low_hz:.0f} Hz, "
+                f"higher register ~{high_hz:.0f} Hz)"
+            )
+    solo_vals = [v for vals in by_voice.values() for v in vals]
+    f0 = float(np.median(solo_vals)) if solo_vals else solo_f0_hz
+    if f0 is None or f0 <= 0:
+        return None
+    if f0 < 175.0:
+        return (
+            f"low male vocal register (baritone/bass, ~{f0:.0f} Hz median pitch — cast a male "
+            "lead vocalist unless the lyrics or style brief explicitly specify otherwise)"
+        )
+    if f0 >= 235.0:
+        return (
+            f"high female vocal register (soprano/mezzo/alto, ~{f0:.0f} Hz median pitch — cast a "
+            "female lead vocalist unless the lyrics or style brief explicitly specify otherwise)"
+        )
+    return f"mid vocal register (~{f0:.0f} Hz median pitch — tenor male or contralto female)"
 
 
 def bar_intensity(

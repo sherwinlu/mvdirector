@@ -327,3 +327,36 @@ def test_vision_video_scope_and_scoring_calibration(manifest, png):
     )
     assert "Scoring calibration:" in blind_video.systems[1]
     assert "Video scope:" in blind_video.systems[1]
+
+
+def test_broll_vision_rules_allow_requested_silhouettes_and_figurines_not_faces(manifest, png):
+    from mvdirector.qc.vision import _BlindObservation
+
+    broll = _shot(ShotType.BROLL, None)
+    broll.still_prompt = "Wide strobe-lit club floor with anonymous backlit dancer silhouettes."
+    spec = VisionJudge.specification(broll, manifest)
+    assert "No singer should be visible" in spec
+    assert "no recognizable human faces or named cast members" in spec
+    assert "anonymous silhouettes" in spec and "inanimate figurines" in spec
+
+    llm = FakeLLM(_verdict(character_match=None))
+    VisionJudge(llm).judge([png], broll, manifest, AssetKind.STILL)
+    assert "recognizable human face" in llm.system
+    assert "anonymous backlit silhouettes" in llm.system
+
+    class _BlindFakeLLM:
+        def __init__(self) -> None:
+            self.systems: list[str] = []
+
+        def complete_json(self, *, system, content, schema):
+            self.systems.append(system)
+            if schema is _BlindObservation:
+                return _BlindObservation(people_count=5, framing="wide")
+            return _verdict(character_match=None)
+
+    blind = _BlindFakeLLM()
+    VisionJudge(blind, blind_observer=True).judge(  # type: ignore[arg-type]
+        [png], broll, manifest, AssetKind.STILL
+    )
+    assert "anonymous backlit silhouettes" in blind.systems[1]
+    assert "recognizable human face" in blind.systems[1]

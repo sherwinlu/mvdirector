@@ -22,6 +22,7 @@ from mvdirector.models import (
     Shot,
     ShotType,
 )
+from mvdirector.planning.prompts import is_rear_view_prompt
 from mvdirector.qc.common import dimensions_check, identity_check, vision_checks
 from mvdirector.qc.faces import FaceAnalyzer, IdentityReference, load_rgb
 from mvdirector.qc.scoring import aggregate, linear_score, skipped
@@ -47,6 +48,9 @@ def sharpness(image: np.ndarray) -> float:
         + pixels[1:-1, 2:]
     )
     return float(laplacian.var())
+
+
+_BROLL_MIN_FACE_CONFIDENCE = 0.70
 
 
 class ImageQC:
@@ -109,7 +113,11 @@ class ImageQC:
     def _broll_face_checks(self, image: np.ndarray) -> list[CheckResult]:
         if self._faces is None:
             return []
-        faces = self._faces.faces(image)
+        faces = [
+            f
+            for f in self._faces.faces(image)
+            if f.confidence is None or f.confidence >= _BROLL_MIN_FACE_CONFIDENCE
+        ]
         biggest = faces[0].height_fraction if faces else 0.0
         unexpected = biggest >= self._cfg.broll_max_face_fraction
         return [
@@ -156,6 +164,12 @@ class ImageQC:
         if self._faces is None:
             return [
                 skipped(name, "face analysis unavailable")
+                for name in ("face_present", "face_framing", "identity")
+            ]
+        raw_prompt = shot.still.prompt_override or shot.still_prompt
+        if shot.type is ShotType.PERFORMANCE and is_rear_view_prompt(raw_prompt):
+            return [
+                skipped(name, "rear-view shot; face not expected to face camera")
                 for name in ("face_present", "face_framing", "identity")
             ]
         faces = self._faces.faces(image)

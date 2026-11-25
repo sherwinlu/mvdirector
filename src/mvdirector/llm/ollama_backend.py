@@ -39,6 +39,14 @@ def _is_format_error(text: str) -> bool:
     return ("format" in lowered or "structured output" in lowered) and "image" not in lowered
 
 
+def _is_think_error(text: str) -> bool:
+    """True when an Ollama server or model rejects the ``think`` payload option."""
+    lowered = text.lower()
+    return "think" in lowered and any(
+        word in lowered for word in ("unsupported", "not support", "invalid", "unknown")
+    )
+
+
 class OllamaChat(ChatBackend):
     def __init__(
         self,
@@ -56,6 +64,7 @@ class OllamaChat(ChatBackend):
         self._base_url = base_url
         self._http = http
         self._json_mode = json_mode  # "off", "object" or "schema"
+        self._disable_think = True
 
     @staticmethod
     def _wire_messages(system: str, messages: list[Message]) -> list[dict[str, Any]]:
@@ -88,6 +97,8 @@ class OllamaChat(ChatBackend):
             "stream": False,
             "options": {"num_ctx": self._num_ctx, "num_predict": self._max_tokens},
         }
+        if self._disable_think:
+            payload["think"] = False
         if self._json_mode == "object":
             payload["format"] = "json"
         elif self._json_mode == "schema":
@@ -96,6 +107,16 @@ class OllamaChat(ChatBackend):
         images = has_images(messages)
         words = IMAGE_WORDS if images else ()
         response = self._http.post(self._url, payload, unreachable_hint=hint, no_retry_words=words)
+        if (
+            "think" in payload
+            and response.status_code in (400, 501)
+            and _is_think_error(response.text)
+        ):
+            self._disable_think = False
+            payload.pop("think")
+            response = self._http.post(
+                self._url, payload, unreachable_hint=hint, no_retry_words=words
+            )
         if (
             "format" in payload
             and response.status_code in (400, 501)

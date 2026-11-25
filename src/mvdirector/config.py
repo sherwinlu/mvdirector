@@ -123,10 +123,10 @@ class _Section(BaseModel):
 
 class InputsConfig(_Section):
     mix: str = "inputs/mix.wav"
-    vocals: str = "inputs/vocals.wav"
+    vocals: str | None = "inputs/vocals.wav"
     drums: str | None = None
     stems_dir: str = "inputs/stems"
-    lyrics: str = "inputs/lyrics.txt"
+    lyrics: str | None = "inputs/lyrics.txt"
     style: str = "inputs/style.md"
     word_timestamps: str | None = Field(
         default=None,
@@ -621,6 +621,12 @@ class LLMConfig(_Section):
             "planning replies."
         ),
     )
+
+    @field_validator("json_mode", mode="before")
+    @classmethod
+    def _coerce_yaml_off(cls, value: Any) -> Any:
+        # PyYAML 1.1 parses unquoted `json_mode: off` as Python False.
+        return "off" if value is False else value
 
     @field_validator("base_url", mode="before")
     @classmethod

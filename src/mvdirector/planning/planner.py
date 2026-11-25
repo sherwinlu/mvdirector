@@ -22,6 +22,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mvdirector import tuning as tuning_mod
+from mvdirector.audio.analysis import describe_vocal_register
 from mvdirector.audio.cues import format_cues_summary
 from mvdirector.audio.lyrics import (
     is_hook_section,
@@ -157,6 +158,11 @@ class CharacterReply(_Reply):
     def _check_id(cls, value: object) -> str:
         return _slug_id(value, "character id", "char")
 
+    @field_validator("invariants", "name", mode="before")
+    @classmethod
+    def _coerce_char_text(cls, value: object) -> object:
+        return _coerce_text(value)
+
 
 class SetReply(_Reply):
     name: str
@@ -180,6 +186,15 @@ class PropReply(_Reply):
 
 def _none_to_str(value: object) -> object:
     return "" if value is None else value
+
+
+def _coerce_text(value: object, sep: str = ", ") -> object:
+    """Accept null or a list of strings where a prose/comma-separated string is expected."""
+    if value is None:
+        return ""
+    if isinstance(value, list) and all(item is None or isinstance(item, str) for item in value):
+        return sep.join(item.strip() for item in value if isinstance(item, str) and item.strip())
+    return value
 
 
 def _none_to_list(value: object) -> object:
@@ -234,6 +249,28 @@ class BibleReply(_Reply):
     wardrobe: list[WardrobeReply] = Field(default_factory=list)
     characters: list[CharacterReply] = Field(default_factory=list)
     rules: list[str] = Field(default_factory=list)
+
+    @field_validator("interpretation", mode="before")
+    @classmethod
+    def _coerce_interpretation(cls, value: object) -> object:
+        if isinstance(value, str):
+            text = value.strip()
+            return {"meaning": text} if text else None
+        return value
+
+    @field_validator(
+        "appearance",
+        "invariants",
+        "style",
+        "palette",
+        "lighting",
+        "negative_prompt",
+        "concept",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_bible_text(cls, value: object) -> object:
+        return _coerce_text(value)
 
 
 # Spellings a model is likely to use for the allowed values, after lower-casing and turning
@@ -325,12 +362,8 @@ def build_manifest(
     # Derive multi-singer section snapping deterministically from lyric section tags and
     # acoustic voice turns BEFORE calling the LLM, so cut points never vary with model output.
     if config.video.snap_sections == "auto":
-        voices = {t.voice for t in analysis.vocal_turns}
-        snap_sections = (
-            has_multiple_section_singers(analysis, lyrics_text)
-            or len(voices) >= 2
-            or BOTH_VOICES in voices
-        )
+        solo_voices = {t.voice for t in analysis.vocal_turns if t.voice != BOTH_VOICES}
+        snap_sections = has_multiple_section_singers(analysis, lyrics_text) or len(solo_voices) >= 2
     else:
         snap_sections = config.video.snap_sections == "always"
     manifest.shots = _timed_shots(config, analysis, snap_sections=snap_sections)
@@ -429,6 +462,9 @@ def _write_bible(
         cue_summary = format_cues_summary(analysis.cues)
         if cue_summary:
             parts.append(f"STRUCTURAL CUES:\n{cue_summary}")
+        reg_summary = describe_vocal_register(analysis.vocal_turns)
+        if reg_summary:
+            parts.append(f"VOCAL REGISTER:\n{reg_summary}")
     parts.append(f"SONG SECTIONS, IN ORDER:\n{section_list}")
     parts.append(f"LYRICS:\n{lyrics_text}")
     if video_style is VideoStyle.VISUAL:
@@ -863,6 +899,46 @@ _PERFORMER_CUE_RE = re.compile(
 )
 
 
+_NEGATED_PEOPLE_RE = re.compile(
+    r"\b(?:no|without|empty\s+of|free\s+of|devoid\s+of)\s+"
+    r"(?:people|persons?|faces?|figures?|performers?|singers?|dancers?|crowds?|humans?|silhouettes?)\b",
+    re.IGNORECASE,
+)
+_BROLL_PEOPLE_RE = re.compile(
+    r"\b(?:performers?|singers?|bartenders?|security|two\s+figures?|"
+    r"(?:a\s+|the\s+)?(?:man|woman|girl|boy|person|couple)\s+(?:stands?|sits?|walks?|looks?|gazes?|stares?|dances?|sings?))\b",
+    re.IGNORECASE,
+)
+_BROLL_TIGHT_FIGURE_RE = re.compile(
+    r"\b(?:figures?|silhouettes?|humans?|persons?|angels?|man|woman|girl|boy|couple)\b",
+    re.IGNORECASE,
+)
+_PLURAL_CAST_CUE_RE = re.compile(
+    r"\b(?:they|their|them|both|together|unison|harmony|duet|trio|group|band|everyone|all\s+of\s+them|two-shot)\b",
+    re.IGNORECASE,
+)
+
+
+def _broll_mentions_people(
+    prompt_text: str,
+    characters: dict[str, Character] | None = None,
+    *,
+    framing: Framing | None = None,
+) -> bool:
+    """True when a b-roll still prompt puts people, dancers, or named characters in frame."""
+    cleaned = _NEGATED_PEOPLE_RE.sub("", prompt_text.strip())
+    if not cleaned:
+        return False
+    if characters and _characters_in_text(cleaned, characters, proper_noun_only=True):
+        return True
+    if _BROLL_PEOPLE_RE.search(cleaned):
+        return True
+    return bool(
+        framing in (Framing.CLOSE_UP, Framing.MEDIUM_CLOSE)
+        and _BROLL_TIGHT_FIGURE_RE.search(cleaned)
+    )
+
+
 def _is_empty_scene_prompt(
     prompt_text: str, characters: dict[str, Character] | None = None
 ) -> bool:
@@ -1232,6 +1308,9 @@ def _direct_shots(
                     batch[-1].id,
                     exc,
                 )
+        cast_for_guards = manifest.characters or (
+            {"_solo": manifest.character} if manifest.character.name else {}
+        )
         for shot_pos, shot in enumerate(batch, start=offset):
             item = creative.get(shot.id)
             can_cutaway = _cutaway_run(manifest.shots, shot_pos) <= _MAX_CUTAWAY_RUN
@@ -1242,7 +1321,7 @@ def _direct_shots(
                 allow_multicut=config.planning.allow_multicut_shots,
                 lipsync_widest=config.planning.lipsync_widest_framing,
                 allow_broll_conversion=can_cutaway,
-                characters=manifest.characters,
+                characters=cast_for_guards,
             )
             if not shot.type.shows_singer:
                 shot.character = None
@@ -1301,6 +1380,10 @@ def _direct_shots(
                     if cid not in visible_ids:
                         visible_ids.append(cid)
             if item and item.characters:
+                mentioned_in_prompt = set(
+                    _characters_in_text(shot.still_prompt, manifest.characters)
+                )
+                has_plural_cue = bool(_PLURAL_CAST_CUE_RE.search(shot.still_prompt))
                 for raw_cid in item.characters:
                     resolved = manifest.resolve_character_id(raw_cid)
                     if resolved is None:
@@ -1308,7 +1391,14 @@ def _direct_shots(
                             "%s: ignoring unknown character %r in characters list", shot.id, raw_cid
                         )
                     elif resolved not in visible_ids:
-                        visible_ids.append(resolved)
+                        if is_together or resolved in mentioned_in_prompt or has_plural_cue:
+                            visible_ids.append(resolved)
+                        else:
+                            log.info(
+                                "%s: dropping unmentioned secondary character %r from solo shot",
+                                shot.id,
+                                resolved,
+                            )
             for mentioned_id in _characters_in_text(
                 shot.still_prompt, manifest.characters, proper_noun_only=True
             ):
@@ -1332,7 +1422,21 @@ def _direct_shots(
                     ]
                     if shot.framing is Framing.CLOSE_UP:
                         shot.framing = Framing.MEDIUM_CLOSE
-                    if item is None:
+                    mentioned_singers = set(
+                        _characters_in_text(shot.still_prompt, manifest.characters)
+                    )
+                    missing_co_singer = (
+                        len(shot.singers) >= 2
+                        and len(mentioned_singers & set(shot.singers)) < 2
+                        and not _PLURAL_CAST_CUE_RE.search(shot.still_prompt)
+                    )
+                    if item is None or missing_co_singer:
+                        if missing_co_singer:
+                            log.warning(
+                                "%s: together-singing still_prompt omitted co-singer; "
+                                "replacing with two-shot direction",
+                                shot.id,
+                            )
                         names = prompts.join_names(
                             [manifest.characters[cid].name or cid for cid in shot.singers]
                         )
@@ -1447,6 +1551,12 @@ def _ask_for_batch(
                 f"| wardrobe: {w_summary}{always}"
             )
         lines.append("\n".join(char_lines))
+    elif character.name or character.appearance:
+        always = f" | always: {pinned}" if (pinned := character.pinned()) else ""
+        lines.append(
+            f"CHARACTER (always refer to them by name, never as 'lead vocal' or a snake_case id): "
+            f"{character.name or 'the lead singer'} | appearance: {character.appearance}{always}"
+        )
     if character.wardrobe:
         lines.append(
             "WARDROBE STATES (in order of appearance):\n"
@@ -1556,6 +1666,52 @@ def _apply_rule_based_with_set(shot: Shot, bible: VisualBible, raw_setting: str)
     _apply_rule_based(shot)
 
 
+def _broll_mentions_cast(text: str, characters: dict[str, Character] | None) -> list[str]:
+    """Cast ids explicitly placed in a b-roll prompt by proper name or snake_case id."""
+    if not text or not characters:
+        return []
+    found = _characters_in_text(text, characters, proper_noun_only=True)
+    for cid in characters:
+        if "_" in cid and cid not in found and re.search(rf"\b{re.escape(cid)}\b", text):
+            found.append(cid)
+    return found
+
+
+_WIDER_SHOT_LABEL_RE = re.compile(r"\b(?:wide|full[\s-]body|medium)\s+shot\b", re.IGNORECASE)
+_LOWER_CROP_PHRASE_RE = re.compile(
+    r"\bfrom\s+(?:the|his|her|their)\s+(?:waist|hips?|knees?)\s+up\b", re.IGNORECASE
+)
+_TIGHT_FEET_SENTENCE_RE = re.compile(
+    r"\b(?:(?:around|at)\s+(?:his|her|their)\s+feet|bare\s+feet|is\s+barefoot)\b",
+    re.IGNORECASE,
+)
+_UPPER_BODY_KEEP_RE = re.compile(
+    r"\b(?:face|eyes?|mouth|lips?|jaw|cheek|hair|neck|shoulders?|chest|blazer|jacket|coat|shirt|hands?)\b",
+    re.IGNORECASE,
+)
+
+
+def _reconcile_tight_framing_prompt(text: str, framing: Framing) -> str:
+    """Align raw wide/waist-up prose with clamped ``close_up``/``medium_close`` framing."""
+    if framing not in (Framing.CLOSE_UP, Framing.MEDIUM_CLOSE) or not text:
+        return text
+    shot_label = "close-up" if framing is Framing.CLOSE_UP else "medium close-up"
+    crop_label = "head-and-shoulders" if framing is Framing.CLOSE_UP else "from the chest up"
+
+    def _sub_label(match: re.Match[str]) -> str:
+        raw = match.group(0)
+        return shot_label.capitalize() if raw[0].isupper() else shot_label
+
+    updated = _WIDER_SHOT_LABEL_RE.sub(_sub_label, text)
+    updated = _LOWER_CROP_PHRASE_RE.sub(crop_label, updated)
+    kept_sentences = [
+        s
+        for s in re.split(r"(?<=[.!?])\s+", updated.strip())
+        if s and not (_TIGHT_FEET_SENTENCE_RE.search(s) and not _UPPER_BODY_KEEP_RE.search(s))
+    ]
+    return " ".join(kept_sentences) if kept_sentences else updated
+
+
 def _apply_creative(
     shot: Shot,
     creative: ShotCreative | None,
@@ -1568,6 +1724,8 @@ def _apply_creative(
 ) -> None:
     """Copy the model's choices onto a shot, enforcing the rules it must not break."""
     if creative is None:
+        if not shot.setting and bible.settings:
+            shot.setting = bible.settings[0].name
         _apply_rule_based(shot)
         return
     if shot.type is ShotType.BROLL and creative.type is not ShotType.BROLL:
@@ -1578,6 +1736,25 @@ def _apply_creative(
         )
         _apply_rule_based_with_set(shot, bible, creative.setting)
         return
+    if shot.type is ShotType.BROLL and _broll_mentions_people(
+        creative.still_prompt, characters, framing=creative.framing or shot.framing
+    ):
+        log.warning(
+            "%s: broll still_prompt puts people/characters on camera; using rule-based cutaway",
+            shot.id,
+        )
+        _apply_rule_based_with_set(shot, bible, creative.setting)
+        return
+    if shot.type is ShotType.BROLL:
+        leaked_cast = _broll_mentions_cast(creative.still_prompt, characters)
+        if leaked_cast:
+            log.warning(
+                "%s: broll still_prompt puts cast member(s) %s on camera; using rule-based cutaway",
+                shot.id,
+                ", ".join(leaked_cast),
+            )
+            _apply_rule_based_with_set(shot, bible, creative.setting)
+            return
     if shot.type is ShotType.PERFORMANCE and creative.type is not ShotType.LIPSYNC:
         effective_type = creative.type
         if effective_type is ShotType.PERFORMANCE and _is_empty_scene_prompt(
@@ -1599,6 +1776,14 @@ def _apply_creative(
                 )
                 _apply_rule_based_with_set(shot, bible, creative.setting)
                 return
+        if effective_type is ShotType.BROLL and _broll_mentions_cast(
+            creative.still_prompt, characters
+        ):
+            log.info(
+                "%s: keeping performance type because still_prompt names a cast member",
+                shot.id,
+            )
+            effective_type = ShotType.PERFORMANCE
         if effective_type is ShotType.BROLL and not allow_broll_conversion:
             log.warning(
                 "%s: keeping performance shot with rule-based direction so the singer is not off "
@@ -1617,7 +1802,11 @@ def _apply_creative(
     shot.setting = _resolve_set(bible, creative.setting, shot.id)
     shot.allow_cuts = bool(allow_multicut and creative.allow_cuts)
     shot.props = _resolve_props(bible, creative.props, shot.id)
-    shot.still_prompt = creative.still_prompt
+    shot.still_prompt = (
+        _reconcile_tight_framing_prompt(creative.still_prompt, shot.framing)
+        if shot.type.shows_singer
+        else creative.still_prompt
+    )
     if (
         shot.type is ShotType.BROLL
         and creative.type is ShotType.PERFORMANCE
@@ -1690,8 +1879,11 @@ def _apply_rule_based(shot: Shot) -> None:
         )
         return
     if shot.type is ShotType.BROLL:
+        setting_ref = (
+            shot.setting if shot.setting.lower().startswith("the ") else f"the {shot.setting}"
+        )
         shot.still_prompt = (
-            f"{_FRAMING_PHRASE[shot.framing]} of an object or corner of the {shot.setting} that "
+            f"{_FRAMING_PHRASE[shot.framing]} of an object or corner of {setting_ref} that "
             f"echoes the song, no people, {energy} mood."
         )
         shot.motion_prompt = _BROLL_PACE_MOTION[pace]

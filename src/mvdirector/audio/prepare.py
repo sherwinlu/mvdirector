@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -76,6 +77,7 @@ class AudioSummary:
     vocal_fraction: float
     energy_arc: list[str]
     vocal_turns: list[VocalTurn] = field(default_factory=list)
+    vocal_pitch_hz: float | None = None
     musical_features: MusicalFeatures | None = None
     cues: AudioCues | None = None
     stem_summary: str = ""
@@ -154,6 +156,7 @@ def summarize_audio(
     vocal_rms, vocal_times = analysis_mod.rms_envelope(vocals)
     windows = analysis_mod.detect_vocal_windows(vocal_rms, vocal_times)
     vocal_turns = analysis_mod.detect_vocal_turns(vocals)
+    vocal_pitch_hz = analysis_mod.estimate_vocal_pitch_hz(vocals) if windows else None
     intensities = analysis_mod.bar_intensity(mix_rms, mix_times, bars, duration)
     musical_features = analysis_mod.analyze_musical_features(
         mix, analysis_mod.ANALYSIS_SR, tempo_bpm=tempo, harmonic_mix=harmonic_mix
@@ -179,6 +182,7 @@ def summarize_audio(
         vocal_fraction=round(vocal_fraction, 3),
         energy_arc=format_energy_arc(bars, intensities, duration),
         vocal_turns=vocal_turns,
+        vocal_pitch_hz=vocal_pitch_hz,
         musical_features=musical_features,
         cues=audio_cues,
         stem_summary=stem_summary,
@@ -248,22 +252,33 @@ def _build_inference_prompt(transcript: Transcript, summary: AudioSummary) -> st
         header.append(f"STRUCTURAL CUES: {cue_summary}")
     if summary.stem_summary:
         header.append(f"INSTRUMENTATION & STEMS: {summary.stem_summary}")
-    voices = {t.voice for t in summary.vocal_turns}
-    if len(voices) >= 2 or BOTH_VOICES in voices:
+    solo_voices = {t.voice for t in summary.vocal_turns if t.voice != BOTH_VOICES}
+    has_duet = len(solo_voices) >= 2
+    if has_duet:
         both_note = (
-            ", and simultaneous duet sections like [Chorus: Both]" if BOTH_VOICES in voices else ""
+            ", and simultaneous duet sections like [Chorus: Both]"
+            if any(t.voice == BOTH_VOICES for t in summary.vocal_turns)
+            else ""
         )
         header.append(
             "DETECTED VOICES: 2 distinct vocalists (Singer 1 lower register, Singer 2 higher "
             f"register — tag alternating sections like [Verse 1: Singer 1]{both_note})"
         )
+    else:
+        reg_hint = analysis_mod.describe_vocal_register(
+            summary.vocal_turns, solo_f0_hz=summary.vocal_pitch_hz
+        )
+        if reg_hint:
+            header.append(f"DETECTED VOCAL REGISTER: {reg_hint}")
 
     if transcript.segments:
         lines = []
         for seg in transcript.segments:
             if not seg.text.strip():
                 continue
-            speaker = segment_speaker_label(seg.start, seg.end, summary.vocal_turns)
+            speaker = (
+                segment_speaker_label(seg.start, seg.end, summary.vocal_turns) if has_duet else None
+            )
             tag = f" ({speaker})" if speaker else ""
             lines.append(
                 f"[{_format_mmss(seg.start)} - {_format_mmss(seg.end)}]{tag} {seg.text.strip()}"
@@ -299,7 +314,8 @@ def infer_inputs_from_transcript(
 ) -> tuple[InferredInputsReply, bool]:
     """Infer structured ``lyrics.txt`` and ``style.md`` from transcribed vocals + audio summary."""
     has_lyrics = any(seg.text.strip() for seg in transcript.segments)
-    turns = summary.vocal_turns or None
+    solo_voices = {t.voice for t in summary.vocal_turns if t.voice != BOTH_VOICES}
+    turns = summary.vocal_turns if len(solo_voices) >= 2 else None
     if llm is None:
         music_style, visual_direction = fallback_style_brief(summary, has_lyrics=has_lyrics)
         return (
@@ -431,6 +447,36 @@ def _discover_dropped_stem_sources(project: Project, stems_dir: Path) -> list[Pa
     return found
 
 
+def _norm_title_words(text: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9]+", " ", text.casefold()).strip()
+    return re.sub(r"\b(?:stems?|tracks?|pack|wav|mp3|audio)\b", "", cleaned).strip()
+
+
+def _extract_dir_master_mix(folder: Path, project_title: str) -> tuple[Path | None, list[Path]]:
+    """Detect a master mix file sitting alongside stems inside ``folder``."""
+    entries = stem_pack_mod._collect_directory_sources(folder)
+    audio_files = [p for p in entries if p.suffix.lower() in stem_pack_mod.STEM_AUDIO_SUFFIXES]
+    recognized = [p for p in audio_files if stem_pack_mod.classify_stem_name(p.name) != "other"]
+    if len(recognized) < 3:
+        return None, [folder]
+    unrecognized = [p for p in audio_files if stem_pack_mod.classify_stem_name(p.name) == "other"]
+    explicit = [p for p in unrecognized if _is_explicit_mix_name(p)]
+    candidate: Path | None = None
+    if len(explicit) == 1:
+        candidate = explicit[0]
+    elif len(unrecognized) == 1:
+        cand = unrecognized[0]
+        cand_norm = _norm_title_words(cand.stem)
+        folder_norm = _norm_title_words(folder.name)
+        title_norm = _norm_title_words(project_title)
+        matches_title = bool(title_norm) and cand_norm == title_norm
+        if cand_norm and (cand_norm == folder_norm or matches_title):
+            candidate = cand
+    if candidate is None:
+        return None, [folder]
+    return candidate, [p for p in entries if p != candidate]
+
+
 def _partition_prepare_inputs(
     project: Project,
     audio: Path | Sequence[Path] | None,
@@ -508,6 +554,18 @@ def _partition_prepare_inputs(
                 master_mix = candidate
             else:
                 remaining_loose.append(candidate)
+
+    if master_mix is None:
+        expanded_packs: list[Path] = []
+        for src in pack_sources:
+            if master_mix is None and src.is_dir():
+                dir_mix, dir_rest = _extract_dir_master_mix(src, project.config.title)
+                if dir_mix is not None:
+                    master_mix = dir_mix
+                    expanded_packs.extend(dir_rest)
+                    continue
+            expanded_packs.append(src)
+        pack_sources = expanded_packs
 
     return master_mix, [*pack_sources, *remaining_loose]
 

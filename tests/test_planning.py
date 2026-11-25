@@ -249,3 +249,97 @@ def test_the_widest_singing_framing_is_configurable(analysis):
     manifest = build_manifest(config, analysis, "lyrics", "style", llm=ScriptedLLM(Framing.MEDIUM))
     sung = manifest.shot("s002")
     assert sung.type is ShotType.LIPSYNC and sung.framing is Framing.MEDIUM
+
+
+def test_broll_guard_blocks_named_cast_but_keeps_anonymous_crowd_silhouettes():
+    from mvdirector.models import AudioSlice, Character, SetDesign, Shot, VisualBible
+    from mvdirector.planning.planner import _apply_creative
+
+    bible = VisualBible(settings=[SetDesign(name="Neon Club", description="Dark neon hall.")])
+    chars = {
+        "lead_vocal": Character(name="Seraphina", appearance="Dark hair."),
+        "vocalist_1": Character(name="Anya", appearance="Blonde hair."),
+    }
+
+    def _make_shot(shot_type: ShotType) -> Shot:
+        return Shot(
+            id="s010",
+            index=10,
+            start=10.0,
+            end=14.0,
+            audio_slice=AudioSlice(path="audio.wav", start=10.0, end=14.0, head_handle=0.0),
+            num_frames=97,
+            type=shot_type,
+        )
+
+    # 1. Cast member named in a broll slot -> falls back to uninhabited cutaway.
+    broll_cast = _make_shot(ShotType.BROLL)
+    _apply_creative(
+        broll_cast,
+        ShotCreative(
+            id="s010",
+            type=ShotType.BROLL,
+            framing=Framing.CLOSE_UP,
+            setting="Neon Club",
+            still_prompt="Close-up on Anya's face bathed in pink light.",
+            motion_prompt="Slow push-in.",
+        ),
+        bible,
+        characters=chars,
+    )
+    assert broll_cast.type is ShotType.BROLL
+    assert "Anya" not in broll_cast.still_prompt
+    assert "no people" in broll_cast.still_prompt.lower()
+
+    # 2. Raw snake_case character ID in a broll slot -> also caught.
+    broll_id = _make_shot(ShotType.BROLL)
+    _apply_creative(
+        broll_id,
+        ShotCreative(
+            id="s010",
+            type=ShotType.BROLL,
+            framing=Framing.MEDIUM,
+            setting="Neon Club",
+            still_prompt="Medium shot showing lead_vocal watching the dance floor.",
+            motion_prompt="Slow pan.",
+        ),
+        bible,
+        characters=chars,
+    )
+    assert "lead_vocal" not in broll_id.still_prompt
+
+    # 3. Anonymous backlit silhouettes / figurines in a broll slot -> preserved!
+    broll_silhouettes = _make_shot(ShotType.BROLL)
+    _apply_creative(
+        broll_silhouettes,
+        ShotCreative(
+            id="s010",
+            type=ShotType.BROLL,
+            framing=Framing.WIDE,
+            setting="Neon Club",
+            still_prompt="Wide strobe-lit club floor with anonymous backlit dancer silhouettes.",
+            motion_prompt="Strobe lights sweep across the silhouettes.",
+        ),
+        bible,
+        characters=chars,
+    )
+    assert broll_silhouettes.type is ShotType.BROLL
+    assert "anonymous backlit dancer silhouettes" in broll_silhouettes.still_prompt
+
+    # 4. Performance slot converted to broll while naming a cast member -> stays performance.
+    perf_slot = _make_shot(ShotType.PERFORMANCE)
+    _apply_creative(
+        perf_slot,
+        ShotCreative(
+            id="s010",
+            type=ShotType.BROLL,
+            framing=Framing.MEDIUM,
+            setting="Neon Club",
+            still_prompt="Spotlight illuminating Anya center stage.",
+            motion_prompt="Slow push-in.",
+        ),
+        bible,
+        characters=chars,
+    )
+    assert perf_slot.type is ShotType.PERFORMANCE
+    assert "Anya" in perf_slot.still_prompt

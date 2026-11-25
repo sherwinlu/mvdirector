@@ -18,6 +18,7 @@ from mvdirector.models import (
     AssetKind,
     CheckResult,
     CheckStatus,
+    Framing,
     Manifest,
     QCReport,
     Shot,
@@ -197,7 +198,11 @@ class ImageQC:
                 skipped(name, "silhouette shot; facial features intentionally obscured")
                 for name in ("face_present", "face_framing", "identity")
             ]
-        if shot.type is ShotType.PERFORMANCE and is_hands_detail_prompt(raw_prompt):
+        if (
+            shot.type is ShotType.PERFORMANCE
+            and shot.framing is Framing.CLOSE_UP
+            and is_hands_detail_prompt(raw_prompt)
+        ):
             return [
                 skipped(name, "hands-only detail shot; face intentionally out of frame")
                 for name in ("face_present", "face_framing", "identity")

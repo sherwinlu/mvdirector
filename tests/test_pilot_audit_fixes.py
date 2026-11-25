@@ -1300,6 +1300,7 @@ def test_profile_and_hands_detail_panel_routing_and_face_qc(tmp_path):
     assert runner._still_reference_paths(profile_shot, plate=None)[0][2].name == "profile.png"
     assert not prompts.is_profile_view_prompt("Three-quarter profile looking slightly off-lens.")
     assert not prompts.is_profile_view_prompt("Keeping a low profile in the alley.")
+    assert not prompts.is_profile_view_prompt("A high-profile shot of the red carpet arrival.")
 
     # 2. Hands-only macro shot avoids face.png (uses front.png) and skips MediaPipe face checks.
     assert runner._still_reference_paths(hands_shot, plate=None)[0][2].name == "front.png"
@@ -1424,3 +1425,72 @@ def test_inline_section_cue_with_singer_starts_section_and_swaps_singer():
         ("f", "Chorus: Both"),
         ("g", "Chorus"),
     ]
+
+
+def test_hands_detail_requires_closeup_cue_so_wider_shots_keep_face_qc(tmp_path):
+    from PIL import Image
+
+    from mvdirector.config import QCConfig, VideoConfig
+    from mvdirector.qc.image import ImageQC
+
+    # Hands merely mentioned in wider shots must not switch off face checks.
+    assert not prompts.is_hands_detail_prompt(
+        "Medium shot of Mia on the rooftop at dusk, hands in her jacket pockets."
+    )
+    assert not prompts.is_hands_detail_prompt(
+        "Wide shot: the singer raises both hands to the crowd under strobe lights."
+    )
+    assert prompts.is_hands_detail_prompt("Close-up macro of hands turning a brass key.")
+
+    medium = Shot(
+        id="s010",
+        index=0,
+        start=0.0,
+        end=4.0,
+        num_frames=97,
+        type=ShotType.PERFORMANCE,
+        framing=Framing.MEDIUM,
+        audio_slice=AudioSlice(path="assets/audio/s010.wav", start=0.0, end=4.0, head_handle=0.0),
+        # Has a close-up cue word, but the shot is framed medium, so the face is in frame.
+        still_prompt="Medium shot, insert of hands strumming a guitar on the porch.",
+    )
+    manifest = Manifest(
+        title="t",
+        duration=4.0,
+        fps=24,
+        character=Character(name="Mia", appearance="Woman."),
+        visual_bible=VisualBible(style="Film"),
+        shots=[medium],
+    )
+    img = tmp_path / "frame.png"
+    Image.new("RGB", (576, 320), (30, 30, 30)).save(img)
+
+    class _NoFaces:
+        def faces(self, image):
+            return []
+
+    report = ImageQC(QCConfig(), VideoConfig(), _NoFaces(), None).evaluate(
+        img, medium, manifest, None, expected_size=(576, 320)
+    )
+    face_present = next(c for c in report.checks if c.name == "face_present")
+    assert face_present.status.value == "failed"
+
+
+def test_plain_first_names_do_not_match_common_words_or_shared_surnames():
+    roses = {
+        "lead": Character(name="Rose Martin", appearance="Woman."),
+        "co": Character(name="Mia", appearance="Woman."),
+    }
+    assert planner._broll_mentions_cast("Rose petals scattered across an empty table.", roses) == []
+    assert planner._broll_mentions_cast("Rose Martin waits by the window.", roses) == ["lead"]
+
+    kims = {
+        "a": Character(name="Kim Ji-woo", appearance="Woman."),
+        "b": Character(name="Kim Min-jun", appearance="Man."),
+    }
+    assert planner._characters_in_text(
+        "Kim Min-jun dances alone.", kims, proper_noun_only=True
+    ) == ["b"]
+    # Epithet names still match on the given name alone.
+    host = {"h": Character(name="Corbin The Host", appearance="Man.")}
+    assert planner._broll_mentions_cast("Corbin stands by the riser.", host) == ["h"]

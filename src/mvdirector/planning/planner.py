@@ -816,18 +816,17 @@ def _character_tokens(cid: str, char: Character) -> list[str]:
     if char.name and char.name.strip():
         clean_name = unicodedata.normalize("NFC", char.name.strip())
         candidates = [clean_name]
-        # Also recognize base name before parenthetical/comma epithets (e.g. "Eun-ji (The Kumiho)",
-        # "Margot, the Choir Leader") and distinctive leading given names ("Corbin the Host").
+        # Also recognize the base name before parenthetical/comma epithets (e.g. "Eun-ji (The
+        # Kumiho)", "Margot, the Choir Leader").
         base_name = re.split(r"\s*[(\[,]", clean_name, maxsplit=1)[0].strip()
         if base_name and base_name != clean_name:
             candidates.append(base_name)
-        first_word = base_name.split()[0].strip(".,:;'\"-") if base_name else ""
-        if (
-            len(first_word) >= 3
-            and first_word.casefold() not in _GENERIC_NAME_PREFIXES
-            and first_word != base_name
-        ):
-            candidates.append(first_word)
+        # Only an epithet ("Corbin the Host") marks a leading given name as the character's own;
+        # a plain first name ("Rose Martin", "Kim Ji-woo") is often a common word or shared.
+        epithet = re.match(r"^(.+?)\s+the\s+\S", base_name, flags=re.IGNORECASE)
+        given = epithet.group(1).strip(".,:;'\"-") if epithet else ""
+        if len(given) >= 3 and given.casefold() not in _GENERIC_NAME_PREFIXES:
+            candidates.append(given)
         for cand in candidates:
             tokens.append(cand)
             folded = ascii_fold(cand).strip()

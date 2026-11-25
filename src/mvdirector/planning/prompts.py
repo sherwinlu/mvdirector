@@ -75,7 +75,7 @@ _SILHOUETTE_RE = re.compile(
     re.IGNORECASE,
 )
 _PROFILE_VIEW_RE = re.compile(
-    r"(?<!three[- ]quarter\s)(?<!3/4\s)(?<!low\s)\b(?:"
+    r"(?<!three[- ]quarter\s)(?<!3/4\s)(?<!low\s)(?<!-)\b(?:"
     r"in\s+(?:strict\s+|full\s+|sharp\s+)?side\s+profile|"
     r"in\s+(?:strict\s+|full\s+|sharp\s+)?profile|"
     r"side\s+profile|profile\s+(?:view|shot|angle|portrait))\b",
@@ -84,6 +84,9 @@ _PROFILE_VIEW_RE = re.compile(
 _HANDS_DETAIL_RE = re.compile(
     r"\b(?:hands?|fingers?|fingertips?|wrists?|palms?|knuckles?)\b",
     re.IGNORECASE,
+)
+_HANDS_DETAIL_CUE_RE = re.compile(
+    r"\b(?:close[\s-]*up|macro|insert(?:\s+shot)?|detail(?:\s+shot)?)\b", re.IGNORECASE
 )
 _HANDS_DETAIL_EXCLUDE_RE = re.compile(
     r"\b(?:face|facial|eyes?|eyebrows?|brows?|lips?|mouth|jaw|jawline|cheeks?|forehead|chin|"
@@ -119,8 +122,16 @@ def is_profile_view_prompt(text: str) -> bool:
 
 
 def is_hands_detail_prompt(text: str) -> bool:
-    """True when ``text`` is a hands/fingers-only insert shot with no face/portrait cues."""
-    return bool(_HANDS_DETAIL_RE.search(text)) and not bool(_HANDS_DETAIL_EXCLUDE_RE.search(text))
+    """True when ``text`` is a hands/fingers-only insert shot with no face/portrait cues.
+
+    A close-up/macro/insert cue is required: hands merely mentioned in a wider shot ("hands in her
+    pockets") do not take the face out of frame.
+    """
+    return (
+        bool(_HANDS_DETAIL_RE.search(text))
+        and bool(_HANDS_DETAIL_CUE_RE.search(text))
+        and not bool(_HANDS_DETAIL_EXCLUDE_RE.search(text))
+    )
 
 
 def scrub_frontal_facial_details(description: str) -> str:

@@ -946,8 +946,10 @@ class ShotRunner:
                 and not is_rear_view
                 and prompts.is_profile_view_prompt(raw_still)
             )
-            is_hands_detail = shot.type is ShotType.PERFORMANCE and prompts.is_hands_detail_prompt(
-                raw_still
+            is_hands_detail = (
+                shot.type is ShotType.PERFORMANCE
+                and shot.framing is Framing.CLOSE_UP
+                and prompts.is_hands_detail_prompt(raw_still)
             )
             avoid_frontal_face = is_rear_view or is_profile_view or is_hands_detail
             front_path: Path | None = None

@@ -264,16 +264,35 @@ def clip_command(
     ]
 
 
+# Largest width/height accepted as a size override (covers 8K UHD and DCI 8K). Frames are
+# conformed in memory at this size, so an unbounded override (e.g. 100000x100000 from an MCP
+# caller) asked PIL and ffmpeg for tens of gigabytes per frame.
+MAX_OUTPUT_DIMENSION = 8192
+
+
+def validate_override_size(width: int, height: int, label: str) -> None:
+    """Reject a width/height override that is odd, below 64, or above MAX_OUTPUT_DIMENSION."""
+    if (
+        width < 64
+        or height < 64
+        or width % 2
+        or height % 2
+        or width > MAX_OUTPUT_DIMENSION
+        or height > MAX_OUTPUT_DIMENSION
+    ):
+        raise ConfigError(
+            f"{label} dimensions must be even integers between 64 and {MAX_OUTPUT_DIMENSION}, "
+            f"got {width}x{height}."
+        )
+
+
 def _resolve_output_size(
     project: Project, *, draft: bool, width: int | None, height: int | None
 ) -> tuple[int, int]:
     if (width is None) != (height is None):
         raise ConfigError("Set both width and height together when overriding assembly size.")
     if width is not None and height is not None:
-        if width < 64 or height < 64 or width % 2 or height % 2:
-            raise ConfigError(
-                f"Assembly dimensions must be even integers >= 64, got {width}x{height}."
-            )
+        validate_override_size(width, height, "Assembly")
         return (width, height)
     video = project.config.video
     return video.generation_size(draft=True) if draft else (video.width, video.height)

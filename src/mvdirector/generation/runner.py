@@ -659,16 +659,23 @@ class ShotRunner:
                     raise
                 with self._manifest_lock:
                     shot.review = Review()  # any earlier review no longer describes this shot
-                self._emit(
-                    RunEvent(
-                        "attempt_started",
-                        asset=kind.value,
-                        shot_id=shot.id,
-                        attempt=plan.number,
-                        strategy=plan.strategy.value,
-                        generations_used=generations_used,
+                try:
+                    self._emit(
+                        RunEvent(
+                            "attempt_started",
+                            asset=kind.value,
+                            shot_id=shot.id,
+                            attempt=plan.number,
+                            strategy=plan.strategy.value,
+                            generations_used=generations_used,
+                        )
                     )
-                )
+                except BaseException:
+                    # An observer that stops the run here (MCP cooperative cancel raises on
+                    # attempt_started) does so before anything is queued on the GPU, so the
+                    # reserved slot was never spent.
+                    self._budget.refund()
+                    raise
                 prev_attempt = state.attempts[-1] if state.attempts else None
                 attempt = self._attempt(
                     shot, kind, plan, previous_attempt=prev_attempt, client=active_client

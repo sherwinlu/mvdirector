@@ -14,6 +14,7 @@ import logging
 import socket
 import sys
 import threading
+import time
 import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -35,6 +36,10 @@ DEFAULT_PROTOCOL_VERSION = "2025-03-26"
 SKILL_RESOURCE_URI = "mvdirector://skill"
 MAX_HTTP_BODY_BYTES = 1_048_576  # 1 MiB
 MAX_CONCURRENT_HTTP_REQUESTS = 64
+# Total time a client gets to deliver its request line, headers and body. The socket timeout only
+# bounds each recv(), so without this a client trickling one byte every few seconds held one of the
+# MAX_CONCURRENT_HTTP_REQUESTS slots forever, and 64 such clients locked everyone else out.
+REQUEST_READ_DEADLINE_SECONDS = 15.0
 _SINGLE_VALUE_HEADERS = ("host", "origin", "authorization", "content-length")
 
 _SERVER_INSTRUCTIONS = (
@@ -380,22 +385,25 @@ def _json_response(
     return int(status), out_headers, body
 
 
-def handle_http_request(
-    mcp_server: MCPServer,
+def precheck_http_request(
     method: str,
     raw_path: str,
     headers: dict[str, str],
-    body: bytes = b"",
     *,
     token: str | None = None,
     loopback_only: bool = True,
-) -> tuple[int, dict[str, str], bytes]:
-    """Process one Streamable HTTP MCP request and return ``(status, headers, body)``."""
+) -> tuple[int, dict[str, str], bytes] | None:
+    """Routing, Host/Origin and bearer-token checks that need only the request headers.
+
+    Returns the rejection response, or None when the request may proceed. The HTTP handler runs
+    this before reading a POST body, so an unauthenticated client cannot make the server buffer
+    a body at all.
+    """
     path = urlparse(raw_path).path
     norm_headers = {k.lower(): v for k, v in headers.items()}
 
     if method == "GET" and path == "/health":
-        return _json_response(HTTPStatus.OK, {"status": "ok"})
+        return None
 
     if path != "/mcp":
         return _json_response(HTTPStatus.NOT_FOUND, {"error": "Not found."})
@@ -419,15 +427,39 @@ def handle_http_request(
 
     # 3. Verify bearer token when configured.
     if token:
-        auth = norm_headers.get("authorization", "")
-        prefix = "Bearer "
-        supplied = auth[len(prefix) :] if auth.startswith(prefix) else ""
-        if not hmac.compare_digest(supplied.encode("utf-8"), token.encode("utf-8")):
+        # RFC 7235 §2.1: the auth scheme is case-insensitive ("bearer" == "Bearer"), and
+        # surrounding whitespace is not part of the credentials. The token itself is still
+        # compared exactly, in constant time.
+        scheme, _, credentials = norm_headers.get("authorization", "").strip().partition(" ")
+        supplied = credentials.strip() if scheme.lower() == "bearer" else ""
+        if not supplied or not hmac.compare_digest(supplied.encode("utf-8"), token.encode("utf-8")):
             return _json_response(
                 HTTPStatus.UNAUTHORIZED,
                 {"error": "Missing or invalid Bearer token."},
                 headers={"WWW-Authenticate": "Bearer"},
             )
+
+    return None
+
+
+def handle_http_request(
+    mcp_server: MCPServer,
+    method: str,
+    raw_path: str,
+    headers: dict[str, str],
+    body: bytes = b"",
+    *,
+    token: str | None = None,
+    loopback_only: bool = True,
+) -> tuple[int, dict[str, str], bytes]:
+    """Process one Streamable HTTP MCP request and return ``(status, headers, body)``."""
+    rejection = precheck_http_request(
+        method, raw_path, headers, token=token, loopback_only=loopback_only
+    )
+    if rejection is not None:
+        return rejection
+    if method == "GET" and urlparse(raw_path).path == "/health":
+        return _json_response(HTTPStatus.OK, {"status": "ok"})
 
     if method == "GET":
         return _json_response(
@@ -481,12 +513,66 @@ class _MCPHTTPServer(ThreadingHTTPServer):
         token: str | None,
         loopback_only: bool,
         max_concurrent_requests: int = MAX_CONCURRENT_HTTP_REQUESTS,
+        read_deadline: float = REQUEST_READ_DEADLINE_SECONDS,
     ) -> None:
         self.mcp_server = mcp_server
         self.token = token
         self.loopback_only = loopback_only
         self._request_slots = threading.BoundedSemaphore(max(1, max_concurrent_requests))
+        # One watchdog thread enforces REQUEST_READ_DEADLINE_SECONDS for every connection still
+        # delivering its request (a timer thread per connection measurably slowed bursts).
+        self.read_deadline = max(0.05, float(read_deadline))
+        self._pending_reads: dict[int, tuple[float, Any, str]] = {}
+        self._pending_lock = threading.Lock()
+        self._watchdog_stop = threading.Event()
         super().__init__(server_address, _MCPHTTPRequestHandler)
+        self._watchdog = threading.Thread(
+            target=self._watch_slow_reads, name="mvd-mcp-read-watchdog", daemon=True
+        )
+        self._watchdog.start()
+
+    def begin_read(self, key: int, connection: Any, peer: str) -> None:
+        deadline = time.monotonic() + self.read_deadline
+        with self._pending_lock:
+            self._pending_reads[key] = (deadline, connection, peer)
+
+    def end_read(self, key: int) -> bool:
+        """Stop watching ``key``; False when the watchdog already shut its socket down."""
+        with self._pending_lock:
+            return self._pending_reads.pop(key, None) is not None
+
+    def read_expired(self, key: int) -> bool:
+        """True once the watchdog has shut down ``key``'s socket (it is no longer watched)."""
+        with self._pending_lock:
+            return key not in self._pending_reads
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+            # A client hanging up (or a slow one the read deadline closed) is not a server fault.
+            log.debug("mcp-http %s - client disconnected: %s", client_address[0], exc)
+            return
+        super().handle_error(request, client_address)
+
+    def _watch_slow_reads(self) -> None:
+        interval = min(0.5, self.read_deadline / 4)
+        while not self._watchdog_stop.wait(interval):
+            now = time.monotonic()
+            with self._pending_lock:
+                expired = [key for key, entry in self._pending_reads.items() if entry[0] <= now]
+                victims = [self._pending_reads.pop(key) for key in expired]
+            for _deadline, connection, peer in victims:
+                log.warning(
+                    "mcp-http %s - request not received within %.0fs; closing connection",
+                    peer,
+                    self.read_deadline,
+                )
+                with contextlib.suppress(OSError):
+                    connection.shutdown(socket.SHUT_RDWR)
+
+    def server_close(self) -> None:
+        self._watchdog_stop.set()
+        super().server_close()
 
     def process_request(self, request: Any, client_address: Any) -> None:
         if not self._request_slots.acquire(blocking=False):
@@ -538,6 +624,20 @@ class _MCPHTTPRequestHandler(BaseHTTPRequestHandler):
     server: _MCPHTTPServer
     timeout = 30
 
+    def setup(self) -> None:
+        super().setup()
+        # HTTP/1.0 handler: one request per connection, so one deadline covers the read phase.
+        self.server.begin_read(id(self), self.connection, self.client_address[0])
+
+    def _finish_reading(self) -> bool:
+        """Stop the read deadline; False when it already fired and the socket is shut down."""
+        return self.server.end_read(id(self))
+
+    def finish(self) -> None:
+        self.server.end_read(id(self))
+        with contextlib.suppress(OSError):
+            super().finish()
+
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
         log.info("mcp-http %s - %s", self.address_string(), format % args)
 
@@ -565,6 +665,8 @@ class _MCPHTTPRequestHandler(BaseHTTPRequestHandler):
         return False
 
     def _dispatch(self, method: str, body: bytes = b"") -> None:
+        if not self._finish_reading():
+            return
         send_body = method != "HEAD"
         if self._reject_duplicate_headers(send_body=send_body):
             return
@@ -599,6 +701,8 @@ class _MCPHTTPRequestHandler(BaseHTTPRequestHandler):
         self._dispatch("DELETE")
 
     def do_POST(self) -> None:  # noqa: N802
+        if self.server.read_expired(id(self)):
+            return  # the deadline fired mid-headers; what was parsed is truncated
         if self._reject_duplicate_headers():
             return
         if self.headers.get("Transfer-Encoding") is not None:
@@ -630,7 +734,33 @@ class _MCPHTTPRequestHandler(BaseHTTPRequestHandler):
             )
             self._write_response(status, headers, body)
             return
-        self._dispatch("POST", self.rfile.read(length))
+        rejection = precheck_http_request(
+            "POST",
+            self.path,
+            {k: v for k, v in self.headers.items()},
+            token=self.server.token,
+            loopback_only=self.server.loopback_only,
+        )
+        if rejection is not None:
+            # Reject unauthenticated / cross-origin callers without buffering their body. The
+            # body is still read and discarded (bounded by MAX_HTTP_BODY_BYTES and the read
+            # deadline, which stays armed) so closing the socket is a clean FIN: closing with
+            # unread data makes Linux send RST, which can drop the 401 before the client reads it.
+            self._write_response(*rejection)
+            with contextlib.suppress(OSError):
+                self.wfile.flush()
+                remaining = length
+                while remaining > 0:
+                    chunk = self.rfile.read(min(remaining, 65536))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+            self._finish_reading()
+            return
+        body = self.rfile.read(length)
+        if len(body) < length:
+            return  # client went away or the read deadline shut the socket
+        self._dispatch("POST", body)
 
 
 def build_http_server(

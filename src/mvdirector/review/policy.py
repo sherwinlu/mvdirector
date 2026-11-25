@@ -30,6 +30,19 @@ from mvdirector.models import (
     utc_now,
 )
 
+# A reviewer note is fed into prompt rewrites (or appended to the prompt when no LLM runs)
+# and stored twice in the manifest, so an unbounded note bloats both.
+MAX_REVIEW_NOTE_CHARS = 2000
+
+
+def _checked_note(note: str) -> str:
+    cleaned = note.strip()
+    if len(cleaned) > MAX_REVIEW_NOTE_CHARS:
+        raise ValueError(
+            f"Review note is {len(cleaned)} characters; keep it under {MAX_REVIEW_NOTE_CHARS}."
+        )
+    return cleaned
+
 
 def uses_stills_only(manifest: Manifest, config: ProjectConfig) -> bool:
     """True when the project generates only stills (mix mode with visual_source='stills')."""
@@ -143,6 +156,8 @@ def approve(
     *,
     stills_only: bool = False,
 ) -> None:
+    if note is not None:
+        note = _checked_note(note) or None
     shot = manifest.shot(shot_id)
     if stills_only:
         if shot.still.selected is None:
@@ -173,6 +188,7 @@ def reject(
     Rejecting the still also resets the video, since the video is built from it.
     The shot's type is escalated so similar shots are all spot-checked from now on.
     """
+    note = _checked_note(note)
     shot = manifest.shot(shot_id)
     extra = config.retry.max_attempts
     if target is AssetKind.STILL:

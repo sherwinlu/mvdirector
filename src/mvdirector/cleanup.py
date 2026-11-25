@@ -51,6 +51,19 @@ def _has_symlink_component(root: Path, relative: str | Path) -> bool:
     return False
 
 
+def _is_generation_file(project: Project, path: Path) -> bool:
+    """True for a file the runner writes: ``assets/{stills,videos}/<shot>_aNN.{png,mp4}``.
+
+    Attempt paths are read back from manifest.json, which people edit by hand, so a stale or
+    mistyped entry can name any file in the project. Only generation-shaped files in the
+    generation folders are ever deleted; anything else (inputs, project.yaml, locked
+    references) is left alone even when an unselected attempt points at it.
+    """
+    return path.parent in {project.path(folder) for folder in _GENERATION_FOLDERS} and bool(
+        _GENERATION_NAME.fullmatch(path.name)
+    )
+
+
 def plan_cleanup(project: Project, manifest: Manifest) -> CleanupPlan:
     """What would be deleted; nothing is changed."""
     plan = CleanupPlan()
@@ -69,7 +82,7 @@ def plan_cleanup(project: Project, manifest: Manifest) -> CleanupPlan:
                 path = project.path(attempt.path)
                 if not settled or attempt.number == state.selected_attempt:
                     kept.add(path)
-                elif not is_symlinked and path.is_file():
+                elif not is_symlinked and path.is_file() and _is_generation_file(project, path):
                     superseded_candidates.append(path)
     seen_superseded: set[Path] = set()
     for path in superseded_candidates:

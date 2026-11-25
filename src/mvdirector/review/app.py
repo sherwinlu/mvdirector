@@ -126,6 +126,7 @@ def _render_shot(project: Project, shot: Shot, *, stills_only: bool = False) -> 
         "Note for regeneration",
         key=f"note_{shot.id}",
         placeholder="e.g. calmer drift, warmer lighting",
+        max_chars=policy.MAX_REVIEW_NOTE_CHARS,
     )
     can_approve_video = shot.video.selected is not None and video_file is not None
     can_approve_still = shot.still.selected is not None and still_file is not None

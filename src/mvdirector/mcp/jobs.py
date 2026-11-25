@@ -266,7 +266,8 @@ class JobManager:
                 return
             record.events.append(serialized)
             record.event_count += 1
-            if event.generations_used:
+            if event.generations_used or event.kind == "run_finished":
+                # run_finished carries the final count, after slots refunded by a cancel.
                 record.generations_used = event.generations_used
 
     def _update_progress(self, job_id: str, fields: dict[str, Any]) -> None:

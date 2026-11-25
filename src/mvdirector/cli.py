@@ -1484,8 +1484,8 @@ def upscale(
         False, "--force", help="Upscale the best available clip even if pending review."
     ),
     overwrite: bool = typer.Option(False, help="Re-upscale clips that were already upscaled."),
-    width: int | None = typer.Option(None, help="Override target upscale width (even >= 64)."),
-    height: int | None = typer.Option(None, help="Override target upscale height (even >= 64)."),
+    width: int | None = typer.Option(None, help="Override target upscale width (even, 64-8192)."),
+    height: int | None = typer.Option(None, help="Override target upscale height (even, 64-8192)."),
 ) -> None:
     """Upscale winning/approved draft clips through the optional 'upscale' workflow."""
     try:
@@ -1711,8 +1711,8 @@ def assemble(
     draft: bool = typer.Option(
         False, "--draft", help="Assemble at draft resolution and ignore upscaled clips."
     ),
-    width: int | None = typer.Option(None, help="Override assembly width (even >= 64)."),
-    height: int | None = typer.Option(None, help="Override assembly height (even >= 64)."),
+    width: int | None = typer.Option(None, help="Override assembly width (even, 64-8192)."),
+    height: int | None = typer.Option(None, help="Override assembly height (even, 64-8192)."),
     chapter: list[str] = ChaptersOption,
     rebuild_cache: bool = typer.Option(
         False,

@@ -36,14 +36,16 @@ Each workflow needs two files:
 |---|---|---|
 | `t2i` | Base reference sheet, set plate candidates, b-roll stills | `positive_prompt`, `negative_prompt`, `seed`, `width`, `height` |
 | `still` | Singer stills, and reference sheets for later costumes | the above plus `reference_image` (omit `reference_image` for T2I-only / LoRA models such as Z-Image or Krea T2I) |
-| `lipsync` | Lip-sync clips | `positive_prompt`, `negative_prompt`, `lyrics`, `seed`, `image`, `audio`, `audio_video`, `reference_video`, `previz_video`, `width`, `height`, `num_frames`, `duration`, `fps` |
+| `lipsync` | Lip-sync clips | `positive_prompt`, `negative_prompt`, `lyrics`, `seed`, `image`, `audio`, `audio_video`, `reference_video`, `previz_video`, optional R2V refs (`reference_image`, `reference_face`, `reference_profile`, `reference_three_quarter`, `reference_image_2`, …, `set_image`, `prop_image`), `width`, `height`, `num_frames`, `duration`, `fps` |
 | `i2v` | All other clips | as `lipsync`, without `audio` / `audio_video` (unless listed in `required`) |
-| `upscale` (optional) | Selective post-review clip upscaling (`mvd upscale`) | `video`, `width`, `height`, `fps`, `seed`, `positive_prompt` |
+| `upscale` (optional) | Selective post-review clip upscaling (`mvd upscale`) | `video`, `width`, `height`, `fps`, `seed`, `positive_prompt`, `negative_prompt`, optional `audio`, optional `image` |
 
-**Dedicated singing lip-sync templates shipped here:** LTX audio-conditioned A2V can drift on fast/sung syllables. Starter bindings for tighter mouth sync are included alongside the defaults:
+**Dedicated singing lip-sync & latent-refine templates shipped here:** LTX audio-conditioned A2V can drift on fast/sung syllables. Starter bindings for tighter mouth sync and 1080p tiled latent refinement are included alongside the defaults:
 - `infinitetalk_lipsync.bindings.json` (Wan 2.1 + InfiniteTalk Single, Apache-2.0): starter placeholder bindings (replace example node ids with ids from your exported workflow); set `comfy.workflows.lipsync` to this file and `video.frame_multiple: 4`, `video.frame_offset: 1` in `project.yaml`.
 - `latentsync_lipsync.bindings.json` (I2V + LatentSync mouth-dub pass): starter placeholder bindings (replace example node ids with ids from your exported workflow); keep your I2V motion (LTX or Wan) and pass the video + vocal slice through LatentSync (weights are OpenRAIL++ — review use restrictions before commercial use).
 - `seedance_lipsync.bindings.json` (Seedance Reference-to-Video via `audio_video`): starter placeholder bindings using `audio_video` (an auto-generated black-screen MP4 containing the vocal slice, which improves lip-sync on video-reference nodes) and `comfy.reference_notation: tags` (`@image1`, `@video1`) with `video.motion_include_lyrics: true`.
+- `r2v_audiolock_lipsync.bindings.json` (Multi-Reference R2V + Audio-Lock lip-sync): starter placeholder bindings wiring `image`, isolated vocal `audio`, and optional `reference_image` / `reference_image_2` / `set_image` slots for R2V models (Wan VACE/Phantom, LTX-2.x AV Audio-Lock, or commercially licensed MiniMax H3).
+- `latent_refine_upscale.bindings.json` (Two-Stage Latent Upscale + 1-Step Tiled Refine): starter placeholder bindings for `mvd upscale` using a 3D latent upscaler + tiled low-denoise refine pass to promote approved draft clips to 1080p on 16–24 GB GPUs with natural skin texture.
 
 Rules:
 

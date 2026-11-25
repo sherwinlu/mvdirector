@@ -204,10 +204,20 @@ class WorkflowTemplate:
                 continue
             for target in targets:
                 graph[target.node]["inputs"][target.field] = value
+        bound_nodes = {
+            target.node for param in values for target in self.bindings.inputs.get(param, ())
+        }
         for param in self.bindings.inputs.keys() - values.keys():
-            if is_optional_file_param(param) and param not in self.bindings.required:
+            # On video R2V workflows ("image" supplies the starting still), an unbound
+            # "reference_image" is an optional character loader (e.g. b-roll shots) and
+            # should be pruned just like reference_image_2 / set_image.
+            optional_loader = is_optional_file_param(param) or (
+                param == "reference_image" and "image" in values
+            )
+            if optional_loader and param not in self.bindings.required:
                 for target in self.bindings.inputs[param]:
-                    _drop_loader(graph, target.node)
+                    if target.node not in bound_nodes:
+                        _drop_loader(graph, target.node)
         return prune_switch_branches(graph, output_node=self.bindings.output.node)
 
 

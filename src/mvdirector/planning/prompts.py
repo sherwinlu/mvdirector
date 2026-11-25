@@ -295,7 +295,10 @@ as id='sakura' with name='さくら').
     unevenness, real facial asymmetry), eyes, brows, nose, lips, hair (cut, length, parting,
     individual strands and flyaways), makeup, build, and any identifying marks. Give the side of
     any mark as the person's anatomical left or right. Forbid idealized, airbrushed, or glass-skin
-    rendering so the person reads as a real unretouched photograph. Do not describe clothing here.
+    rendering so the person reads as a real unretouched photograph. Unless the style brief
+    explicitly calls for surreal, fantasy, or stylized fashion figures, ground characters as
+    ordinary, relatable real-world people (everyday faces and believable proportions rather than
+    hyper-idealized supermodels). Do not describe clothing here.
     It must be precise enough that an image model draws the same person every time. Do not
     describe a real, identifiable person.
   - wardrobe: that person's costume states in the order they appear in the song. Each has a short
@@ -323,7 +326,10 @@ as id='sakura' with name='さくら').
   (sections), a description of how it looks (for an image model, describing the room/environment
   layout and one mid-depth landmark without camera-framing directives like 'focus on a close-up'),
   how the performers move and the camera works there (movement), and an optional parent_set naming
-  an earlier set when this location is a stripped, altered, or nested variant of it.
+  an earlier set when this location is a stripped, altered, or nested variant of it. Unless the
+  style brief explicitly calls for fantasy, sci-fi, or surreal worlds, ground sets in physically
+  shootable real-world locations (everyday streets, apartments, transit, cafés, rooftops) that an
+  indie crew could film on location.
 - props: 0 to 3 recurring hero objects grounded specifically in this song's lyrics or concept (use
   an empty list if none are needed; never invent generic sci-fi discs or unrelated props). Each
   has id (short lowercase identifier), name, sections, and a purely visual description with
@@ -1335,6 +1341,32 @@ def compose_still_prompt(
     return " ".join(part.strip() for part in parts if part.strip())
 
 
+def _video_reference_note(
+    reference_notation: str,
+    bound_references: list[str] | None,
+) -> str | None:
+    """Reference-image role cue for R2V video models (``@image1`` is the starting still frame)."""
+    if not bound_references:
+        return None
+    active: list[tuple[str, str]] = []
+    for name in bound_references:
+        role = _still_ref_role(name)
+        if role is not None:
+            active.append((name, role))
+    if not active:
+        return None
+    if reference_notation == "tags":
+        clauses = [
+            f"@image{index} shows {role}." for index, (_, role) in enumerate(active, start=2)
+        ]
+        return " ".join(clauses)
+    clauses = []
+    for index, (_, role) in enumerate(active):
+        ordinal = _ORDINALS[index] if index < len(_ORDINALS) else f"#{index + 1}"
+        clauses.append(f"The {ordinal} attached reference image shows {role}.")
+    return " ".join(clauses)
+
+
 def compose_motion_prompt(
     manifest: Manifest,
     shot: Shot,
@@ -1343,6 +1375,7 @@ def compose_motion_prompt(
     reference_notation: str = "prose",
     has_audio_video: bool = False,
     previz_attached: bool = False,
+    bound_references: list[str] | None = None,
 ) -> str:
     """Assemble the full motion prompt for video generation."""
     single_take = video_config.motion_single_take if video_config is not None else True
@@ -1361,6 +1394,9 @@ def compose_motion_prompt(
     parts.append(strip_still_words(shot.video.prompt_override or shot.motion_prompt))
     if reference_notation == "tags":
         parts.append("Animate starting from @image1.")
+    video_ref_note = _video_reference_note(reference_notation, bound_references)
+    if video_ref_note is not None:
+        parts.append(video_ref_note)
     if shot.allow_cuts:
         parts.append(
             "Hard cuts between distinct camera angles within the clip while keeping the "

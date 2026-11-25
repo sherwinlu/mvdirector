@@ -45,7 +45,14 @@ def check_assets(
     singer = [s for s in shots if s.type.shows_singer]
 
     still = templates.get("still")
-    needs_ref = still is None or still.accepts("reference_image")
+    lipsync = templates.get("lipsync")
+    i2v = templates.get("i2v")
+    video_templates = [t for t in (lipsync, i2v) if t is not None]
+    needs_ref = (
+        still is None
+        or still.accepts("reference_image")
+        or any("reference_image" in t.bindings.required for t in video_templates)
+    )
     if len(manifest.characters) > 1:
         used_by_char: dict[str, set[str]] = {}
         for s in singer:
@@ -94,6 +101,7 @@ def check_assets(
                 for path in [reference.sheet, *reference.panels.values()]:
                     if path and not project.path(path).is_file():
                         result.problems.append(f"Reference file for '{key}' is missing: {path}")
+    plate_templates = [t for t in (still, lipsync, i2v) if t is not None and t.accepts("set_image")]
     if still is not None and still.accepts("set_image"):
         for name in sorted({s.setting for s in singer if s.setting}):
             scene = bible.find_set(name)
@@ -105,6 +113,13 @@ def check_assets(
                     f'"{scene.name}"`, then `mvd plates lock <image> --set "{scene.name}"`.'
                 )
             elif not project.path(scene.plate).is_file():
+                result.problems.append(
+                    f"Plate file for set '{scene.name}' is missing: {scene.plate}"
+                )
+    elif plate_templates:
+        for name in sorted({s.setting for s in shots if s.setting}):
+            scene = bible.find_set(name)
+            if scene is not None and scene.plate and not project.path(scene.plate).is_file():
                 result.problems.append(
                     f"Plate file for set '{scene.name}' is missing: {scene.plate}"
                 )

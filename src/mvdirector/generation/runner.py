@@ -440,10 +440,12 @@ class ShotRunner:
             )
         return self._identities[images]
 
-    def _plate_for(self, shot: Shot) -> Path | None:
-        """The shot's set plate, when the still workflow can take one and one is locked."""
-        template = self._templates.get("still")
-        if template is None or not template.accepts("set_image") or not shot.type.shows_singer:
+    def _plate_for(self, shot: Shot, template: WorkflowTemplate | None = None) -> Path | None:
+        """The shot's set plate when the target workflow accepts ``set_image`` and one exists."""
+        active_template = template if template is not None else self._templates.get("still")
+        if active_template is None or not active_template.accepts("set_image"):
+            return None
+        if template is None and not shot.type.shows_singer:
             return None
         scene = self._manifest.visual_bible.find_set(shot.setting)
         if scene is None or not scene.plate:
@@ -780,6 +782,7 @@ class ShotRunner:
         notation = self._project.config.comfy.reference_notation
         max_chars = self._project.config.comfy.max_prompt_chars
         still_refs: list[tuple[str, str, Path]] = []
+        video_refs: list[tuple[str, str, Path]] = []
         prop_refs = self._prop_paths(shot)
         repair_source: Path | None = None
         if kind is AssetKind.STILL:
@@ -824,6 +827,8 @@ class ShotRunner:
                 )
         else:
             video_template = self._video_template(shot)
+            video_refs = self._video_reference_paths(shot, video_template)
+            video_ref_roles = [role for _, role, _ in video_refs] if video_refs else None
             previz = self._previz_for(shot, video_template)
             prompt = prompts.compose_motion_prompt(
                 self._manifest,
@@ -832,6 +837,7 @@ class ShotRunner:
                 reference_notation=notation,
                 has_audio_video=self._video_uses_audio_video(shot, video_template),
                 previz_attached=previz is not None,
+                bound_references=video_ref_roles,
             )
         if max_chars is not None:
             prompt = prompts.fit_prompt_budget(prompt, max_chars)
@@ -856,7 +862,14 @@ class ShotRunner:
                     client=client,
                 )
             else:
-                self._generate_video(shot, attempt, destination, prop_refs, client=client)
+                self._generate_video(
+                    shot,
+                    attempt,
+                    destination,
+                    prop_refs,
+                    video_refs=video_refs,
+                    client=client,
+                )
             attempt.path = self._project.rel(destination)
             with self._qc_lock:
                 attempt.qc = self._check(shot, kind, destination)
@@ -891,115 +904,176 @@ class ShotRunner:
         tail = max(0.0, shot.audio_slice.end - shot.end)
         return round(max(-head, min(tail, float(raw_delay))), 4)
 
-    def _still_reference_paths(self, shot: Shot, plate: Path | None) -> list[tuple[str, str, Path]]:
-        """Ordered ``(binding_param, prompt_role, path)`` triples uploaded to ``still``.
+    @staticmethod
+    def _has_distinct_ref_target(
+        template: WorkflowTemplate, param: str, *, exclude_param: str | None = None
+    ) -> bool:
+        if not template.accepts(param):
+            return False
+        if exclude_param is None:
+            return True
+        excluded = {(t.node, t.field) for t in template.bindings.inputs.get(exclude_param, ())}
+        targets = {(t.node, t.field) for t in template.bindings.inputs.get(param, ())}
+        return bool(targets) and targets.isdisjoint(excluded)
 
-        On solo shots where the workflow exposes ``reference_image_2`` (but not a dedicated
-        ``reference_face`` slot), the singer's face-detail panel is routed into
-        ``reference_image_2`` with prompt role ``reference_face`` so the edit model gets both
-        full-body wardrobe continuity and high-resolution facial identity in one pass.
+    def _collect_reference_paths(
+        self,
+        shot: Shot,
+        template: WorkflowTemplate,
+        plate: Path | None,
+        *,
+        require_primary_reference: bool,
+        exclude_param: str | None = None,
+    ) -> list[tuple[str, str, Path]]:
+        """Ordered ``(binding_param, prompt_role, path)`` triples uploaded to ``template``.
+
+        Shared by ``still`` and R2V video workflows (``lipsync`` / ``i2v``). On solo shots where
+        the workflow exposes ``reference_image_2`` (but not a dedicated ``reference_face`` slot),
+        the singer's face-detail panel is routed into ``reference_image_2`` with prompt role
+        ``reference_face`` so multi-reference models get both full-body wardrobe continuity and
+        high-resolution facial identity in one pass.
         """
-        if not shot.type.shows_singer:
-            return []
-        template = self._templates["still"]
         refs: list[tuple[str, str, Path]] = []
-        reference = self._reference_set(shot)
-        front = reference.panel("front") if reference else None
-        raw_still = shot.still.prompt_override or shot.still_prompt
-        is_rear_view = shot.type is not ShotType.LIPSYNC and prompts.is_rear_view_prompt(raw_still)
-        front_path: Path | None = None
+        if shot.type.shows_singer:
+            reference = self._reference_set(shot)
+            front = reference.panel("front") if reference else None
+            raw_still = shot.still.prompt_override or shot.still_prompt
+            is_rear_view = shot.type is not ShotType.LIPSYNC and prompts.is_rear_view_prompt(
+                raw_still
+            )
+            front_path: Path | None = None
 
-        def _first_existing_panel(
-            ref_set: ReferenceSet | None, names: tuple[str, ...]
-        ) -> str | None:
-            if ref_set is None:
+            def _first_existing_panel(
+                ref_set: ReferenceSet | None, names: tuple[str, ...]
+            ) -> str | None:
+                if ref_set is None:
+                    return None
+                for panel_name in names:
+                    rel = ref_set.panel(panel_name)
+                    if rel is not None and self._project.path(rel).is_file():
+                        return rel
                 return None
-            for panel_name in names:
-                rel = ref_set.panel(panel_name)
-                if rel is not None and self._project.path(rel).is_file():
-                    return rel
-            return None
 
-        if template.accepts("reference_image"):
-            if reference is None or front is None:
-                raise ConfigError(
-                    "No reference sheet is locked. Run `mvd reference generate` and "
-                    "`mvd reference lock <image>` before generating stills."
-                )
-            # Single-reference workflows lose facial detail and pull framing too wide on close-ups
-            # when given the full-body front panel; prefer the macro face panel when available.
-            # On rear-view shots, prefer the back panel (columns layout) or side profile so the
-            # edit model is not anchored to a frontal stare.
-            face_rel = reference.panel("face")
-            use_face = (
-                not is_rear_view
-                and self._project.config.reference.closeup_face_panel
-                and shot.framing is Framing.CLOSE_UP
-                and not template.accepts("reference_face")
-                and face_rel is not None
-                and self._project.path(face_rel).is_file()
-            )
-            if is_rear_view:
-                primary_panel = (
-                    _first_existing_panel(reference, ("back", "profile", "front")) or front
-                )
-            elif use_face and face_rel is not None:
-                primary_panel = face_rel
-            else:
-                primary_panel = front
-            front_path = self._project.path(primary_panel)
-            refs.append(("reference_image", "reference_image", front_path))
-        # Extra angles go only to workflows that bind them, so nothing is uploaded for nothing.
-        has_face_ref = False
-        if reference is not None:
-            extra_panels = (
-                ("profile", "three_quarter")
-                if is_rear_view
-                else ("profile", "three_quarter", "face")
-            )
-            for name in extra_panels:
-                path = reference.panel(name)
-                param = f"reference_{name}"
-                if path and template.accepts(param):
-                    panel_path = self._project.path(path)
-                    if panel_path.is_file():
-                        refs.append((param, param, panel_path))
-                        if name == "face":
-                            has_face_ref = True
-        visible = self._manifest.visible_characters(shot)
-        if len(visible) > 1:
-            for idx, (_, sec_char, sec_state) in enumerate(visible[1:], start=2):
-                param = f"reference_image_{idx}"
-                if not template.accepts(param):
-                    continue
-                sec_ref = sec_char.reference_for(sec_state)
-                sec_panel = (
-                    _first_existing_panel(sec_ref, ("back", "profile", "front"))
+            if self._has_distinct_ref_target(
+                template, "reference_image", exclude_param=exclude_param
+            ):
+                if reference is None or front is None:
+                    if require_primary_reference:
+                        raise ConfigError(
+                            "No reference sheet is locked. Run `mvd reference generate` and "
+                            "`mvd reference lock <image>` before generating stills."
+                        )
+                else:
+                    # Single-reference workflows lose facial detail and pull framing too wide on
+                    # close-ups when given the full-body front panel; prefer the macro face panel
+                    # when available. On rear-view shots, prefer the back panel (columns layout)
+                    # or side profile so the model is not anchored to a frontal stare.
+                    face_rel = reference.panel("face")
+                    use_face = (
+                        not is_rear_view
+                        and self._project.config.reference.closeup_face_panel
+                        and shot.framing is Framing.CLOSE_UP
+                        and not self._has_distinct_ref_target(
+                            template, "reference_face", exclude_param=exclude_param
+                        )
+                        and face_rel is not None
+                        and self._project.path(face_rel).is_file()
+                    )
+                    if is_rear_view:
+                        primary_panel = (
+                            _first_existing_panel(reference, ("back", "profile", "front")) or front
+                        )
+                    elif use_face and face_rel is not None:
+                        primary_panel = face_rel
+                    else:
+                        primary_panel = front
+                    candidate_front = self._project.path(primary_panel)
+                    if require_primary_reference or candidate_front.is_file():
+                        front_path = candidate_front
+                        refs.append(("reference_image", "reference_image", front_path))
+            # Extra angles go only to workflows that bind them, so nothing is uploaded for nothing.
+            has_face_ref = False
+            if reference is not None:
+                extra_panels = (
+                    ("profile", "three_quarter")
                     if is_rear_view
-                    else (sec_ref.panel("front") if sec_ref else None)
+                    else ("profile", "three_quarter", "face")
                 )
-                if sec_panel is not None:
-                    sec_path = self._project.path(sec_panel)
-                    if sec_path.is_file():
-                        refs.append((param, param, sec_path))
-        elif (
-            len(visible) == 1
-            and not has_face_ref
-            and reference is not None
-            and template.accepts("reference_image_2")
-            and not is_rear_view
+                for name in extra_panels:
+                    path = reference.panel(name)
+                    param = f"reference_{name}"
+                    if path and self._has_distinct_ref_target(
+                        template, param, exclude_param=exclude_param
+                    ):
+                        panel_path = self._project.path(path)
+                        if panel_path.is_file():
+                            refs.append((param, param, panel_path))
+                            if name == "face":
+                                has_face_ref = True
+            visible = self._manifest.visible_characters(shot)
+            if len(visible) > 1:
+                for idx, (_, sec_char, sec_state) in enumerate(visible[1:], start=2):
+                    param = f"reference_image_{idx}"
+                    if not self._has_distinct_ref_target(
+                        template, param, exclude_param=exclude_param
+                    ):
+                        continue
+                    sec_ref = sec_char.reference_for(sec_state)
+                    sec_panel = (
+                        _first_existing_panel(sec_ref, ("back", "profile", "front"))
+                        if is_rear_view
+                        else (sec_ref.panel("front") if sec_ref else None)
+                    )
+                    if sec_panel is not None:
+                        sec_path = self._project.path(sec_panel)
+                        if sec_path.is_file():
+                            refs.append((param, param, sec_path))
+            elif (
+                len(visible) == 1
+                and not has_face_ref
+                and reference is not None
+                and self._has_distinct_ref_target(
+                    template, "reference_image_2", exclude_param=exclude_param
+                )
+                and not is_rear_view
+            ):
+                face = reference.panel("face")
+                if face:
+                    face_path = self._project.path(face)
+                    same_as_front = (
+                        front_path is not None and face_path.resolve() == front_path.resolve()
+                    )
+                    if not same_as_front and face_path.is_file():
+                        refs.append(("reference_image_2", "reference_face", face_path))
+        if plate is not None and self._has_distinct_ref_target(
+            template, "set_image", exclude_param=exclude_param
         ):
-            face = reference.panel("face")
-            if face:
-                face_path = self._project.path(face)
-                same_as_front = (
-                    front_path is not None and face_path.resolve() == front_path.resolve()
-                )
-                if not same_as_front and face_path.is_file():
-                    refs.append(("reference_image_2", "reference_face", face_path))
-        if plate is not None:
             refs.append(("set_image", "set_image", plate))
         return refs
+
+    def _still_reference_paths(self, shot: Shot, plate: Path | None) -> list[tuple[str, str, Path]]:
+        """Ordered ``(binding_param, prompt_role, path)`` triples uploaded to ``still``."""
+        if not shot.type.shows_singer:
+            return []
+        return self._collect_reference_paths(
+            shot,
+            self._templates["still"],
+            plate,
+            require_primary_reference=True,
+        )
+
+    def _video_reference_paths(
+        self, shot: Shot, template: WorkflowTemplate
+    ) -> list[tuple[str, str, Path]]:
+        """Optional R2V character/scene reference triples uploaded to ``lipsync`` / ``i2v``."""
+        plate = self._plate_for(shot, template=template)
+        return self._collect_reference_paths(
+            shot,
+            template,
+            plate,
+            require_primary_reference=False,
+            exclude_param="image",
+        )
 
     def _still_negative_prompt(self, shot: Shot) -> str:
         parts = [self._manifest.visual_bible.negative_prompt]
@@ -1076,6 +1150,7 @@ class ShotRunner:
         destination: Path,
         prop_refs: list[tuple[str, Path]],
         *,
+        video_refs: list[tuple[str, str, Path]] | None = None,
         client: ComfyClient | None = None,
     ) -> None:
         video = self._project.config.video
@@ -1098,6 +1173,8 @@ class ShotRunner:
             "fps": video.fps,
             **attempt.params,
         }
+        for param, _, ref_path in video_refs or ():
+            params[param] = self._upload(ref_path, client=client)
         if shot.type is ShotType.LIPSYNC or "audio" in template.bindings.required:
             params["audio"] = self._upload(self._ensure_audio_slice(shot), client=client)
         if self._video_uses_audio_video(shot, template):

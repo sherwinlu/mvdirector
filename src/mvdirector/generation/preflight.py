@@ -107,30 +107,62 @@ def check_assets(
             scene = bible.find_set(name)
             if scene is None:
                 continue
-            if not scene.plate:
+            if not scene.plate and not scene.panels:
                 result.problems.append(
                     f"No plate for set '{scene.name}'. Run `mvd plates generate --set "
                     f'"{scene.name}"`, then `mvd plates lock <image> --set "{scene.name}"`.'
                 )
-            elif not project.path(scene.plate).is_file():
-                result.problems.append(
-                    f"Plate file for set '{scene.name}' is missing: {scene.plate}"
-                )
+            else:
+                for path in [scene.plate, scene.sheet, *scene.panels.values()]:
+                    if path and not project.path(path).is_file():
+                        result.problems.append(
+                            f"Plate file for set '{scene.name}' is missing: {path}"
+                        )
     elif plate_templates:
         for name in sorted({s.setting for s in shots if s.setting}):
             scene = bible.find_set(name)
-            if scene is not None and scene.plate and not project.path(scene.plate).is_file():
-                result.problems.append(
-                    f"Plate file for set '{scene.name}' is missing: {scene.plate}"
-                )
+            if scene is None:
+                continue
+            for path in [scene.plate, scene.sheet, *scene.panels.values()]:
+                if path and not project.path(path).is_file():
+                    result.problems.append(
+                        f"Plate file for set '{scene.name}' is missing: {path}"
+                    )
     else:
-        plated = [s.name for s in bible.settings if s.plate]
+        plated = [s.name for s in bible.settings if s.plate or s.panels]
         if plated:
             result.warnings.append(
                 f"Plates are locked for {', '.join(plated)}, but the 'still' workflow has no "
                 "'set_image' binding, so they will not be used."
             )
+    for s in shots:
+        if s.plate_angle and s.setting:
+            scene = bible.find_set(s.setting)
+            if scene is not None and scene.panels:
+                panel_rel = scene.panels.get(s.plate_angle)
+                if not panel_rel or not project.path(panel_rel).is_file():
+                    result.problems.append(
+                        f"Turnaround plate angle '{s.plate_angle}' for shot '{s.id}' in set "
+                        f"'{scene.name}' is missing."
+                    )
     t2i = templates.get("t2i")
+    for s in shots:
+        if not s.sketch_image:
+            continue
+        if not project.path(s.sketch_image).is_file():
+            result.problems.append(f"Sketch image for '{s.id}' is missing: {s.sketch_image}")
+            continue
+        tpl = still if s.type.shows_singer else t2i
+        if tpl is not None and not (
+            tpl.accepts("sketch_image")
+            or (not s.type.shows_singer and tpl.accepts("reference_image"))
+            or any(tpl.accepts(f"reference_image_{n}") for n in range(2, 11))
+            or s.sketch_guidance.strip()
+        ):
+            result.warnings.append(
+                f"Shot '{s.id}' has sketch_image ({s.sketch_image}), but workflow '{tpl.name}' "
+                "has no sketch_image or extra reference_image slot and no sketch_guidance text."
+            )
     prop_queries = [
         q
         for s in shots

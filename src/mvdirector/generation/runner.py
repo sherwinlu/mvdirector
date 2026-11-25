@@ -30,6 +30,7 @@ from mvdirector.comfy.provider import ComfyEndpointProvider, StaticComfyProvider
 from mvdirector.comfy.workflow import OutputSpec, WorkflowTemplate
 from mvdirector.config import validate_max_concurrency
 from mvdirector.errors import BudgetExceeded, ComfyJobError, ConfigError, MediaToolError
+from mvdirector.generation import plates
 from mvdirector.generation.candidates import ensure_upload_audio_track
 from mvdirector.models import (
     AssetKind,
@@ -448,10 +449,60 @@ class ShotRunner:
         if template is None and not shot.type.shows_singer:
             return None
         scene = self._manifest.visual_bible.find_set(shot.setting)
-        if scene is None or not scene.plate:
+        if scene is None:
             return None
-        path = self._project.path(scene.plate)
+        angle = plates.select_plate_angle(shot, scene)
+        candidates: list[str] = []
+        if angle and angle in scene.panels:
+            candidates.append(scene.panels[angle])
+        if scene.plate:
+            candidates.append(scene.plate)
+        if "wide" in scene.panels:
+            candidates.append(scene.panels["wide"])
+        candidates.extend(scene.panels.values())
+        for rel in dict.fromkeys(candidates):
+            path = self._project.path(rel)
+            if path.is_file():
+                return path
+        return None
+
+    def _sketch_for(self, shot: Shot) -> Path | None:
+        if not shot.sketch_image:
+            return None
+        path = self._project.path(shot.sketch_image)
         return path if path.is_file() else None
+
+    def _sketch_binding(
+        self,
+        shot: Shot,
+        template: WorkflowTemplate,
+        existing_refs: list[tuple[str, str, Path]],
+    ) -> tuple[str, str, Path] | None:
+        sketch = self._sketch_for(shot)
+        if sketch is None:
+            return None
+        used_params = {param for param, _, _ in existing_refs}
+        used_targets = {
+            (t.node, t.field)
+            for param in used_params
+            for t in template.bindings.inputs.get(param, ())
+        }
+
+        def _is_free(param: str) -> bool:
+            if param in used_params or not template.accepts(param):
+                return False
+            targets = {(t.node, t.field) for t in template.bindings.inputs.get(param, ())}
+            return bool(targets) and targets.isdisjoint(used_targets)
+
+        if _is_free("sketch_image"):
+            return ("sketch_image", "sketch_image", sketch)
+        if not shot.type.shows_singer and _is_free("reference_image"):
+            return ("reference_image", "sketch_image", sketch)
+        for idx in range(2, 11):
+            slot = f"reference_image_{idx}"
+            if _is_free(slot):
+                return (slot, "sketch_image", sketch)
+        return None
 
     def _prop_paths(self, shot: Shot) -> list[tuple[str, Path]]:
         """Locked prop reference images for ``shot.props`` that exist on disk."""
@@ -859,8 +910,11 @@ class ShotRunner:
                     )
             else:
                 still_refs = self._still_reference_paths(shot, plate)
-                bound_ref_roles = [role for _, role, _ in still_refs] if still_refs else None
                 still_tpl = self._templates["still" if shot.type.shows_singer else "t2i"]
+                sketch_binding = self._sketch_binding(shot, still_tpl, still_refs)
+                if sketch_binding is not None:
+                    still_refs = [*still_refs, sketch_binding]
+                bound_ref_roles = [role for _, role, _ in still_refs] if still_refs else None
                 prompt = prompts.compose_still_prompt(
                     self._manifest,
                     shot,
@@ -868,6 +922,8 @@ class ShotRunner:
                     props_attached=bool(prop_refs and still_tpl.accepts("prop_image")),
                     reference_notation=notation,
                     bound_references=bound_ref_roles,
+                    sketch_attached=sketch_binding is not None,
+                    sketch_guidance=shot.sketch_guidance.strip() or None,
                 )
         else:
             video_template = self._video_template(shot)
@@ -1111,13 +1167,40 @@ class ShotRunner:
     ) -> list[tuple[str, str, Path]]:
         """Optional R2V character/scene reference triples uploaded to ``lipsync`` / ``i2v``."""
         plate = self._plate_for(shot, template=template)
-        return self._collect_reference_paths(
+        refs = self._collect_reference_paths(
             shot,
             template,
             plate,
             require_primary_reference=False,
             exclude_param="image",
         )
+        if shot.draft_grid_sheet:
+            sheet_path = self._project.path(shot.draft_grid_sheet)
+            if sheet_path.is_file():
+                used_params = {param for param, _, _ in refs} | {"image"}
+                used_targets = {
+                    (t.node, t.field)
+                    for param in used_params
+                    for t in template.bindings.inputs.get(param, ())
+                }
+
+                def _is_free(param: str) -> bool:
+                    if param in used_params or not template.accepts(param):
+                        return False
+                    targets = {
+                        (t.node, t.field) for t in template.bindings.inputs.get(param, ())
+                    }
+                    return bool(targets) and targets.isdisjoint(used_targets)
+
+                if _is_free("draft_grid_image"):
+                    refs.append(("draft_grid_image", "draft_grid_image", sheet_path))
+                elif shot.allow_cuts:
+                    for idx in range(2, 11):
+                        slot = f"reference_image_{idx}"
+                        if _is_free(slot):
+                            refs.append((slot, "draft_grid_image", sheet_path))
+                            break
+        return refs
 
     def _still_repair_template(self, shot: Shot) -> WorkflowTemplate | None:
         """Workflow template capable of in-place still editing (``reference_image``)."""
@@ -1176,6 +1259,8 @@ class ShotRunner:
                 params[param] = self._upload(ref_path, client=client)
         else:
             template = self._templates["t2i"]
+            for param, _, ref_path in still_refs:
+                params[param] = self._upload(ref_path, client=client)
         if (
             repair_source is None
             and shot.continuity is ContinuityMode.REFRAME

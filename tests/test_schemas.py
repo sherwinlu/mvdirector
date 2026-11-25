@@ -317,3 +317,64 @@ def test_exclusions_and_do_not_show_alias_preserve_strict_forbid(tmp_path: Path)
         InputsConfig(unknown_extra_field="nope")  # type: ignore[call-arg]
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         VisualBible(unknown_extra_field="nope")  # type: ignore[call-arg]
+
+
+def test_wave3_fields_preserve_backwards_compatibility_and_strict_forbid() -> None:
+    from pydantic import ValidationError
+
+    from mvdirector.models import AudioSlice, DraftGridSheet, SetDesign, Shot, ShotType
+
+    legacy_manifest = json.loads((ROOT / "examples" / "manifest.example.json").read_text())
+    # Ensure legacy manifest without Wave 3 fields validates with clean defaults.
+    parsed = Manifest.model_validate(legacy_manifest)
+    assert parsed.draft_grids == []
+    if parsed.visual_bible.settings:
+        s0 = parsed.visual_bible.settings[0]
+        assert s0.sheet is None
+        assert s0.panels == {}
+    if parsed.shots:
+        sh0 = parsed.shots[0]
+        assert sh0.plate_angle is None
+        assert sh0.sketch_image is None
+        assert sh0.sketch_guidance == ""
+        assert sh0.draft_grid_sheet is None
+
+    scene = SetDesign(name="Stage", plate="assets/plates/stage.png")
+    assert scene.panel() == "assets/plates/stage.png"
+
+    shot = Shot(
+        id="s001",
+        index=0,
+        start=0.0,
+        end=2.0,
+        type=ShotType.LIPSYNC,
+        audio_slice=AudioSlice(
+            path="assets/audio_slices/s001.wav", start=0.0, end=2.0, head_handle=0.0
+        ),
+        num_frames=49,
+        plate_angle="reverse",
+        sketch_image="assets/sketches/s001.png",
+        sketch_guidance="Centered close-up.",
+        draft_grid_sheet="assets/draft_grids/sec_01_chorus.png",
+    )
+    assert shot.plate_angle == "reverse"
+
+    with pytest.raises(ValidationError):
+        Shot(
+            id="s001",
+            index=0,
+            start=0.0,
+            end=2.0,
+            type=ShotType.LIPSYNC,
+            audio_slice=AudioSlice(
+                path="assets/audio_slices/s001.wav", start=0.0, end=2.0, head_handle=0.0
+            ),
+            num_frames=49,
+            plate_angle="diagonal",  # type: ignore[arg-type]
+        )
+
+    with pytest.raises(ValidationError):
+        DraftGridSheet(
+            id="../../escape",
+            sheet_path="assets/draft_grids/bad.png",
+        )

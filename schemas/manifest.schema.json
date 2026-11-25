@@ -409,6 +409,77 @@
       "title": "ContinuityMode",
       "type": "string"
     },
+    "DraftGridSheet": {
+      "additionalProperties": false,
+      "description": "Metadata for a generated per-section storyboard contact sheet.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "section": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section"
+        },
+        "layout": {
+          "default": "2x2",
+          "enum": [
+            "2x2",
+            "3x2"
+          ],
+          "title": "Layout",
+          "type": "string"
+        },
+        "sheet_path": {
+          "title": "Sheet Path",
+          "type": "string"
+        },
+        "shot_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Shot Ids",
+          "type": "array"
+        },
+        "panel_paths": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Panel Paths",
+          "type": "object"
+        },
+        "video_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Video Path"
+        },
+        "created_at": {
+          "title": "Created At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "sheet_path"
+      ],
+      "title": "DraftGridSheet",
+      "type": "object"
+    },
     "Framing": {
       "enum": [
         "close_up",
@@ -824,6 +895,27 @@
           "default": null,
           "description": "Locked image of the empty location, used as a second reference.",
           "title": "Plate"
+        },
+        "sheet": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional locked 2x2 multi-angle turnaround sheet of the empty location.",
+          "title": "Sheet"
+        },
+        "panels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Cropped set plate panels keyed by angle (wide, reverse, side, detail).",
+          "title": "Panels",
+          "type": "object"
         }
       },
       "required": [
@@ -1017,6 +1109,57 @@
           "description": "Stand-in mapping from blocking shapes in previz_video to real subjects/props.",
           "title": "Previz Mapping",
           "type": "string"
+        },
+        "sketch_image": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional project-relative rough sketch or framing guide image (lightweight alternative to 3D blocking previz) locking still framing and blocking.",
+          "title": "Sketch Image"
+        },
+        "sketch_guidance": {
+          "default": "",
+          "description": "Optional spatial framing/blocking summary extracted from sketch_image for prompt conditioning when the workflow has no sketch_image binding.",
+          "title": "Sketch Guidance",
+          "type": "string"
+        },
+        "plate_angle": {
+          "anyOf": [
+            {
+              "enum": [
+                "wide",
+                "reverse",
+                "side",
+                "detail"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional set plate turnaround angle ('wide', 'reverse', 'side', 'detail') overriding automatic framing/prompt selection.",
+          "title": "Plate Angle"
+        },
+        "draft_grid_sheet": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional project-relative section storyboard contact sheet containing this shot.",
+          "title": "Draft Grid Sheet"
         },
         "continuity": {
           "$ref": "#/$defs/ContinuityMode",
@@ -1383,6 +1526,14 @@
         "$ref": "#/$defs/Shot"
       },
       "title": "Shots",
+      "type": "array"
+    },
+    "draft_grids": {
+      "description": "Optional per-section storyboard contact sheets generated in draft_grid mode.",
+      "items": {
+        "$ref": "#/$defs/DraftGridSheet"
+      },
+      "title": "Draft Grids",
       "type": "array"
     },
     "escalated_types": {

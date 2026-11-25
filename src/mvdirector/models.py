@@ -867,6 +867,33 @@ class Shot(StrictModel):
         default="",
         description="Stand-in mapping from blocking shapes in previz_video to real subjects/props.",
     )
+    sketch_image: str | None = Field(
+        default=None,
+        description=(
+            "Optional project-relative rough sketch or framing guide image "
+            "(lightweight alternative to 3D blocking previz) locking still framing and blocking."
+        ),
+    )
+    sketch_guidance: str = Field(
+        default="",
+        description=(
+            "Optional spatial framing/blocking summary extracted from sketch_image for prompt "
+            "conditioning when the workflow has no sketch_image binding."
+        ),
+    )
+    plate_angle: PlateAngle | None = Field(
+        default=None,
+        description=(
+            "Optional set plate turnaround angle ('wide', 'reverse', 'side', 'detail') "
+            "overriding automatic framing/prompt selection."
+        ),
+    )
+    draft_grid_sheet: str | None = Field(
+        default=None,
+        description=(
+            "Optional project-relative section storyboard contact sheet containing this shot."
+        ),
+    )
     continuity: ContinuityMode = Field(
         default=ContinuityMode.CUT,
         description="Shot continuity link to the preceding shot ('cut', 'reframe', or 'continue').",
@@ -983,6 +1010,8 @@ class WardrobeState(StrictModel):
 
 PANEL_NAMES = ("front", "profile", "three_quarter", "face")
 COLUMNS_PANEL_NAMES = ("face", "profile", "front", "back")
+PLATE_ANGLE_NAMES = ("wide", "reverse", "side", "detail")
+PlateAngle = Literal["wide", "reverse", "side", "detail"]
 BASE_STATE = "base"  # reference key used when a character has no wardrobe states
 
 
@@ -1114,6 +1143,24 @@ class SetDesign(StrictModel):
     plate: str | None = Field(
         default=None, description="Locked image of the empty location, used as a second reference."
     )
+    sheet: str | None = Field(
+        default=None,
+        description="Optional locked 2x2 multi-angle turnaround sheet of the empty location.",
+    )
+    panels: dict[str, str] = Field(
+        default_factory=dict,
+        description="Cropped set plate panels keyed by angle (wide, reverse, side, detail).",
+    )
+
+    def panel(self, angle: str | None = None) -> str | None:
+        """Return the requested angle panel, falling back to primary plate or 'wide'."""
+        if angle and angle in self.panels:
+            return self.panels[angle]
+        if self.plate:
+            return self.plate
+        if "wide" in self.panels:
+            return self.panels["wide"]
+        return next(iter(self.panels.values()), None)
 
 
 class PropDesign(StrictModel):
@@ -1331,6 +1378,29 @@ class MixChapter(StrictModel):
         return max(0.0, self.end - self.start)
 
 
+class DraftGridSheet(StrictModel):
+    """Metadata for a generated per-section storyboard contact sheet."""
+
+    id: str
+    section: str | None = None
+    layout: Literal["2x2", "3x2"] = "2x2"
+    sheet_path: str
+    shot_ids: list[str] = Field(default_factory=list)
+    panel_paths: dict[str, str] = Field(default_factory=dict)
+    video_path: str | None = None
+    created_at: str = Field(default_factory=utc_now)
+
+    @field_validator("id")
+    @classmethod
+    def _check_id(cls, value: str) -> str:
+        return validate_safe_id(value, "draft grid id")
+
+    @field_validator("shot_ids")
+    @classmethod
+    def _check_shot_ids(cls, value: list[str]) -> list[str]:
+        return [validate_safe_id(item, "shot id") for item in value]
+
+
 class Manifest(StrictModel):
     schema_version: int = MANIFEST_SCHEMA_VERSION
     mode: ProjectMode = ProjectMode.STANDARD
@@ -1352,6 +1422,10 @@ class Manifest(StrictModel):
         description="Track segments and visual themes when mode is 'mix'.",
     )
     shots: list[Shot] = Field(default_factory=list)
+    draft_grids: list[DraftGridSheet] = Field(
+        default_factory=list,
+        description="Optional per-section storyboard contact sheets generated in draft_grid mode.",
+    )
     escalated_types: list[ShotType] = Field(
         default_factory=list,
         description="Shot types a reviewer has rejected; all of them get spot-checked.",

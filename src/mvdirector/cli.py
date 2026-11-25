@@ -54,6 +54,10 @@ previz_app = typer.Typer(
     no_args_is_help=True, help="Generate or lock 3D blocking previz clips for shots."
 )
 app.add_typer(previz_app, name="previz")
+sketch_app = typer.Typer(
+    no_args_is_help=True, help="Attach or clear rough framing guide sketches on shots."
+)
+app.add_typer(sketch_app, name="sketch")
 
 log = logging.getLogger("mvdirector")
 
@@ -1239,6 +1243,64 @@ def reference_lock_video(
     typer.echo(f"Locked reference video: {locked}")
 
 
+@reference_app.command("seed")
+def reference_seed(
+    photos: list[Path] = typer.Argument(..., help="1 to 10 angle photos to seed from."),
+    project_dir: Path = ProjectDir,
+    angle: list[str] = typer.Option(
+        None,
+        "--angle",
+        "-a",
+        help="Angle per photo (front, profile, three_quarter, face, back).",
+    ),
+    state: str = StateOption,
+    character: str = CharacterOption,
+    generate: bool = typer.Option(
+        False,
+        "--generate",
+        help="Synthesize a locked 4-panel turnaround sheet (with back view) via ComfyUI.",
+    ),
+    layout: Literal["row", "grid", "columns"] | None = typer.Option(
+        None,
+        "--layout",
+        help="Target sheet layout ('row', 'grid', or 'columns').",
+    ),
+    include_back: bool = typer.Option(
+        True,
+        "--back/--no-back",
+        help="Infer a rear/back panel when generating a turnaround sheet.",
+    ),
+    count: int = typer.Option(1, "--count", min=1, help="Candidates when using --generate."),
+    no_lock: bool = typer.Option(
+        False, "--no-lock", help="Only render candidates without locking onto the manifest."
+    ),
+) -> None:
+    """Seed a character reference sheet from 1–10 uploaded angle photos."""
+    mode: Literal["direct", "generate"] = "generate" if generate else "direct"
+    try:
+        result = api.seed_reference_from_photos(
+            project_dir,
+            photos,
+            angles=angle or None,
+            state=state,
+            character=character,
+            mode=mode,
+            layout=layout,
+            include_back=include_back,
+            count=count,
+            lock=not no_lock,
+        )
+    except MVDError as exc:
+        raise _fail(exc) from exc
+    if result.candidates and not result.sheet:
+        typer.echo("Seeded candidates:\n" + _lines(result.candidates))
+        return
+    typer.echo(
+        f"Seeded {result.sheet} ({result.mode}, {result.layout}) with "
+        f"{len(result.panels)} panel(s)."
+    )
+
+
 @plates_app.command("generate")
 def plates_generate(
     project_dir: Path = ProjectDir,
@@ -1287,6 +1349,61 @@ def plates_lock(
     except MVDError as exc:
         raise _fail(exc) from exc
     typer.echo(f"Locked plate: {locked}")
+
+
+@plates_app.command("turnaround")
+def plates_turnaround(
+    set_name: str = typer.Option(..., "--set", help="Target set name."),
+    count: int = typer.Option(1, "--count", min=1, help="Number of turnaround candidates."),
+    no_lock: bool = typer.Option(
+        False, "--no-lock", help="Only render candidates without locking onto the set."
+    ),
+    inset: float = typer.Option(
+        0.012, "--inset", min=0.0, max=0.19, help="Trim ratio around each 2x2 quadrant."
+    ),
+    project_dir: Path = ProjectDir,
+) -> None:
+    """Generate a 2x2 multi-angle turnaround sheet from a set's locked plate."""
+    try:
+        result = api.generate_plate_turnaround(
+            project_dir,
+            set_name,
+            count=count,
+            lock=not no_lock,
+            inset=inset,
+        )
+    except MVDError as exc:
+        raise _fail(exc) from exc
+    if no_lock:
+        typer.echo("Turnaround candidates:\n" + _lines(result.candidates))
+        typer.echo(
+            f'Pick one with: mvd plates lock-turnaround <path> --set "{result.set_name}"'
+        )
+        return
+    typer.echo(
+        f"Locked turnaround {result.sheet} for '{result.set_name}' "
+        f"({len(result.panels)} angle panel(s))."
+    )
+
+
+@plates_app.command("lock-turnaround")
+def plates_lock_turnaround(
+    image: Path = typer.Argument(..., help="2x2 turnaround sheet image for the set."),
+    set_name: str = typer.Option(..., "--set", help="Target set name."),
+    inset: float = typer.Option(
+        0.012, "--inset", min=0.0, max=0.19, help="Trim ratio around each 2x2 quadrant."
+    ),
+    project_dir: Path = ProjectDir,
+) -> None:
+    """Lock a 2x2 multi-angle set turnaround sheet and crop its 4 angle panels."""
+    try:
+        scene = api.lock_plate_turnaround(project_dir, image, set_name, inset=inset)
+    except MVDError as exc:
+        raise _fail(exc) from exc
+    typer.echo(
+        f"Locked turnaround {scene.sheet} for '{scene.name}' "
+        f"({len(scene.panels)} angle panel(s))."
+    )
 
 
 def _reference_status(char: Character, key: str, index: int) -> str:
@@ -1395,7 +1512,15 @@ def assets(project_dir: Path = ProjectDir) -> None:
             typer.echo(f"  {key:<16} {_reference_status(character, key, index)}")
     typer.echo("Set plates")
     for scene in bible.settings:
-        typer.echo(f"  {scene.name:<28} {'locked' if scene.plate else 'not set'}")
+        if scene.plate and scene.panels:
+            plate_status = f"locked (+ {len(scene.panels)} panel(s))"
+        elif scene.panels:
+            plate_status = f"turnaround ({len(scene.panels)} panel(s))"
+        elif scene.plate:
+            plate_status = "locked"
+        else:
+            plate_status = "not set"
+        typer.echo(f"  {scene.name:<28} {plate_status}")
     if not bible.settings:
         typer.echo("  (no sets in the bible)")
     if bible.props:
@@ -1850,6 +1975,97 @@ def audio_qc_cmd(
         _yellow(f"Splice clicks ({len(report.splice_clicks)})   : {clicks_str}{extra}")
     else:
         typer.echo("Splice clicks       : none")
+
+
+@sketch_app.command("attach")
+def sketch_attach(
+    image: Path = typer.Argument(..., help="Rough framing sketch image to attach."),
+    shot_id: str = typer.Option(..., "--shot", "-s", help="Target shot id (e.g. s001)."),
+    analyze: bool = typer.Option(
+        False,
+        "--analyze",
+        help="Summarize sketch framing/blocking via LLM vision when llm.enabled is true.",
+    ),
+    reset_still: bool = typer.Option(
+        False,
+        "--reset-still",
+        help="Reset existing still/video attempts so the shot regenerates with this sketch.",
+    ),
+    project_dir: Path = ProjectDir,
+) -> None:
+    """Attach a rough hand-drawn framing/blocking sketch to a shot."""
+    try:
+        saved = api.attach_shot_sketch(
+            project_dir,
+            shot_id,
+            image,
+            analyze_with_llm=analyze,
+            reset_still=reset_still,
+        )
+    except MVDError as exc:
+        raise _fail(exc) from exc
+    typer.echo(f"Attached sketch for {shot_id}: {saved}")
+
+
+@sketch_app.command("clear")
+def sketch_clear(
+    shot_id: str = typer.Option(..., "--shot", "-s", help="Target shot id (e.g. s001)."),
+    reset_still: bool = typer.Option(
+        False,
+        "--reset-still",
+        help="Reset existing still/video attempts after clearing the sketch.",
+    ),
+    project_dir: Path = ProjectDir,
+) -> None:
+    """Clear any attached rough sketch from a shot."""
+    try:
+        api.attach_shot_sketch(project_dir, shot_id, clear=True, reset_still=reset_still)
+    except MVDError as exc:
+        raise _fail(exc) from exc
+    typer.echo(f"Cleared sketch for {shot_id}.")
+
+
+@app.command("draft-grid")
+def draft_grid_cmd(
+    project_dir: Path = ProjectDir,
+    section: str | None = typer.Option(None, "--section", help="Song section name to render."),
+    shot: list[str] = ShotsOption,
+    layout: Literal["auto", "2x2", "3x2"] = typer.Option(
+        "auto", "--layout", help="Contact sheet grid layout ('auto', '2x2', or '3x2')."
+    ),
+    mode: Literal["sheet", "stills", "r2v", "both"] = typer.Option(
+        "stills", "--mode", help="Output mode: 'sheet', 'stills', 'r2v', or 'both'."
+    ),
+    draft: bool = typer.Option(
+        True, "--draft/--no-draft", help="Render at draft resolution (default) or full resolution."
+    ),
+    overwrite: bool = typer.Option(
+        False, "--overwrite", help="Regenerate contact sheets even if already present on disk."
+    ),
+    run_qc: bool = typer.Option(
+        False, "--run-qc", help="Run ImageQC on sliced still panels."
+    ),
+) -> None:
+    """Generate per-section 2x2/3x2 storyboard contact sheets (slice stills and/or R2V)."""
+    try:
+        results = api.generate_draft_grid(
+            project_dir,
+            section=section,
+            shots=shot or None,
+            layout=layout,
+            mode=mode,
+            draft=draft,
+            overwrite=overwrite,
+            run_qc=run_qc,
+        )
+    except MVDError as exc:
+        raise _fail(exc) from exc
+    for res in results:
+        extra = f", video={res.video_path.name}" if res.video_path else ""
+        typer.echo(
+            f"{res.sheet_id} ({res.layout}, {len(res.shot_ids)} shot(s)): "
+            f"{res.sheet_path}{extra}"
+        )
 
 
 @app.command()

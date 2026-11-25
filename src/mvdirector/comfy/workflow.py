@@ -44,6 +44,8 @@ OPTIONAL_FILE_PARAMS = frozenset(
         "previz_depth_video",
         "end_image",
         "previous_frame",
+        "draft_grid_image",
+        "sketch_image",
     }
 )
 

@@ -19,7 +19,7 @@ import sys
 import unicodedata
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from functools import partial
 from importlib import resources
@@ -43,12 +43,17 @@ from mvdirector.comfy.client import ComfyClient
 from mvdirector.comfy.provider import ComfyEndpointProvider, StaticComfyProvider
 from mvdirector.config import CONFIG_FILENAME, LLMConfig, ReviewMode, validate_max_concurrency
 from mvdirector.errors import BudgetExceeded, ConfigError, LLMError, MVDError
+from mvdirector.generation import draft_grid as draft_grid_mod
 from mvdirector.generation import plates as plates_mod
 from mvdirector.generation import previz as previz_mod
 from mvdirector.generation import props as props_mod
 from mvdirector.generation import reference as reference_mod
 from mvdirector.generation import upscale as upscale_mod
+from mvdirector.generation.candidates import atomic_save_png, load_rgb_candidate
+from mvdirector.generation.draft_grid import DraftGridResult
+from mvdirector.generation.plates import PlateTurnaroundResult
 from mvdirector.generation.preflight import check_assets
+from mvdirector.generation.reference import SeedReferenceResult
 from mvdirector.generation.runner import RunBudget, RunEvent, ShotRunner, load_templates
 from mvdirector.llm import LLMClient, build_llm
 from mvdirector.llm.check import LLMCheckResult, ping_llm, run_llm_check
@@ -61,11 +66,13 @@ from mvdirector.models import (
     ReferenceSet,
     RetryStrategy,
     Review,
+    SetDesign,
     ShotType,
     TrackProfile,
     VideoStyle,
     normalize_exclusions,
 )
+from mvdirector.planning import previz as previz_plan_mod
 from mvdirector.planning.brief import ensure_writable, generate_brief, write_brief
 from mvdirector.planning.mix_planner import build_mix_manifest
 from mvdirector.planning.planner import build_manifest
@@ -81,12 +88,15 @@ __all__ = [
     "BroadcastAudioReport",
     "CleanupPlan",
     "ComfyWiringReport",
+    "DraftGridResult",
     "EnvironmentReport",
     "GenerateResult",
     "LLMCheckOutcome",
     "Observer",
+    "PlateTurnaroundResult",
     "PrepareResult",
     "ProjectRef",
+    "SeedReferenceResult",
     "SetupOptions",
     "TuneResult",
     "ValidationCheck",
@@ -94,6 +104,7 @@ __all__ = [
     "analyze",
     "approve",
     "assemble",
+    "attach_shot_sketch",
     "audio_qc",
     "brief",
     "calibrate",
@@ -102,6 +113,8 @@ __all__ = [
     "clean",
     "export_schemas",
     "generate",
+    "generate_draft_grid",
+    "generate_plate_turnaround",
     "generate_plates",
     "generate_previz",
     "generate_props",
@@ -111,6 +124,7 @@ __all__ = [
     "inspect_environment",
     "load_status",
     "lock_plate",
+    "lock_plate_turnaround",
     "lock_previz",
     "lock_prop",
     "lock_reference",
@@ -123,6 +137,7 @@ __all__ = [
     "regenerate_still",
     "reject",
     "repair_still",
+    "seed_reference_from_photos",
     "setup_project",
     "status_counts",
     "tune",
@@ -786,6 +801,107 @@ def lock_reference(
         )
 
 
+def seed_reference_from_photos(
+    project_dir: ProjectRef,
+    photos: Sequence[Path],
+    *,
+    angles: Sequence[str] | None = None,
+    state: str | None = None,
+    character: str | None = None,
+    mode: Literal["direct", "generate"] = "direct",
+    layout: Literal["row", "grid", "columns"] | None = None,
+    include_back: bool = True,
+    count: int = 1,
+    lock: bool = True,
+    comfy_provider: ComfyEndpointProvider | None = None,
+) -> SeedReferenceResult:
+    """Seed a character reference sheet from 1–10 angle photos (direct or ComfyUI synthesis)."""
+    if mode not in ("direct", "generate"):
+        raise ConfigError(f"Unknown seed mode {mode!r}; expected 'direct' or 'generate'.")
+    if isinstance(count, bool) or count < 1:
+        raise ConfigError(f"Candidate count must be >= 1, got {count}.")
+    if not photos or len(photos) > reference_mod.MAX_SEED_PHOTOS:
+        raise ConfigError(
+            f"Provide 1 to {reference_mod.MAX_SEED_PHOTOS} seed photos, got {len(photos)}."
+        )
+    if angles is not None:
+        if len(angles) != len(photos):
+            raise ConfigError(
+                f"Expected {len(photos)} angle(s) matching the provided photos, got {len(angles)}."
+            )
+        seen: set[str] = set()
+        for raw_angle in angles:
+            norm = reference_mod._normalize_seed_angle(raw_angle)
+            if norm in seen:
+                raise ConfigError(f"Duplicate seed photo angle: {norm!r}.")
+            seen.add(norm)
+    for idx, photo in enumerate(photos):
+        load_rgb_candidate(Path(photo), f"Seed photo #{idx + 1}")
+
+    project = open_project(project_dir)
+    if mode == "direct":
+        with project.edit_manifest() as manifest:
+            return reference_mod.seed_from_photos(
+                project,
+                manifest,
+                photos,
+                angles=angles,
+                state_id=state,
+                character_id=character,
+                mode="direct",
+                layout=layout,
+                include_back=include_back,
+                count=count,
+                lock=lock,
+            )
+
+    manifest = project.load_manifest()
+    reference_mod._target_state(manifest, state, character)
+    templates = load_templates(project, ["still"])
+    if not templates["still"].accepts("reference_image"):
+        raise ConfigError(
+            f"Workflow '{templates['still'].name}' must bind 'reference_image' to seed from photos."
+        )
+    if lock:
+        with project.run_lock(), _lease(project, comfy_provider) as comfy:
+            manifest = project.load_manifest()
+            result = reference_mod.seed_from_photos(
+                project,
+                manifest,
+                photos,
+                angles=angles,
+                state_id=state,
+                character_id=character,
+                mode="generate",
+                layout=layout,
+                include_back=include_back,
+                count=count,
+                lock=True,
+                comfy=comfy,
+                templates=templates,
+            )
+            project.save_manifest(manifest)
+            return result
+    with _lease(project, comfy_provider) as comfy:
+        result = reference_mod.seed_from_photos(
+            project,
+            manifest,
+            photos,
+            angles=angles,
+            state_id=state,
+            character_id=character,
+            mode="generate",
+            layout=layout,
+            include_back=include_back,
+            count=count,
+            lock=False,
+            comfy=comfy,
+            templates=templates,
+        )
+    project.storage.push()
+    return result
+
+
 def generate_reference_videos(
     project_dir: ProjectRef,
     state: str | None = None,
@@ -873,6 +989,77 @@ def lock_plate(project_dir: ProjectRef, image: Path, set_name: str) -> Path:
         return plates_mod.lock_plate(project, manifest, image, set_name)
 
 
+def generate_plate_turnaround(
+    project_dir: ProjectRef,
+    set_name: str,
+    *,
+    count: int = 1,
+    lock: bool = True,
+    inset: float = 0.012,
+    comfy_provider: ComfyEndpointProvider | None = None,
+) -> PlateTurnaroundResult:
+    """Generate a 2x2 multi-angle turnaround sheet from one approved set plate."""
+    if isinstance(inset, bool) or not 0.0 <= inset < 0.2:
+        raise ConfigError(f"Turnaround panel inset must be in [0.0, 0.2), got {inset!r}.")
+    if isinstance(count, bool) or count < 1:
+        raise ConfigError(f"Plate turnaround candidate count must be >= 1, got {count}.")
+
+    project = open_project(project_dir)
+    manifest = project.load_manifest()
+    scene = plates_mod._find_set(manifest, set_name)
+    if not scene.plate:
+        raise ConfigError(
+            f"Lock a plate for '{scene.name}' before generating a turnaround: "
+            f'`mvd plates lock <image> --set "{scene.name}"`.'
+        )
+    if not project.path(scene.plate).is_file():
+        raise ConfigError(f"Plate file for '{scene.name}' is missing: {scene.plate}")
+    templates = load_templates(project, ["still"])
+    plates_mod._resolve_ref_workflow(templates, f"generate turnaround for '{scene.name}'")
+
+    if lock:
+        with project.run_lock(), _lease(project, comfy_provider) as comfy:
+            manifest = project.load_manifest()
+            result = plates_mod.generate_turnaround(
+                project,
+                manifest,
+                comfy,
+                templates,
+                set_name,
+                count=count,
+                lock=True,
+                inset=inset,
+            )
+            project.save_manifest(manifest)
+            return result
+    with _lease(project, comfy_provider) as comfy:
+        result = plates_mod.generate_turnaround(
+            project,
+            manifest,
+            comfy,
+            templates,
+            set_name,
+            count=count,
+            lock=False,
+            inset=inset,
+        )
+    project.storage.push()
+    return result
+
+
+def lock_plate_turnaround(
+    project_dir: ProjectRef,
+    image: Path,
+    set_name: str,
+    *,
+    inset: float = 0.012,
+) -> SetDesign:
+    """Lock a 2x2 multi-angle set turnaround sheet and crop its 4 angle panels."""
+    project = open_project(project_dir)
+    with project.edit_manifest() as manifest:
+        return plates_mod.lock_turnaround(project, manifest, image, set_name, inset=inset)
+
+
 def generate_props(
     project_dir: ProjectRef,
     prop: str | None = None,
@@ -928,6 +1115,48 @@ def refine_previz(project_dir: ProjectRef, shot_id: str, feedback: str) -> Path:
     project = open_project(project_dir)
     with _close_llm(_build_project_llm(project)) as llm, project.edit_manifest() as manifest:
         return previz_mod.refine_previz_shot(project, manifest, llm, shot_id, feedback)
+
+
+def attach_shot_sketch(
+    project_dir: ProjectRef,
+    shot_id: str,
+    image: Path | None = None,
+    *,
+    clear: bool = False,
+    analyze_with_llm: bool = False,
+    reset_still: bool = False,
+) -> Path | None:
+    """Attach (or clear) a rough framing sketch image on a shot."""
+    project = open_project(project_dir)
+    manifest = project.load_manifest()
+    _require_known_shots(manifest, [shot_id])
+    if clear:
+        with project.edit_manifest() as locked_manifest:
+            shot = locked_manifest.shot(shot_id)
+            shot.sketch_image = None
+            shot.sketch_guidance = ""
+            if reset_still:
+                shot.still.reset(project.config.retry.max_attempts)
+                shot.video.reset(project.config.retry.max_attempts)
+        return None
+    if image is None:
+        raise ConfigError("Provide a sketch image path or pass clear=True.")
+    sketch_img = load_rgb_candidate(Path(image), "Sketch")
+    dst = project.sketch_path(shot_id)
+    atomic_save_png(sketch_img, dst)
+
+    llm_ctx = _close_llm(_build_project_llm(project)) if analyze_with_llm else nullcontext(None)
+    with llm_ctx as llm, project.edit_manifest() as locked_manifest:
+        shot = locked_manifest.shot(shot_id)
+        shot.sketch_image = project.rel(dst)
+        if analyze_with_llm and llm is not None:
+            guidance = previz_plan_mod.describe_sketch_blocking(shot, locked_manifest, dst, llm)
+            if guidance:
+                shot.sketch_guidance = guidance
+        if reset_still:
+            shot.still.reset(project.config.retry.max_attempts)
+            shot.video.reset(project.config.retry.max_attempts)
+    return dst
 
 
 # --- generation -------------------------------------------------------------------------------
@@ -1344,6 +1573,73 @@ def repair_still(
         comfy_provider=comfy_provider,
         max_concurrency=max_concurrency,
     )
+
+
+def generate_draft_grid(
+    project_dir: ProjectRef,
+    *,
+    section: str | None = None,
+    shots: list[str] | None = None,
+    layout: Literal["auto", "2x2", "3x2"] = "auto",
+    mode: Literal["sheet", "stills", "r2v", "both"] = "stills",
+    draft: bool = True,
+    overwrite: bool = False,
+    apply_to_shots: bool = True,
+    run_qc: bool = False,
+    comfy_provider: ComfyEndpointProvider | None = None,
+) -> list[DraftGridResult]:
+    """Generate per-section 2x2/3x2 storyboard contact sheets (slice to stills and/or R2V)."""
+    if layout not in ("auto", "2x2", "3x2"):
+        raise ConfigError(f"Unknown draft_grid layout {layout!r}; use 'auto', '2x2', or '3x2'.")
+    if mode not in ("sheet", "stills", "r2v", "both"):
+        raise ConfigError(
+            f"Unknown draft_grid mode {mode!r}; use 'sheet', 'stills', 'r2v', or 'both'."
+        )
+
+    project = open_project(project_dir)
+    manifest = project.load_manifest()
+    if shots is not None:
+        _require_known_shots(manifest, shots)
+    max_panels = 4 if layout == "2x2" else 6
+    chunks = draft_grid_mod.group_section_shots(
+        manifest, section=section, shot_ids=shots, max_panels=max_panels
+    )
+    available_names = [
+        name
+        for name in ("t2i", "still", "r2v", "lipsync", "i2v")
+        if name in project.config.comfy.workflows
+    ]
+    templates = load_templates(project, available_names)
+    if "t2i" not in templates and "still" not in templates:
+        raise ConfigError("A 'still' or 't2i' workflow is required for draft_grid.")
+    if mode in ("r2v", "both"):
+        draft_grid_mod._select_r2v_template(templates, [s for _, grp in chunks for s in grp])
+
+    llm_ctx = _close_llm(_build_project_llm(project)) if run_qc else nullcontext(None)
+    with llm_ctx as llm:
+        gates = build_quality_gates(project.config, llm) if run_qc else None
+        try:
+            with project.run_lock(), _lease(project, comfy_provider) as comfy:
+                manifest = project.load_manifest()
+                results = draft_grid_mod.generate_section_sheet(
+                    project,
+                    manifest,
+                    comfy,
+                    templates,
+                    section=section,
+                    shot_ids=shots,
+                    layout=layout,
+                    mode=mode,
+                    draft=draft,
+                    overwrite=overwrite,
+                    apply_to_shots=apply_to_shots,
+                    gates=gates,
+                )
+                project.save_manifest(manifest)
+                return results
+        finally:
+            if gates is not None:
+                gates.close()
 
 
 def _save_after_run(project: Project, manifest: Manifest) -> None:

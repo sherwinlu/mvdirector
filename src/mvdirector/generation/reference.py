@@ -15,15 +15,18 @@ edits of the first, changing only the clothes, so it is the same person in every
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageOps
 
 from mvdirector import media
 from mvdirector.audio.stems import atomic_copy
 from mvdirector.comfy.client import ComfyClient
 from mvdirector.comfy.workflow import WorkflowTemplate
+from mvdirector.config import ReferenceConfig
 from mvdirector.errors import ConfigError
 from mvdirector.generation.candidates import (
     atomic_save_png,
@@ -42,9 +45,28 @@ log = logging.getLogger(__name__)
 # Allowed width/height ratios, to catch an image that is not a sheet in the configured layout.
 _ASPECT_RANGE = {"row": (1.6, 10.0), "grid": (0.75, 1.35), "columns": (1.1, 2.2)}
 _ALLOWED_VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".webm", ".mkv"})
+SEED_ANGLE_NAMES = ("front", "profile", "three_quarter", "face", "back")
+SEED_GRID_PANEL_NAMES = ("front", "profile", "back", "face")
+MAX_SEED_PHOTOS = 10
 
 
-def split_sheet(image: Image.Image, layout: str, inset: float) -> dict[str, Image.Image]:
+@dataclass(frozen=True)
+class SeedReferenceResult:
+    reference: ReferenceSet | None
+    sheet: Path | None
+    panels: dict[str, Path]
+    candidates: list[Path]
+    mode: Literal["direct", "generate"]
+    layout: str
+
+
+def split_sheet(
+    image: Image.Image,
+    layout: str,
+    inset: float,
+    *,
+    panel_names: tuple[str, ...] | None = None,
+) -> dict[str, Image.Image]:
     """Cut a four-panel sheet into panels.
 
     ``row`` is four panels left to right (front, profile, three_quarter, face). ``grid`` is a 2x2
@@ -52,19 +74,21 @@ def split_sheet(image: Image.Image, layout: str, inset: float) -> dict[str, Imag
     (face, profile) and full-height front and back columns across the center and right.
     ``inset`` trims that share of each panel on every side to drop dividers and labels.
     """
+    if panel_names is not None and len(panel_names) != 4:
+        raise ConfigError(f"Expected 4 panel names for '{layout}' sheet, got {len(panel_names)}.")
     width, height = image.size
     if layout == "row":
-        names: tuple[str, ...] = PANEL_NAMES
+        names: tuple[str, ...] = panel_names or PANEL_NAMES
         cells = [(i * width // 4, 0, (i + 1) * width // 4, height) for i in range(4)]
     elif layout == "grid":
-        names = PANEL_NAMES
+        names = panel_names or PANEL_NAMES
         cells = [
             (x * width // 2, y * height // 2, (x + 1) * width // 2, (y + 1) * height // 2)
             for y in range(2)
             for x in range(2)
         ]
     elif layout == "columns":
-        names = COLUMNS_PANEL_NAMES
+        names = panel_names or COLUMNS_PANEL_NAMES
         c1, c2, mid = width // 3, 2 * width // 3, height // 2
         cells = [
             (0, 0, c1, mid),
@@ -478,3 +502,336 @@ def lock_reference(
     ):
         manifest.character.references[key] = reference
     return reference
+
+
+def _mirror_primary_reference(
+    manifest: Manifest, char_id: str | None, character: Any, key: str, reference: ReferenceSet
+) -> None:
+    if (char_id is None or char_id == manifest.primary_character_id()) and (
+        manifest.character is not character
+    ):
+        manifest.character.references[key] = reference
+
+
+def _normalize_seed_angle(raw: str) -> str:
+    cleaned = (
+        raw.strip()
+        .lower()
+        .replace("3/4", "three_quarter")
+        .replace("-", "_")
+        .replace(" ", "_")
+        .replace("/", "_")
+    )
+    aliases = {"rear": "back", "3_4": "three_quarter"}
+    normalized = aliases.get(cleaned, cleaned)
+    if normalized not in SEED_ANGLE_NAMES:
+        allowed = ", ".join(SEED_ANGLE_NAMES)
+        raise ConfigError(f"Unknown seed photo angle {raw!r}; expected one of: {allowed}.")
+    return normalized
+
+
+def _compose_photo_grid(
+    images: Sequence[Image.Image],
+    size: tuple[int, int],
+    *,
+    background: str = "white",
+    grid: tuple[int, int] | None = None,
+) -> Image.Image:
+    """Arrange 1–10 photos into an aspect-preserving studio grid with neutral dividers."""
+    if grid is not None:
+        cols, rows = grid
+    elif len(images) <= 4:
+        cols, rows = 2, 2
+    elif len(images) <= 6:
+        cols, rows = 3, 2
+    elif len(images) <= 8:
+        cols, rows = 4, 2
+    else:
+        cols, rows = 5, 2
+
+    width, height = size
+    fill = (128, 128, 128) if background == "grey" else (255, 255, 255)
+    canvas = Image.new("RGB", (width, height), fill)
+    draw = ImageDraw.Draw(canvas)
+
+    for idx, img in enumerate(images[: cols * rows]):
+        col = idx % cols
+        row = idx // cols
+        x0 = col * width // cols
+        y0 = row * height // rows
+        x1 = (col + 1) * width // cols
+        y1 = (row + 1) * height // rows
+        cell_w, cell_h = x1 - x0, y1 - y0
+        pad = max(4, min(cell_w, cell_h) // 40)
+        fitted = ImageOps.contain(
+            img,
+            (max(1, cell_w - 2 * pad), max(1, cell_h - 2 * pad)),
+            method=Image.Resampling.LANCZOS,
+        )
+        px = x0 + (cell_w - fitted.width) // 2
+        py = y0 + (cell_h - fitted.height) // 2
+        canvas.paste(fitted, (px, py))
+
+    divider = (180, 180, 180)
+    line_w = max(2, min(width, height) // 300)
+    for col in range(1, cols):
+        x = col * width // cols
+        draw.line([(x, 0), (x, height)], fill=divider, width=line_w)
+    for row in range(1, rows):
+        y = row * height // rows
+        draw.line([(0, y), (width, y)], fill=divider, width=line_w)
+    return canvas
+
+
+def _available_ref_slots(template: WorkflowTemplate) -> list[str]:
+    slots: list[str] = []
+    seen_targets: set[tuple[str, str]] = set()
+    candidates = [
+        "reference_image",
+        *(f"reference_image_{n}" for n in range(2, MAX_SEED_PHOTOS + 1)),
+    ]
+    for param in candidates:
+        if not template.accepts(param):
+            continue
+        targets = {(t.node, t.field) for t in template.bindings.inputs.get(param, ())}
+        if not targets or not targets.isdisjoint(seen_targets):
+            continue
+        seen_targets.update(targets)
+        slots.append(param)
+    return slots
+
+
+def seed_from_photos(
+    project: Project,
+    manifest: Manifest,
+    photos: Sequence[Path],
+    *,
+    angles: Sequence[str] | None = None,
+    state_id: str | None = None,
+    character_id: str | None = None,
+    mode: Literal["direct", "generate"] = "direct",
+    layout: Literal["row", "grid", "columns"] | None = None,
+    include_back: bool = True,
+    count: int = 1,
+    lock: bool = True,
+    comfy: ComfyClient | None = None,
+    templates: dict[str, WorkflowTemplate] | None = None,
+) -> SeedReferenceResult:
+    """Seed a character reference sheet from 1–10 real photos (direct or ComfyUI synthesis)."""
+    if mode not in ("direct", "generate"):
+        raise ConfigError(f"Unknown seed mode {mode!r}; expected 'direct' or 'generate'.")
+    if isinstance(count, bool) or count < 1:
+        raise ConfigError(f"Candidate count must be >= 1, got {count}.")
+    if not photos:
+        raise ConfigError("Provide at least 1 reference photo (up to 10).")
+    if len(photos) > MAX_SEED_PHOTOS:
+        raise ConfigError(
+            f"At most {MAX_SEED_PHOTOS} seed photos are supported, got {len(photos)}."
+        )
+
+    normalized_angles: list[str] | None = None
+    if angles is not None:
+        if len(angles) != len(photos):
+            raise ConfigError(
+                f"Expected {len(photos)} angle(s) matching the provided photos, got {len(angles)}."
+            )
+        normalized_angles = []
+        seen_angles: set[str] = set()
+        for raw_angle in angles:
+            norm = _normalize_seed_angle(raw_angle)
+            if norm in seen_angles:
+                raise ConfigError(f"Duplicate seed photo angle: {norm!r}.")
+            seen_angles.add(norm)
+            normalized_angles.append(norm)
+
+    char_id, character, key, prefix = _target_state(manifest, state_id, character_id)
+    config = project.config.reference
+    loaded_images = [
+        load_rgb_candidate(Path(photo), f"Seed photo #{idx + 1}")
+        for idx, photo in enumerate(photos)
+    ]
+
+    if mode == "direct":
+        effective_layout = layout or "grid"
+        if effective_layout not in ("row", "grid", "columns"):
+            raise ConfigError(
+                f"Unknown sheet layout '{effective_layout}'. Use 'row', 'grid' or 'columns'."
+            )
+        default_order = (
+            ("front", "profile", "face", "back", "three_quarter")
+            if effective_layout == "columns"
+            else ("front", "profile", "three_quarter", "face", "back")
+        )
+        project.reference_dir.mkdir(parents=True, exist_ok=True)
+        panel_dir = project.path(Path("assets") / "reference" / prefix)
+        panel_dir.mkdir(parents=True, exist_ok=True)
+
+        panel_rel_map: dict[str, str] = {}
+        panel_paths: dict[str, Path] = {}
+        for idx, img in enumerate(loaded_images):
+            angle_name = (
+                normalized_angles[idx]
+                if normalized_angles is not None
+                else (default_order[idx] if idx < len(default_order) else None)
+            )
+            if angle_name is None:
+                continue
+            dst = project.path(Path("assets") / "reference" / prefix / f"{prefix}_{angle_name}.png")
+            atomic_save_png(img, dst)
+            panel_rel_map[angle_name] = project.rel(dst)
+            panel_paths[angle_name] = dst
+
+        if len(loaded_images) <= 4:
+            sheet_size = (
+                config.size()
+                if config.layout == "grid"
+                else ReferenceConfig(layout="grid").size()
+            )
+        else:
+            cols = (len(loaded_images) + 1) // 2
+            sheet_size = (cols * 512, 1024)
+        sheet_img = _compose_photo_grid(
+            loaded_images, sheet_size, background=config.background
+        )
+        sheet_path = project.path(Path("assets") / "reference" / f"{prefix}_sheet.png")
+        atomic_save_png(sheet_img, sheet_path)
+
+        reference: ReferenceSet | None = None
+        if lock:
+            existing = character.references.get(key)
+            reference = ReferenceSet(
+                sheet=project.rel(sheet_path),
+                panels=panel_rel_map,
+                video=existing.video if existing else None,
+            )
+            character.references[key] = reference
+            _mirror_primary_reference(manifest, char_id, character, key, reference)
+        return SeedReferenceResult(
+            reference=reference,
+            sheet=sheet_path,
+            panels=panel_paths,
+            candidates=[],
+            mode="direct",
+            layout=effective_layout,
+        )
+
+    # mode == "generate": synthesize locked 4-panel turnaround via ComfyUI `still` edit
+    still_tpl = (templates or {}).get("still")
+    if still_tpl is None:
+        raise ConfigError("A 'still' workflow is required to generate a seeded reference sheet.")
+    if not still_tpl.accepts("reference_image"):
+        raise ConfigError(
+            f"Workflow '{still_tpl.name}' must bind 'reference_image' to seed from photos."
+        )
+    if comfy is None:
+        raise ConfigError("A ComfyUI client is required when mode='generate'.")
+
+    effective_layout = layout or ("columns" if include_back else config.layout)
+    if effective_layout not in ("row", "grid", "columns"):
+        raise ConfigError(
+            f"Unknown sheet layout '{effective_layout}'. Use 'row', 'grid' or 'columns'."
+        )
+    width, height = (
+        config.size()
+        if effective_layout == config.layout
+        else ReferenceConfig(layout=effective_layout).size()
+    )
+    negative = prompts.merge_negative_prompt(
+        f"{manifest.visual_bible.negative_prompt}, {prompts.SHEET_NEGATIVE}".strip(", "),
+        manifest.visual_bible.exclusions,
+    )
+    params: dict[str, Any] = {
+        "positive_prompt": prompts.seed_sheet_prompt(
+            manifest,
+            effective_layout,
+            state_id=key,
+            character_id=char_id,
+            background=config.background,
+            photo_count=len(loaded_images),
+            include_back=include_back,
+            include_grid_back=(effective_layout == "grid" and include_back),
+        ),
+        "negative_prompt": negative,
+        "width": width,
+        "height": height,
+    }
+    slots = _available_ref_slots(still_tpl)
+    if len(loaded_images) <= len(slots):
+        for slot, photo_path in zip(slots, photos):
+            params[slot] = comfy.upload(Path(photo_path))
+    else:
+        project.reference_dir.mkdir(parents=True, exist_ok=True)
+        collage = _compose_photo_grid(
+            loaded_images, (1536, 1536), background=config.background
+        )
+        collage_path = project.path(Path("assets") / "reference" / f"{prefix}_seed_input.png")
+        atomic_save_png(collage, collage_path)
+        params["reference_image"] = comfy.upload(collage_path)
+
+    offset = _seed_offset(manifest, char_id, character, key) + 25
+    candidates = render_candidate_batch(
+        comfy=comfy,
+        template=still_tpl,
+        base_params=params,
+        base_seed=project.config.seed + offset,
+        count=count,
+        folder=project.reference_dir,
+        prefix=f"{prefix}_seed",
+        label=f"Seeded reference for '{prefix}'",
+    )
+
+    if not lock:
+        return SeedReferenceResult(
+            reference=None,
+            sheet=None,
+            panels={},
+            candidates=candidates,
+            mode="generate",
+            layout=effective_layout,
+        )
+
+    chosen = load_rgb_candidate(candidates[0], "Seeded reference")
+    low, high = _ASPECT_RANGE[effective_layout]
+    ratio = chosen.width / chosen.height
+    if not low <= ratio <= high:
+        raise ConfigError(
+            f"{candidates[0].name} is {chosen.width}x{chosen.height}, which does not match "
+            f"'{effective_layout}' layout aspect ratio ({low}..{high})."
+        )
+    project.reference_dir.mkdir(parents=True, exist_ok=True)
+    sheet_path = project.path(Path("assets") / "reference" / f"{prefix}_sheet.png")
+    atomic_save_png(chosen, sheet_path)
+
+    panel_names = (
+        SEED_GRID_PANEL_NAMES
+        if (effective_layout == "grid" and include_back)
+        else None
+    )
+    panel_dir = project.path(Path("assets") / "reference" / prefix)
+    panel_dir.mkdir(parents=True, exist_ok=True)
+    panel_rel_map = {}
+    panel_paths = {}
+    for name, crop in split_sheet(
+        chosen, effective_layout, config.panel_inset, panel_names=panel_names
+    ).items():
+        path = project.path(Path("assets") / "reference" / prefix / f"{prefix}_{name}.png")
+        atomic_save_png(crop, path)
+        panel_rel_map[name] = project.rel(path)
+        panel_paths[name] = path
+
+    existing = character.references.get(key)
+    reference = ReferenceSet(
+        sheet=project.rel(sheet_path),
+        panels=panel_rel_map,
+        video=existing.video if existing else None,
+    )
+    character.references[key] = reference
+    _mirror_primary_reference(manifest, char_id, character, key, reference)
+    return SeedReferenceResult(
+        reference=reference,
+        sheet=sheet_path,
+        panels=panel_paths,
+        candidates=candidates,
+        mode="generate",
+        layout=effective_layout,
+    )

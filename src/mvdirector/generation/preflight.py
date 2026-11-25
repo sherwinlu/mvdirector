@@ -49,8 +49,8 @@ def check_assets(
     i2v = templates.get("i2v")
     video_templates = [t for t in (lipsync, i2v) if t is not None]
     needs_ref = (
-        still is None
-        or still.accepts("reference_image")
+        (still is None and not video_templates)
+        or (still is not None and still.accepts("reference_image"))
         or any("reference_image" in t.bindings.required for t in video_templates)
     )
     if len(manifest.characters) > 1:

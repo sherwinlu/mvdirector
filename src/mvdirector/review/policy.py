@@ -36,6 +36,8 @@ MAX_REVIEW_NOTE_CHARS = 2000
 
 
 def _checked_note(note: str) -> str:
+    if "\x00" in note:
+        raise ValueError("Review note must not contain NUL bytes.")
     cleaned = note.strip()
     if len(cleaned) > MAX_REVIEW_NOTE_CHARS:
         raise ValueError(

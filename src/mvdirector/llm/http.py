@@ -48,6 +48,43 @@ QUOTA_WORDS = (
 )
 _MAX_RETRY_AFTER = 30.0
 _MAX_SSE_BYTES = 16 * 1024 * 1024  # 16 MiB safety cap per streamed LLM response
+_MAX_ERROR_BYTES = 256 * 1024  # 256 KiB cap when buffering non-200 error bodies
+
+
+def _read_bounded_response(
+    response: httpx.Response,
+    *,
+    max_bytes: int,
+    deadline: float,
+    url: str,
+    timeout: float,
+    truncate: bool = False,
+) -> httpx.Response:
+    """Read a streamed response up to ``max_bytes`` while respecting ``deadline``."""
+    raw = bytearray()
+    for chunk in response.iter_bytes():
+        if time.monotonic() > deadline:
+            raise LLMUnavailableError(
+                f"The request to {origin(url)} timed out after {timeout:.0f} s. "
+                "Raise llm.timeout_seconds for a slow model."
+            )
+        if len(raw) + len(chunk) > max_bytes:
+            if truncate:
+                raw.extend(chunk[: max_bytes - len(raw)])
+                break
+            raise LLMError(f"Response from {origin(url)} exceeded {max_bytes} byte limit.")
+        raw.extend(chunk)
+    clean_headers = [
+        (k, v)
+        for k, v in response.headers.multi_items()
+        if k.lower() not in ("content-encoding", "content-length")
+    ]
+    return httpx.Response(
+        status_code=response.status_code,
+        headers=clean_headers,
+        content=bytes(raw),
+        request=response.request,
+    )
 
 
 def is_quota_error(text: str) -> bool:
@@ -69,14 +106,20 @@ def _host_port(parts: Any) -> str:
 
 def origin(url: str) -> str:
     """Return ``scheme://host[:port]`` with any embedded credentials stripped."""
-    parts = urlsplit(url)
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "<invalid-url>"
     host_port = _host_port(parts)
     return f"{parts.scheme}://{host_port}" if host_port else f"{parts.scheme}://"
 
 
 def redact_url(url: str) -> str:
     """Return ``url`` without embedded userinfo, query string, or fragment."""
-    parts = urlsplit(url)
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "<invalid-url>"
     host_port = _host_port(parts)
     if not parts.scheme or not host_port:
         return origin(url)
@@ -203,55 +246,44 @@ class HttpJSON:
                 deadline = time.monotonic() + self._timeout
                 with self._client.stream("POST", url, json=payload) as response:
                     if response.status_code != 200:
-                        response.read()
-                        described = _mentions(response, no_retry_words)
-                        quota_exhausted = response.status_code == 429 and is_quota_error(
-                            response.text
+                        buffered_err = _read_bounded_response(
+                            response,
+                            max_bytes=_MAX_ERROR_BYTES,
+                            deadline=deadline,
+                            url=url,
+                            timeout=self._timeout,
+                            truncate=True,
+                        )
+                        described = _mentions(buffered_err, no_retry_words)
+                        quota_exhausted = buffered_err.status_code == 429 and is_quota_error(
+                            buffered_err.text
                         )
                         if (
-                            response.status_code in _RETRYABLE
+                            buffered_err.status_code in _RETRYABLE
                             and not final
                             and not described
                             and not quota_exhausted
                         ):
-                            delay = retry_delay(response, attempt)
+                            delay = retry_delay(buffered_err, attempt)
                             log.warning(
                                 "%s returned %d; retrying in %.0f s",
                                 origin(url),
-                                response.status_code,
+                                buffered_err.status_code,
                                 delay,
                             )
                             self._sleep(delay)
                             continue
-                        return response, []
+                        return buffered_err, []
                     content_type = (
                         response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
                     )
                     if content_type == "application/json":
-                        raw_json = bytearray()
-                        for chunk in response.iter_bytes():
-                            if time.monotonic() > deadline:
-                                raise LLMUnavailableError(
-                                    f"The request to {origin(url)} timed out after "
-                                    f"{self._timeout:.0f} s. Raise llm.timeout_seconds for a "
-                                    "slow model."
-                                )
-                            if len(raw_json) + len(chunk) > _MAX_SSE_BYTES:
-                                raise LLMError(
-                                    f"Response from {origin(url)} exceeded "
-                                    f"{_MAX_SSE_BYTES} byte limit."
-                                )
-                            raw_json.extend(chunk)
-                        clean_headers = [
-                            (k, v)
-                            for k, v in response.headers.multi_items()
-                            if k.lower() not in ("content-encoding", "content-length")
-                        ]
-                        buffered = httpx.Response(
-                            status_code=response.status_code,
-                            headers=clean_headers,
-                            content=bytes(raw_json),
-                            request=response.request,
+                        buffered = _read_bounded_response(
+                            response,
+                            max_bytes=_MAX_SSE_BYTES,
+                            deadline=deadline,
+                            url=url,
+                            timeout=self._timeout,
                         )
                         return buffered, None
                     events: list[str] = []
@@ -273,17 +305,19 @@ class HttpJSON:
                                 f"{_MAX_SSE_BYTES} byte limit."
                             )
                         buf += decoder.decode(chunk)
-                        while "\n" in buf:
-                            raw_line, buf = buf.split("\n", 1)
-                            line = raw_line.rstrip("\r")
-                            if not line or not line.startswith("data:"):
-                                continue
-                            data = line[5:].strip()
-                            if data == "[DONE]":
-                                done = True
-                                break
-                            if data:
-                                events.append(data)
+                        if "\n" in buf:
+                            lines = buf.split("\n")
+                            buf = lines.pop()
+                            for raw_line in lines:
+                                line = raw_line.rstrip("\r")
+                                if not line or not line.startswith("data:"):
+                                    continue
+                                data = line[5:].strip()
+                                if data == "[DONE]":
+                                    done = True
+                                    break
+                                if data:
+                                    events.append(data)
                         if done:
                             break
                     if not done:
@@ -337,7 +371,7 @@ def error_message(response: httpx.Response) -> str:
     """The server's own explanation, from whichever JSON shape it used."""
     try:
         data = response.json()
-    except ValueError:
+    except (ValueError, RecursionError):
         return response.text[:300].strip() or f"HTTP {response.status_code}"
     if isinstance(data, dict):
         error = data.get("error")
@@ -354,7 +388,7 @@ def json_body(response: httpx.Response, provider: str) -> dict[str, Any]:
     """The reply as a JSON object, or a clear error for a proxy page or other non-JSON reply."""
     try:
         data = response.json()
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         raise LLMError(
             f"{provider} returned a reply that is not JSON: {response.text[:200]!r}"
         ) from exc

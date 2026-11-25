@@ -307,7 +307,7 @@ def _comfy_probe_headers(
 
 
 def validate_http_url(url: str, label: str = "URL") -> str:
-    """Ensure a service URL uses http/https with a valid host and no control characters."""
+    """Ensure a service URL uses http/https with a valid host and no query/fragment/controls."""
     cleaned = url.strip()
     if not cleaned:
         raise ConfigError(f"{label} must not be empty.")
@@ -318,9 +318,15 @@ def validate_http_url(url: str, label: str = "URL") -> str:
         hostname = parsed.hostname
         port = parsed.port
     except ValueError as exc:
-        raise ConfigError(f"{label} is not a valid URL (got {url!r}): {exc}") from exc
+        raise ConfigError(
+            f"{label} is not a valid URL (got {redact_url(cleaned)!r}): {exc}"
+        ) from exc
     if parsed.scheme not in ("http", "https") or not hostname:
-        raise ConfigError(f"{label} must be an http:// or https:// URL with a host (got {url!r}).")
+        raise ConfigError(
+            f"{label} must be an http:// or https:// URL with a host (got {redact_url(cleaned)!r})."
+        )
+    if parsed.query or parsed.fragment:
+        raise ConfigError(f"{label} must not include query parameters or fragments.")
     if port is not None and not (1 <= port <= 65535):
         raise ConfigError(f"{label} port must be between 1 and 65535 (got {port}).")
     return cleaned.rstrip("/")
@@ -362,7 +368,7 @@ def probe_ollama(
 
     try:
         data = resp.json()
-    except ValueError:
+    except (ValueError, RecursionError):
         return OllamaProbe(
             url=normalized,
             reachable=False,
@@ -631,7 +637,7 @@ def pull_ollama_model(
         return False, f"Ollama /api/pull returned HTTP {resp.status_code}: {resp.text[:200]}"
     try:
         body = resp.json()
-    except ValueError:
+    except (ValueError, RecursionError):
         body = None
     if isinstance(body, dict) and body.get("error"):
         return False, f"Ollama /api/pull failed for '{cleaned}': {str(body['error'])[:200]}"
@@ -695,11 +701,11 @@ def check_comfy_wiring(
         if name not in comfy_cfg.workflows:
             issues.append((f"workflow '{name}'", f"comfy.workflows has no entry for '{name}'"))
             continue
-        bindings_path = project.path(Path(comfy_cfg.workflows_dir) / comfy_cfg.workflows[name])
-        if not bindings_path.is_file():
-            issues.append((f"workflow '{name}'", f"Bindings file not found: {bindings_path}"))
-            continue
         try:
+            bindings_path = project.path(Path(comfy_cfg.workflows_dir) / comfy_cfg.workflows[name])
+            if not bindings_path.is_file():
+                issues.append((f"workflow '{name}'", f"Bindings file not found: {bindings_path}"))
+                continue
             tpl = WorkflowTemplate.load(name, bindings_path, root=project.root, environ=env)
         except MVDError as exc:
             msg = str(exc)
@@ -960,6 +966,8 @@ def apply_setup_config(project_dir: Path, options: SetupOptions) -> Path:
     """Apply setup selections to ``project.yaml`` in place, preserving comments and validating."""
     validate_setup_options(options)
     yaml_path = project_dir / CONFIG_FILENAME
+    if yaml_path.is_symlink():
+        raise ConfigError(f"Refusing to modify symlinked {CONFIG_FILENAME} at {yaml_path}")
     if not yaml_path.is_file():
         raise ConfigError(f"Config file not found: {yaml_path}")
 
@@ -968,6 +976,8 @@ def apply_setup_config(project_dir: Path, options: SetupOptions) -> Path:
         parsed_before = yaml.safe_load(text) or {}
     except yaml.YAMLError as exc:
         raise ConfigError(f"{yaml_path} is not valid YAML: {exc}") from exc
+    except RecursionError:
+        raise ConfigError(f"{yaml_path} nests collections too deeply to parse.") from None
     if not isinstance(parsed_before, dict):
         raise ConfigError(f"{yaml_path} must hold a YAML mapping at top level.")
 
@@ -1115,6 +1125,8 @@ def apply_setup_config(project_dir: Path, options: SetupOptions) -> Path:
         parsed_after = yaml.safe_load(updated_text) or {}
     except yaml.YAMLError as exc:
         raise ConfigError(f"Updated {yaml_path} failed YAML validation: {exc}") from exc
+    except RecursionError:
+        raise ConfigError(f"Updated {yaml_path} nests collections too deeply to parse.") from None
     if not isinstance(parsed_after, dict):
         raise ConfigError(f"Updated {yaml_path} must hold a YAML mapping at top level.")
 

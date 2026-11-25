@@ -208,11 +208,14 @@ class WorkflowTemplate:
             target.node for param in values for target in self.bindings.inputs.get(param, ())
         }
         for param in self.bindings.inputs.keys() - values.keys():
-            # On video R2V workflows ("image" supplies the starting still), an unbound
-            # "reference_image" is an optional character loader (e.g. b-roll shots) and
-            # should be pruned just like reference_image_2 / set_image.
-            optional_loader = is_optional_file_param(param) or (
-                param == "reference_image" and "image" in values
+            # On video workflows ("image" supplies the starting still), an unbound optional
+            # "reference_image" or "audio" loader (e.g. b-roll or non-lipsync shots) should be
+            # pruned. Likewise on upscale/V2V workflows ("video" supplies the source clip),
+            # unbound optional "audio" or "image" loaders should be pruned.
+            optional_loader = (
+                is_optional_file_param(param)
+                or (param in ("reference_image", "audio") and "image" in values)
+                or (param in ("audio", "image") and "video" in values)
             )
             if optional_loader and param not in self.bindings.required:
                 for target in self.bindings.inputs[param]:

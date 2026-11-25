@@ -183,7 +183,7 @@ class LocalStateStore:
         try:
             st_before = self.lock_path.stat()
             info = json.loads(self.lock_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             return False
         if not self._is_stale_lock_info(info):
             return False
@@ -210,7 +210,7 @@ class LocalStateStore:
                 if (st_now.st_dev, st_now.st_ino) != (st_before.st_dev, st_before.st_ino):
                     return False
                 now_info = json.loads(self.lock_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
+            except (OSError, ValueError, RecursionError):
                 return False
             if not self._is_stale_lock_info(now_info):
                 return False

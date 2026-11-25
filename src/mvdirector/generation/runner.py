@@ -147,7 +147,7 @@ def _read_stamp(marker: Path) -> dict[str, Any] | None:
     """What an audio slice was cut from, or None when it is missing or unreadable."""
     try:
         stamp = json.loads(marker.read_text("utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     return stamp if isinstance(stamp, dict) else None
 

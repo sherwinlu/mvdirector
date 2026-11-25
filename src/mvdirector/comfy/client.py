@@ -371,7 +371,7 @@ class _ComfyWsProgressListener:
             return
         try:
             msg = json.loads(payload.decode("utf-8"), parse_constant=_reject_json_constant)
-        except (UnicodeDecodeError, ValueError):
+        except (UnicodeDecodeError, ValueError, RecursionError):
             return
         if not isinstance(msg, dict):
             return
@@ -519,7 +519,7 @@ def _is_safe_comfy_path(filename: object, subfolder: object) -> bool:
 def _json_dict(response: httpx.Response, label: str) -> dict[str, Any]:
     try:
         data = response.json()
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         raise ComfyJobError(
             f"ComfyUI {label} returned non-JSON response: {response.text[:200]!r}"
         ) from exc

@@ -644,7 +644,8 @@ class LLMConfig(_Section):
                 "name your provider or server lists."
             )
         if self.provider == "openai_compatible" and not self.base_url:
-            env = _context_environ(info) or os.environ
+            ctx_env = _context_environ(info)
+            env = os.environ if ctx_env is None else ctx_env
             env_url = env.get("MVD_LLM_URL", "").strip()
             if env_url:
                 self.base_url = env_url

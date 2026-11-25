@@ -905,7 +905,8 @@ _NEGATED_PEOPLE_RE = re.compile(
     re.IGNORECASE,
 )
 _BROLL_PEOPLE_RE = re.compile(
-    r"\b(?:performers?|singers?|bartenders?|security|two\s+figures?|"
+    r"\b(?:performers?|singers?|bartenders?|security\s+(?:guards?|staff|officers?|personnel)|"
+    r"two\s+figures?|"
     r"(?:a\s+|the\s+)?(?:man|woman|girl|boy|person|couple)\s+(?:stands?|sits?|walks?|looks?|gazes?|stares?|dances?|sings?))\b",
     re.IGNORECASE,
 )

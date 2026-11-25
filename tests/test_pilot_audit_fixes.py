@@ -1172,3 +1172,89 @@ def test_comfy_client_rejects_non_http_and_malformed_base_urls():
     ):
         with pytest.raises(ConfigError):
             ComfyClient(ComfyConfig(base_url=bad_url))
+
+
+def test_inline_delivery_cue_does_not_rename_the_section():
+    parsed = lyrics_mod.parse_lyrics(
+        "[Verse 1]\nline a\n[whispered] line b\nline c\n[soft vocals] line d\n"
+        "[Whispered Bridge] line e\nline f\n[Chorus] line g\n[laughs] line h"
+    )
+    assert [(ln.text, ln.section) for ln in parsed] == [
+        ("line a", "Verse 1"),
+        ("line b", "Verse 1"),
+        ("line c", "Verse 1"),
+        ("line d", "Verse 1"),
+        ("line e", "Whispered Bridge"),
+        ("line f", "Whispered Bridge"),
+        ("line g", "Chorus"),
+        ("line h", "Chorus"),
+    ]
+    # A delivery cue before any header still leaves the line unsectioned.
+    assert [(ln.text, ln.section) for ln in lyrics_mod.parse_lyrics("[spoken] hey\nthere")] == [
+        ("hey", None),
+        ("there", None),
+    ]
+
+
+@pytest.mark.parametrize(
+    "style",
+    [
+        "Smoky jazz ballad with tenor sax and upright bass",
+        "Baritone saxophone riffs over a soul groove",
+        "Soprano-sax lead, brushed drums",
+    ],
+)
+def test_instrument_names_are_not_explicit_vocal_gender(style):
+    from types import SimpleNamespace
+
+    from mvdirector import tuning
+    from mvdirector.models import TimeSpan, VocalTurn
+
+    duet = SimpleNamespace(
+        duration=55.0,
+        lyric_lines=[],
+        vocal_windows=[TimeSpan(start=0.0, end=55.0)],
+        vocal_turns=[
+            VocalTurn(start=0.0, end=30.0, voice="voice_1"),
+            VocalTurn(start=30.0, end=55.0, voice="voice_2"),
+        ],
+    )
+    mode, _ = tuning._detect_vocal_mode(style, [], 20, duet)  # type: ignore[arg-type]
+    assert mode == "duet"
+    # A real vocal-range cue still pins a solo singer over the acoustic split.
+    solo_style = f"{style}, raspy baritone vocals"
+    mode, _ = tuning._detect_vocal_mode(solo_style, [], 20, duet)  # type: ignore[arg-type]
+    assert mode == "solo"
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "Close-up of a security camera blinking above the empty bar, no people.",
+        "A security light flickers over the wet alley.",
+        "Wide shot of the security gate at the loading dock.",
+    ],
+)
+def test_broll_security_objects_are_not_people(prompt):
+    assert not planner._broll_mentions_people(prompt, None, framing=Framing.WIDE)
+
+
+def test_broll_security_staff_are_people():
+    assert planner._broll_mentions_people(
+        "A security guard watches the club door.", None, framing=Framing.WIDE
+    )
+
+
+def test_inline_section_cue_with_singer_starts_section_and_swaps_singer():
+    parsed = lyrics_mod.parse_lyrics(
+        "[Verse 1: Singer 1]\na\n[Singer 2] b\nc\n[Verse 2: Singer 2] d\ne\n[Chorus]\n[Both] f\ng"
+    )
+    assert [(ln.text, ln.section) for ln in parsed] == [
+        ("a", "Verse 1: Singer 1"),
+        ("b", "Verse 1: Singer 2"),
+        ("c", "Verse 1: Singer 1"),
+        ("d", "Verse 2: Singer 2"),
+        ("e", "Verse 2: Singer 2"),
+        ("f", "Chorus: Both"),
+        ("g", "Chorus"),
+    ]

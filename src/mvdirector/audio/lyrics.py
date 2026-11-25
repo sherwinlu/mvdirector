@@ -1069,21 +1069,94 @@ _ARRANGEMENT_NOTE_WORDS = _NON_SINGER_CUE_WORDS | frozenset(
 )
 
 
-def _is_arrangement_note(tag: str) -> bool:
-    """True for Suno arrangement/production cues (e.g. '[Kick drops out]') under a header."""
-    if section_singers(tag) != set():
-        return False
+def _cue_head_words(tag: str) -> list[str]:
+    """Casefolded words of ``tag`` before any ``:`` or dash qualifier."""
     norm = unicodedata.normalize("NFKC", tag).translate(_HYPHEN_TRANS)
     head = norm.split(":", 1)[0]
     head = _DASH_SPLIT.split(head, maxsplit=1)[0]
     words = [re.sub(r"^[^\w]+|[^\w]+$", "", w.casefold()) for w in head.split()]
-    words = [w for w in words if w]
+    return [w for w in words if w]
+
+
+# Words ``_STRUCTURAL_SECTION_WORDS`` accepts that describe delivery rather than a song part.
+# Inline before a sung line ("[whispered] ...", "[soft vocals] ...") they must not open a section.
+_DELIVERY_CUE_WORDS = frozenset(
+    {
+        "whisper",
+        "whispered",
+        "spoken",
+        "hablado",
+        "parle",
+        "scream",
+        "soft",
+        "softly",
+        "gently",
+        "quiet",
+        "loud",
+        "calm",
+        "heavy",
+        "intense",
+        "emotional",
+        "fast",
+        "slow",
+        "high",
+        "low",
+        "melodic",
+        "melody",
+        "acapella",
+        "capella",
+        "acoustic",
+        "stripped",
+        "vocal",
+        "vocals",
+        "vox",
+        "backing",
+        "backup",
+        "lead",
+        "again",
+        "repeat",
+        "repeated",
+        "adlib",
+        "adlibs",
+        "ad-lib",
+        "ad-libs",
+        "in",
+        "out",
+        "up",
+        "down",
+    }
+)
+
+
+def _names_a_section(words: list[str]) -> bool:
+    """True when a cue starts like a song section (``Verse 2``, ``Final Chorus``)."""
     if not words:
         return False
-    first = words[0]
-    if _is_word_structural(first):
+    if _is_word_structural(words[0]):
+        return True
+    return words[0] in _SECTION_MODIFIER_WORDS and len(words) >= 2 and _is_word_structural(words[1])
+
+
+def _opens_section(cue: str) -> bool:
+    """True when an inline cue names a song part (``Verse 2``, ``Whispered Bridge``).
+
+    Leading modifiers and delivery words are skipped; the next word must be a structural word
+    that is not itself only a delivery cue, so ``[whispered] line`` keeps the current section.
+    """
+    for word in _cue_head_words(cue):
+        core = _strip_section_affixes(word)
+        if core in _DELIVERY_CUE_WORDS or core in _SECTION_MODIFIER_WORDS:
+            continue
+        return _is_word_structural(word)
+    return False
+
+
+def _is_arrangement_note(tag: str) -> bool:
+    """True for Suno arrangement/production cues (e.g. '[Kick drops out]') under a header."""
+    if section_singers(tag) != set():
         return False
-    if first in _SECTION_MODIFIER_WORDS and len(words) >= 2 and _is_word_structural(words[1]):
+    words = _cue_head_words(tag)
+    if _names_a_section(words):
         return False
     return len(words) >= 2 and any(w in _ARRANGEMENT_NOTE_WORDS for w in words)
 
@@ -1130,8 +1203,10 @@ def parse_lyrics(text: str) -> list[LyricLine]:
 
     Lines in parentheses are kept as lyrics (adlibs are sung and need timing too), while
     parenthetical Suno production/arrangement directions (e.g. ``(Strings swell, slow beat)``)
-    are stripped. Inline leading cues such as ``[female voice 1] line`` or ``[Verse 1] line``
-    are stripped from the sung text and attached to the active section label.
+    are stripped. Inline leading cues are stripped from the sung text: singer cues such as
+    ``[female voice 1] line`` are attached to the active section label, section names such as
+    ``[Verse 1] line`` start a new section, and delivery cues such as ``[whispered] line`` leave
+    the section unchanged.
     """
     lines: list[LyricLine] = []
     section: str | None = None
@@ -1160,11 +1235,15 @@ def parse_lyrics(text: str) -> list[LyricLine]:
             rest = inline.group(4).strip()
             if cue and rest:
                 line_text = rest
-                if section_singers(cue) != set():
-                    line_section = f"{section}: {cue}" if section else cue
-                elif not _is_arrangement_note(cue):
+                if _opens_section(cue):  # "[Verse 2] ..." or "[Verse 2: Singer 1] ..."
                     section = cue
                     line_section = cue
+                elif section_singers(cue) != set():
+                    # Swap any singer qualifier on the header ("Verse 1: Singer 1") for this one.
+                    base = section.split(":", 1)[0].strip() if section else ""
+                    line_section = f"{base}: {cue}" if base else cue
+                # Otherwise a delivery/production cue ("[whispered] ...", "[laughs] ..."):
+                # drop it from the sung text without renaming the surrounding section.
         line_text = _strip_production_parens(line_text)
         if not line_text or re.fullmatch(r"[\W_]+", line_text):
             continue

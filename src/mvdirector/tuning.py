@@ -493,12 +493,19 @@ def _measure_intensity_and_drops(analysis: Analysis | None) -> tuple[float | Non
 _VISUAL_SECTION_RE = re.compile(
     r"(?im)^\s*(?:\*{0,2})visual\s+(?:direction|context|brief|notes?)(?:\*{0,2})\s*:"
 )
+# Voice-range words also name instruments ("tenor sax", "baritone guitar"); not vocal cues.
+_NOT_AN_INSTRUMENT = (
+    r"(?![\s-]*(?:sax(?:ophone)?s?|guitars?|ukuleles?|ukes?|banjos?|horns?|trombones?|"
+    r"recorders?|clarinets?|flutes?|drums?|violins?)\b)"
+)
 _EXPLICIT_MALE_VOCAL_RE = re.compile(
-    r"\b(?:male\s+(?:lead\s+)?vocals?|male\s+singer|baritone|tenor|bass\s+vocal)\b",
+    r"\b(?:male\s+(?:lead\s+)?vocals?|male\s+singer|bass\s+vocal|"
+    rf"(?:baritone|tenor)\b{_NOT_AN_INSTRUMENT})",
     re.IGNORECASE,
 )
 _EXPLICIT_FEMALE_VOCAL_RE = re.compile(
-    r"\b(?:female\s+(?:lead\s+)?vocals?|female\s+singer|soprano|mezzo|contralto|alto\s+vocal)\b",
+    r"\b(?:female\s+(?:lead\s+)?vocals?|female\s+singer|alto\s+vocal|"
+    rf"(?:soprano|mezzo|contralto)\b{_NOT_AN_INSTRUMENT})",
     re.IGNORECASE,
 )
 

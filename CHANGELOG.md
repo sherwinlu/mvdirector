@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.8.0b3] - 2026-11-25
+
+Third **Beta** release, adding global exclusions, an explicit still-repair API, multi-angle set plates, multi-photo character seeding, a draft grid, and a sketch guide, plus b-roll cast matching and profile/hands reference routing fixes.
+
+### Added
+- **Motion-prompt hygiene & lived-in detail:** `SHOTS_SYSTEM` now keeps motion prompts to movement, acting and camera only; `BIBLE_SYSTEM`, `PLATE_TEMPLATE` and `PROP_TEMPLATE` add lived-in patina and wear cues.
+- **Global exclusions:** a `do_not_show` brief/config field propagates into `visual_bible.rules` and `visual_bible.negative_prompt`.
+- **Still repair API:** `api.repair_still()` and `api.regenerate_still(..., strategy="repair"|"recreate")` choose between editing a still in place and recreating it.
+- **Multi-angle set plates, multi-photo character seeding, draft grid and sketch guide:** seed photos are EXIF-orientation corrected and uploaded to ComfyUI as re-encoded, metadata-free copies; draft grid sheets clear stale review decisions when they replace a still or video; `lock_plate_turnaround` accepts `str` paths.
+
+### Fixed
+- B-roll cast guards match epithet names (`Corbin` matches `Corbin the Host`) without matching plain first names against common words.
+- Side-profile `PERFORMANCE` shots route to the profile panel, and hands-only close-up inserts skip `face.png` and MediaPipe face checks; wider shots that mention hands keep full face QC.
+- Draft close-ups no longer hard-fail `min_face_fraction` by one pixel of bounding-box quantization.
+- Rear-view detection matches plural phrasing (`backs turned`, `backs to camera`, `backs of heads`).
+- Six new-feature tests run without native MediaPipe so Linux CI passes.
+
 ## [0.8.0b2] - 2026-11-25
 
 Second **Beta** release, packing parallel wave execution, multi-reference R2V video & latent-refine upscale support, dual-panel character consistency, guided onboarding with `0600` project `.env` storage, and three rounds of pilot and QA/security hardening.

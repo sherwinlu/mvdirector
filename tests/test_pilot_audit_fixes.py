@@ -808,6 +808,15 @@ def test_rear_view_panel_routing_prefers_back_then_profile_and_avoids_face(tmp_p
     composed = prompts.compose_still_prompt(manifest, shot)
     assert "Camera behind subject (rear view)" in composed
 
+    # 4. Multi-character plural rear-view phrasing also triggers rear-view detection.
+    for phrase in (
+        "Elena, Sofia, and Mina stand in mid-ground with their backs turned to camera.",
+        "Both singers stand with their backs to the camera looking out the window.",
+        "Only the backs of their heads are visible as they walk down the hall.",
+    ):
+        assert prompts.is_rear_view_prompt(phrase), phrase
+    assert not prompts.is_rear_view_prompt("Nova faces the camera with her hair brushed back.")
+
 
 def test_tuning_ignores_visual_direction_costume_ensemble_and_respects_explicit_solo_gender():
     from mvdirector import tuning

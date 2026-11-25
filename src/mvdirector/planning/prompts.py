@@ -34,8 +34,8 @@ _STILL_WORDS_RE = re.compile(
 # Credit: afj176/open-cinema-studio (app/staging.py).
 _REAR_VIEW_RE = re.compile(
     r"\b(?:over[\s-]+(?:the[\s-]+)?(?:[a-z]+'s\s+)?shoulder|from\s+behind|rear\s+view|"
-    r"back\s+of\s+(?:their|his|her)\s+head|seen\s+from\s+behind|facing\s+away|"
-    r"back\s+to\s+(?:the\s+)?(?:camera|lens)|back\s+turned)\b",
+    r"backs?\s+of\s+(?:their|his|her)\s+heads?|seen\s+from\s+behind|facing\s+away|"
+    r"backs?\s+to\s+(?:the\s+)?(?:camera|lens)|backs?\s+turned)\b",
     re.IGNORECASE,
 )
 _FRONTAL_FACIAL_CLAUSE_RE = re.compile(

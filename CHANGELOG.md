@@ -6,12 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.8.0b2] - 2026-11-25
+
+Second **Beta** release, packing parallel wave execution, multi-reference R2V video & latent-refine upscale support, dual-panel character consistency, guided onboarding with `0600` project `.env` storage, and three rounds of pilot and QA/security hardening.
+
 ### Added
+- **Multi-Reference (R2V) Video Workflows & Two-Stage Latent-Refine Upscaling:**
+  - `ShotRunner` now uploads optional character and set plate references (`reference_image`, `reference_face`, `reference_profile`, `reference_three_quarter`, `reference_image_2`, …, `set_image`) on `lipsync` / `i2v` workflows when bound to distinct targets from `image`, annotates composed motion prompts in both `tags` (`@image2+`, after starting still `@image1`) and `prose` notation, and automatically prunes unbound optional `LoadImage` / `LoadAudio` nodes per shot.
+  - `mvd upscale` (`upscale_videos`) now forwards `negative_prompt` plus optional `audio` and `image` uploads for two-stage 3D latent upscaler + 1-step tiled refine graphs (with automatic pruning when unbound).
+  - Added starter placeholder bindings `r2v_audiolock_lipsync.bindings.json` and `latent_refine_upscale.bindings.json`, plus updated `docs/workflows.md` and `BIBLE_SYSTEM` defaults encouraging ordinary, relatable real-world people and physically shootable locations unless the style brief asks otherwise.
+- **Parallel Shot Execution (`comfy.max_concurrency`, `--concurrency`):**
+  - Parallelized `ShotRunner` dependency waves with per-worker client leasing (sharing the primary client for static endpoints so VRAM floor checks and reference uploads stay synchronized), thread-safe single-flight upload deduplication, atomic budget accounting, and cooperative cancellation slot refunds.
+- **Multi-Member & Dual-Panel Character Consistency:**
+  - Generalized `reference_image_N` bindings for bands/ensembles (`reference_image_2`, `reference_image_3`, …) with explicit `Picture N` prompt disambiguation.
+  - Solo shots on still workflows binding `reference_image_2` (without `reference_face`) now automatically route the singer's close-up `face` panel into `reference_image_2` (skipped on rear-view shots), paired with reference-sheet garment coverage checks in `VisionJudge`.
 - **Guided `mvd setup` Onboarding, Live Sanity Checks & Project-Scoped `.env`:**
   - Interactive `mvd setup` now supports provider-first LLM setup (accepting aliases like `chatgpt` and `claude`): when `ollama` is chosen and not running locally, it offers to install Ollama (via Homebrew on macOS or winget on Windows), start `ollama serve`, and pull the chosen model; when a cloud LLM is chosen, it skips Ollama, prompts (masked) for the API key if unset, and offers to save secrets to an owner-only (`0600`), gitignored `<project>/.env` file (or keep them shell-only).
-  - Project-scoped `.env` loading (`mvdirector.dotenv`) reads only allowlisted LLM/ComfyUI secret keys with `O_NOFOLLOW` symlink checks and a 64 KiB cap without mutating `os.environ`, and shell exports always take precedence.
+  - Project-scoped `.env` loading (`mvdirector.dotenv`) reads only allowlisted LLM/ComfyUI secret keys with `O_NOFOLLOW` symlink checks and a 64 KiB cap (enforced on both read and write) without mutating `os.environ`, and shell exports always take precedence.
   - Added `LLMQuotaError` (`LLMUnavailableError` subclass) to fail fast without wasted retries when a provider reports billing/quota exhaustion (`insufficient_quota`, `credit balance is too low`, HTTP `402`, etc.) and trip the vision QC circuit breaker cleanly.
-  - Interactive `mvd setup` (and `--non-interactive --verify`) now runs a live LLM JSON + vision sanity check (distinguishing invalid keys, quota limits, unknown models, and text-only models with interactive retry/switch recovery) and a ComfyUI `/object_info` + workflow wiring check (`api.check_comfy_wiring`).
+  - Interactive `mvd setup` (and `--non-interactive --verify`) runs a live LLM JSON + vision sanity check (distinguishing invalid keys, quota limits, unknown models, and text-only models with interactive retry/switch recovery), a ComfyUI `/object_info` + workflow wiring check (`api.check_comfy_wiring`), and auto-optimization (`optimize_setup_options`) that preserves hand-tuned keys on re-run.
+- **ComfyUI Live Progress Streaming & 1-Click Quality Knobs:**
+  - Added best-effort RFC 6455 WebSocket step progress streaming (`_ComfyWsProgressListener`, TLS 1.2 minimum, HTTP `/queue` fallback) in `ComfyClient` and opted-in `comfy.api_key_comfy_org` forwarding.
+  - Added `llm.stream` (SSE streaming for `openai` / `openai_compatible` backends to avoid proxy idle timeouts), `planning.vocals: solo` (locking singing shots to the protagonist), and `reference.closeup_face_panel` (preferring the macro face panel on close-ups for single-reference workflows), plus reference-image priority, video-scope calibration, and excess-flicker video QC scoring.
+
+### Fixed
+- **Audio, Lyrics, Planning & QC Hardening (Pilot Audit):**
+  - Hardened vocal diarization against splitting same-register solo vocals, surfaced acoustic vocal registers into casting cues, detected master mixes inside stem directories, fixed `mm:ss` rounding (`2:60`), stripped Suno production/inline delivery cues without corrupting section headers or instrument range words (`tenor sax`), and normalized romanization guides before language detection.
+  - Sent `think=False` to Ollama `/api/chat` with automatic fallback, added single-retry Gemini `thinkingBudget=1024` recovery when reasoning exhausts `MAX_TOKENS`, allowed nullable `inputs.vocals`/`inputs.lyrics`, coerced YAML `json_mode: off` (`False`), and hardened bare JSON list extraction (`_try_bare_list_for_schema`).
+  - Improved rear-view panel routing (`back` -> `profile` -> `front`), tight framing prose reconciliation, silhouette/non-human performance face-check handling, and raised b-roll MediaPipe face confidence to `0.80` to avoid object pareidolia.
+- **QA & Security Hardening (Rounds 2 & 3):**
+  - Validated `assemble` output paths before rendering (video suffix, non-directory, refusing to clobber project state/clips outside `output/`), capped `--width`/`--height` overrides at 8192, limited `clean --delete` strictly to generation files under `assets/`, preserved existing files on `mvd init` (and rejected broken symlinks), capped/sanitized review notes (2,000 chars, no NUL bytes), and failed fast on unknown shot IDs.
+  - Hardened MCP HTTP with a single-watchdog total read deadline, header-stage Host/Origin/Bearer precheck (case-insensitive `Bearer`), and body draining on rejection.
+  - Fixed O(N²) SSE line splitting and bounded non-200 error body reads (256 KiB) in `HttpJSON.post_sse`; guarded `redact_url`/`origin` on malformed IPv6 URLs; enforced `http`/`https` base URL validation in `ComfyClient` and rejected query/fragment strings in `setup.validate_http_url`.
+  - Fixed `LLMConfig` `environ={}` host-env isolation, rejected control characters in LLM API keys, rejected symlinked `project.yaml` in `setup`/`tuning`, loaded project `.env` during `tuning.apply_adjustments_to_yaml` validation, caught traversal workflow paths in `check_comfy_wiring`, ran preflight on video-only runs (`mvd videos`), and caught `RecursionError` on deeply nested JSON/YAML across LLM, ComfyUI, Ollama probes, setup, tuning, lock, and stamp parsers.
 
 ## [0.8.0b1] - 2026-11-22
 

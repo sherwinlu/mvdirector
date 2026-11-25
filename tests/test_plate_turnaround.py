@@ -29,9 +29,8 @@ from mvdirector.models import (
 )
 from mvdirector.planning import prompts
 from mvdirector.planning.planner import build_manifest
-from mvdirector.qc.factory import build_quality_gates
 from mvdirector.retry import RetryPolicy
-from tests.conftest import FakeComfy, write_workflows
+from tests.conftest import FakeComfy, offline_gates, write_workflows
 
 
 def _make_png_bytes(width: int, height: int, color: tuple[int, int, int] = (40, 80, 120)) -> bytes:
@@ -175,7 +174,7 @@ def test_plate_turnaround_generate_and_runner_angle_selection(
         project,
         manifest,
         comfy,
-        build_quality_gates(project.config, None),
+        offline_gates(project.config),
         RetryPolicy(project.config.retry, project.config.seed, llm=None),
         templates,
         RunBudget(10),

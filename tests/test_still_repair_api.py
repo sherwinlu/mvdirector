@@ -637,8 +637,16 @@ def test_api_generate_mix_mode_loads_still_for_pending_repair(
 
 
 def test_repair_still_budget_exceeded_preserves_existing_state_when_zero_attempts_run(
-    project, analysis, sample_png, sample_mp4
+    project, analysis, sample_png, sample_mp4, monkeypatch
 ) -> None:
+    # Avoid native MediaPipe (needs libEGL on Linux CI); no attempt runs, so QC is never used.
+    monkeypatch.setattr(
+        api,
+        "build_quality_gates",
+        lambda _config, _llm: QualityGates(
+            image=ScriptedGate([True]), video=ScriptedGate([True]), face_analyzer=None
+        ),
+    )
     project.config.llm.enabled = False
     project.config.retry.max_generations_per_run = 0
     manifest = build_manifest(project.config, analysis, "lyrics", "style", llm=None)

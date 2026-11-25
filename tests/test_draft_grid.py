@@ -22,9 +22,8 @@ from mvdirector.generation.runner import RunBudget, ShotRunner, load_templates
 from mvdirector.models import AssetStatus, CheckStatus, ReferenceSet, SetDesign, Shot
 from mvdirector.planning.planner import build_manifest
 from mvdirector.qc.common import dimensions_check
-from mvdirector.qc.factory import build_quality_gates
 from mvdirector.retry import RetryPolicy
-from tests.conftest import FakeComfy, needs_ffmpeg, write_workflows
+from tests.conftest import FakeComfy, needs_ffmpeg, offline_gates, write_workflows
 
 
 class _FakeProvider(StaticComfyProvider):
@@ -237,7 +236,7 @@ def test_draft_grid_path_b_r2v_multicut_and_runner_attachment(
         project,
         reloaded,
         comfy,
-        build_quality_gates(project.config, None),
+        offline_gates(project.config),
         RetryPolicy(project.config.retry, project.config.seed, llm=None),
         templates,
         RunBudget(5),

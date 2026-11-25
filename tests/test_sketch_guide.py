@@ -29,9 +29,8 @@ from mvdirector.planning.previz import (
     plan_previz,
     refine_previz,
 )
-from mvdirector.qc.factory import build_quality_gates
 from mvdirector.retry import RetryPolicy
-from tests.conftest import FakeComfy, write_workflows
+from tests.conftest import FakeComfy, offline_gates, write_workflows
 
 
 def _setup_singer_ref(project, manifest) -> None:
@@ -140,7 +139,7 @@ def test_sketch_runner_forwarding_tiers_and_repair_skip(
         project,
         manifest,
         comfy_t1,
-        build_quality_gates(project.config, None),
+        offline_gates(project.config),
         RetryPolicy(project.config.retry, project.config.seed, llm=None),
         templates_t1,
         RunBudget(5),
@@ -165,7 +164,7 @@ def test_sketch_runner_forwarding_tiers_and_repair_skip(
         project,
         manifest,
         comfy_repair,
-        build_quality_gates(project.config, None),
+        offline_gates(project.config),
         RetryPolicy(project.config.retry, project.config.seed, llm=None),
         templates_t1,
         RunBudget(5),
@@ -189,7 +188,7 @@ def test_sketch_runner_forwarding_tiers_and_repair_skip(
         project,
         manifest,
         ComfyClient(project.config.comfy, transport=fake_t3.transport(), sleep=lambda _: None),
-        build_quality_gates(project.config, None),
+        offline_gates(project.config),
         RetryPolicy(project.config.retry, project.config.seed, llm=None),
         templates_t3,
         RunBudget(5),
@@ -267,7 +266,7 @@ def test_broll_sketch_prose_prompt_includes_sketch_instruction_without_guidance(
         project,
         manifest,
         ComfyClient(project.config.comfy, transport=fake.transport(), sleep=lambda _: None),
-        build_quality_gates(project.config, None),
+        offline_gates(project.config),
         RetryPolicy(project.config.retry, project.config.seed, llm=None),
         templates,
         RunBudget(5),

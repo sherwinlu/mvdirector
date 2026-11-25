@@ -27,6 +27,9 @@ from mvdirector.config import ProjectConfig
 from mvdirector.errors import ConfigError, ProjectLocked
 from mvdirector.models import Analysis, LyricLine, Manifest, TimeSpan
 from mvdirector.project import Project
+from mvdirector.qc.factory import QualityGates
+from mvdirector.qc.image import ImageQC
+from mvdirector.qc.video import VideoQC
 
 SR = 22050
 BPM = 120.0
@@ -213,6 +216,19 @@ def sample_mp4(tmp_path_factory: pytest.TempPathFactory) -> bytes:
         check=True,
     )
     return path.read_bytes()
+
+
+def offline_gates(config: ProjectConfig) -> QualityGates:
+    """Real image/video QC without the native MediaPipe backends.
+
+    ``build_quality_gates`` loads MediaPipe, which needs libEGL on Linux; CI runners lack it, so
+    tests that only need QC wiring use these gates (face checks are recorded as skipped).
+    """
+    return QualityGates(
+        image=ImageQC(config.qc, config.video, None, None),
+        video=VideoQC(config.qc, config.video, None, None, None),
+        face_analyzer=None,
+    )
 
 
 class FakeComfy:

@@ -23,9 +23,8 @@ from mvdirector.generation.runner import RunBudget, ShotRunner, load_templates
 from mvdirector.models import Character, ShotType
 from mvdirector.planning import prompts
 from mvdirector.planning.planner import build_manifest
-from mvdirector.qc.factory import build_quality_gates
 from mvdirector.retry import RetryPolicy
-from tests.conftest import FakeComfy, write_workflows
+from tests.conftest import FakeComfy, offline_gates, write_workflows
 
 
 class _FakeProvider(StaticComfyProvider):
@@ -137,7 +136,7 @@ def test_seed_from_photos_direct_mode_multi_photo_and_rear_view(
         project,
         reloaded,
         comfy,
-        build_quality_gates(project.config, None),
+        offline_gates(project.config),
         RetryPolicy(project.config.retry, project.config.seed, llm=None),
         templates,
         RunBudget(5),

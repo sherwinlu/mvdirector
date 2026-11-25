@@ -74,6 +74,22 @@ _SILHOUETTE_RE = re.compile(
     r"silhouetted\s+(?:against|in|by))\b",
     re.IGNORECASE,
 )
+_PROFILE_VIEW_RE = re.compile(
+    r"(?<!three[- ]quarter\s)(?<!3/4\s)(?<!low\s)\b(?:"
+    r"in\s+(?:strict\s+|full\s+|sharp\s+)?side\s+profile|"
+    r"in\s+(?:strict\s+|full\s+|sharp\s+)?profile|"
+    r"side\s+profile|profile\s+(?:view|shot|angle|portrait))\b",
+    re.IGNORECASE,
+)
+_HANDS_DETAIL_RE = re.compile(
+    r"\b(?:hands?|fingers?|fingertips?|wrists?|palms?|knuckles?)\b",
+    re.IGNORECASE,
+)
+_HANDS_DETAIL_EXCLUDE_RE = re.compile(
+    r"\b(?:face|facial|eyes?|eyebrows?|brows?|lips?|mouth|jaw|jawline|cheeks?|forehead|chin|"
+    r"nose|gaze|gazing|portrait|head[\s-]+and[\s-]+shoulders|singing|smiles?|smiling)\b",
+    re.IGNORECASE,
+)
 
 
 def strip_still_words(motion_text: str) -> str:
@@ -95,6 +111,16 @@ def is_rear_view_prompt(text: str) -> bool:
 def is_silhouette_prompt(text: str) -> bool:
     """True when ``text`` explicitly stages the subject as a backlit/dark silhouette."""
     return bool(_SILHOUETTE_RE.search(text))
+
+
+def is_profile_view_prompt(text: str) -> bool:
+    """True when ``text`` explicitly stages the subject in side profile."""
+    return bool(_PROFILE_VIEW_RE.search(text))
+
+
+def is_hands_detail_prompt(text: str) -> bool:
+    """True when ``text`` is a hands/fingers-only insert shot with no face/portrait cues."""
+    return bool(_HANDS_DETAIL_RE.search(text)) and not bool(_HANDS_DETAIL_EXCLUDE_RE.search(text))
 
 
 def scrub_frontal_facial_details(description: str) -> str:

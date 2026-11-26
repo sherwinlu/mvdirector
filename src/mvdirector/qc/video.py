@@ -35,6 +35,39 @@ from mvdirector.qc.vision import VisionJudge
 log = logging.getLogger(__name__)
 
 _MOTION_SIDE = 64
+_STATIC_DETAIL = "clip is almost static"
+
+
+def _waive_static_for_passing_lipsync(checks: list[CheckResult]) -> list[CheckResult]:
+    """Accept a near-static singing clip when its lip-sync check passed.
+
+    In a lip-sync close-up the mouth is most of the motion, so whole-frame motion sits right at
+    ``static_max_motion``; clips with strong lip-sync (correlation 0.8) were retried as "almost
+    static". A truly frozen clip still fails, because a frozen mouth fails the lip-sync check.
+    """
+    sync = next((c for c in checks if c.name == "lipsync"), None)
+    if sync is None or sync.status is not CheckStatus.PASSED:
+        return checks
+    waived: list[CheckResult] = []
+    for check in checks:
+        if (
+            check.name == "temporal"
+            and check.status is CheckStatus.FAILED
+            and check.detail == _STATIC_DETAIL
+        ):
+            waived.append(
+                CheckResult(
+                    name="temporal",
+                    status=CheckStatus.PASSED,
+                    hard=False,
+                    score=None,
+                    detail="near-static framing accepted: the mouth movement passed lip-sync",
+                    metrics={**check.metrics, "static_waived": 1.0},
+                )
+            )
+        else:
+            waived.append(check)
+    return waived
 
 
 def frame_differences(frames: list[np.ndarray]) -> np.ndarray:
@@ -97,6 +130,7 @@ class VideoQC:
             checks.append(self._beat_motion_check(frames, fps, beat_times))
         if shot.type is ShotType.LIPSYNC:
             checks += self._lipsync_checks(frames, fps, shot, manifest, audio_slice)
+            checks = _waive_static_for_passing_lipsync(checks)
         if shot.type.shows_singer:
             checks.append(self._identity_check(frames, fps, reference))
         checks += vision_checks(
@@ -225,7 +259,7 @@ class VideoQC:
                     status=CheckStatus.FAILED,
                     hard=True,
                     score=0.0,
-                    detail="clip is almost static",
+                    detail=_STATIC_DETAIL,
                     metrics=metrics,
                     fix_hint="Describe clear, continuous motion of the singer and the camera.",
                 )

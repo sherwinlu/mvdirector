@@ -1355,6 +1355,18 @@ class ShotRunner:
         still_path = self._project.path(still.path)
         clip_duration = round(shot.audio_slice.end - shot.audio_slice.start, 3)
         template = self._video_template(shot)
+        gen_fps = (
+            video.i2v_fps
+            if (
+                shot.type is not ShotType.LIPSYNC
+                and video.i2v_fps is not None
+                and video.i2v_fps < video.fps
+            )
+            else video.fps
+        )
+        gen_frames = (
+            max(1, int(round(clip_duration * gen_fps))) if gen_fps != video.fps else shot.num_frames
+        )
         params: dict[str, Any] = {
             "positive_prompt": attempt.prompt,
             "negative_prompt": prompts.merge_negative_prompt(
@@ -1366,9 +1378,9 @@ class ShotRunner:
             "image": self._upload(still_path, client=client),
             "width": width,
             "height": height,
-            "num_frames": shot.num_frames,
+            "num_frames": gen_frames,
             "duration": clip_duration,
-            "fps": video.fps,
+            "fps": gen_fps,
             **attempt.params,
         }
         for param, _, ref_path in video_refs or ():

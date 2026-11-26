@@ -321,10 +321,16 @@ as id='sakura' with name='さくら').
     under SONG SECTIONS (do not invent or rename sections), each with:
     - section: exact section name from SONG SECTIONS.
     - emotion: the emotional state or shift in this section.
-    - visual_beat: what happens visually or narratively here to express the lyrics and music.
+    - visual_beat: what happens visually or narratively here to express the lyrics and music,
+      including how light, contrast, and color temperature shift with the section's energy.
     - camera_energy: how shot scale, pacing, and performance intensity should feel here.
 - concept: two to four sentences on the visual idea that ties the video together, grounded directly
-  in 'interpretation' (meaning, tone, music_feel, and visual_motifs).
+  in 'interpretation' (meaning, tone, music_feel, and visual_motifs). Weave three threads through
+  the video rather than illustrating it lyric by lyric: a grounded performance anchor (the
+  performers in one or two primary performance spaces alongside the remaining story/cutaway sets),
+  a wordless story or metaphor thread with its own physical cause and effect that carries the
+  song's emotional subtext, and tactile sensory cutaways (texture, light, hands, weather) used as
+  rhythmic punctuation.
 - characters: every distinct singer, vocalist, or on-camera band/group member indicated by the
   style brief, section headers, or lyrics (one entry for a solo track; two for a duet; one per
   member or named character for a band, group, or theatrical piece). Match every character's gender
@@ -440,18 +446,26 @@ Rules:
 - Shots given as 'broll' are cutaways: the vocal plays over them and no singer is shown. Keep
   them 'broll', with character and wardrobe null. NEVER place any named cast member, singer, or
   recognizable close-up human face in a 'broll' shot (any shot featuring a named character or
-  prominent person MUST be 'performance', not 'broll'). Show what the lyric is about: objects,
-  architecture, light, weather, props, inanimate figurines, or—when the setting genuinely calls
+  prominent person MUST be 'performance', not 'broll'). Show the feeling or subtext behind the
+  lyric rather than its literal nouns (a lyric about time running out becomes a half-packed
+  suitcase by the door, not a giant hourglass), using objects, architecture, light, weather, props,
+  inanimate figurines, or—when the setting genuinely calls
   for atmosphere (such as a club or concert)—anonymous distant backlit silhouettes, blurred
   background crowd motion, or hands-only detail inserts with no recognizable faces. Keep the main
   subject sharply in focus (never ask for a completely out-of-focus or blurry whole frame). Still
   give every shot a framing (close_up, medium_close, medium or wide): never null, even on a
   cutaway.
 - Match detail to shot size on BOTH singer shots and 'broll' cutaways. Small details (identifying
-  marks, jewelry, cuffs, clock hands, inscriptions, small props, screen content) belong in
-  close_up or medium_close shots only; never ask for tiny altered object parts in a wide shot. In
+  marks, jewelry, cuffs, fabric texture, small props) belong in close_up or medium_close shots
+  only; never ask for tiny altered object parts in a wide shot. In
   medium and wide shots, describe pose, silhouette, scale against architecture, and action, not
   fine detail.
+- Keep every shot within what AI video models render reliably: one primary subject action and at
+  most one camera move per shot. On close_up shots keep the camera static or on a slow push-in or
+  pull-back (never an orbit, crane, whip pan, or zoom). Unless the song specifically needs them,
+  avoid mirrors or reflections of performers, readable text (signs, screens, clock faces, pages),
+  objects passed from hand to hand, full-body spins, and people or objects crossing in front of
+  the singer's face.
 - State absences affirmatively: image models often draw nouns named after 'no' (e.g. 'no minute
   hand' draws a minute hand). Whenever a part is missing or excluded, describe what IS visibly
   present in its place (e.g. 'clock dial displaying only a single short hour hand on a bare brass
@@ -467,9 +481,17 @@ Rules:
   rather than literally illustrating isolated lyric words.
 - Use the position in the song and the section to shape energy: build tension toward
   choruses, release in them, hold still where the song is stripped back. Match energy to
-  intensity (0 calm to 1 peak).
+  intensity (0 calm to 1 peak). In the last shots before a chorus or drop, tighten the framing and
+  add movement in the frame; land the first shot of the chorus or drop on the section's most
+  striking, open frame.
 - Vary framing between neighbouring shots, and stay consistent with the shots already directed.
-- Shape the video like the song. First verse: restrained, one look. First chorus: the first
+- Eye trace: across short neighbouring shots (under about 2.5 seconds), keep the main subject in
+  roughly the same part of the frame while changing shot scale, so the eye lands without
+  searching. When cutting on movement, keep the direction of movement or camera travel the same
+  across the cut.
+- Shape the video like the song. Open on a striking, specific image in the very first shot (a
+  strong silhouette, a face in dramatic light, a telling detail) rather than a slow empty
+  establishing pan. First verse: restrained, one look. First chorus: the first
   escalation, so change the set, the framing or the light from the verse. Second verse: never a
   repeat of the first; add a complication (a new angle, set, prop or costume beat). Bridge: break
   the pattern of the shots before it (a different set, light or pace). Final chorus: the payoff,

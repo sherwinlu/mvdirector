@@ -432,12 +432,13 @@ Rules:
   'lipsync' shots, keep the singer's mouth relaxed, softly closed, or barely parted (never
   wide-open mid-scream) so audio-driven lip-sync models animate naturally from the vocal track
   and performance fallbacks stay consistent.
-- Character close_up framing: frame head-and-shoulders or the full face (forehead to chin) with
-  both eyes and mouth clearly inside the frame. Never ask for extreme mouth-only or eye-only
-  macros on character shots, which crop off the head and break face framing checks. On close_up
-  and medium_close shots, describe ONLY face, neck, shoulders, upper torso, and raised hands—never
-  mention boots, shoes, feet, legs, lower skirt hems, or ground/floor at their feet, and never
-  write 'waist up' or 'medium shot' for a medium_close shot.
+- Character close_up framing: frame from the chin to the collarbone so the face fills at least a
+  third of the frame height, with both eyes and mouth clearly inside the frame. Never write
+  "from the chest up" or "upper chest up" for close_up; that is medium_close. Never ask for
+  extreme mouth-only or eye-only macros on character shots, which crop off the head and break
+  face framing checks. On close_up and medium_close shots, describe ONLY face, neck, shoulders,
+  upper torso, and raised hands—never mention boots, shoes, feet, legs, lower skirt hems, or
+  ground/floor at their feet, and never write 'waist up' or 'medium shot' for a medium_close shot.
 - Shots given as 'performance' have no vocals. Keep them as 'performance' (performer visibly on
   camera, not singing) or change them to 'broll' (no performer) where a cutaway serves the song,
   without putting more than two 'broll' shots in a row. Never leave type as 'performance' if
@@ -893,6 +894,12 @@ PLATE_NOTE = (
     "The first reference image shows the singer: keep the same face, hair and costume. The second "
     "reference image shows the location: place the singer in that location and match its layout, "
     "lighting and color grade exactly."
+)
+#: Prepended to every close-up still of a singer. Sized to clear qc.image.min_face_fraction
+#: for close_up (0.30) with margin.
+CLOSE_UP_SIZE_ANCHOR = (
+    "Tight close-up portrait: the face fills at least a third of the frame height, framed from "
+    "just above the head to the collarbone (not chest-up)."
 )
 CAMERA_PLACEMENT_NOTE = (
     "Camera positioned in open floor space at human eye height; no solid furniture intersecting "
@@ -1509,11 +1516,18 @@ def compose_still_prompt(
     bible = manifest.visual_bible
     raw_still = (shot.still.prompt_override or shot.still_prompt).strip()
     parts: list[str] = []
-    if shot.type.shows_singer and not _EXPLICIT_TIGHT_FRAMING_RE.search(raw_still):
-        if shot.framing is Framing.CLOSE_UP:
-            parts.append("Tight head-and-shoulders close-up portrait (face large in frame).")
-        elif shot.framing is Framing.MEDIUM_CLOSE:
-            parts.append("Chest-up medium close-up shot (head and upper chest fill frame).")
+    if shot.type.shows_singer and shot.framing is Framing.CLOSE_UP:
+        # Always, even when the planner's prompt already says "close-up": image models read a
+        # bare "close-up" (often "from the upper chest up") as chest-up, and the face lands at
+        # ~26% of frame height against face_framing's 30% minimum. A concrete size cue fixed
+        # every such failure when the retry rewrite added it, so put it in the first take.
+        parts.append(CLOSE_UP_SIZE_ANCHOR)
+    elif (
+        shot.type.shows_singer
+        and shot.framing is Framing.MEDIUM_CLOSE
+        and not _EXPLICIT_TIGHT_FRAMING_RE.search(raw_still)
+    ):
+        parts.append("Chest-up medium close-up shot (head and upper chest fill frame).")
     parts.append(raw_still)
     scene = bible.find_set(shot.setting)
     ref_note = _still_reference_note(plate_attached, reference_notation, bound_references)

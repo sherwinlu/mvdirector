@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+- **Fewer close-up still retries:** every close-up still of a singer now starts with a concrete size cue ("the face fills at least a third of the frame height, framed from just above the head to the collarbone"), even when the planner's prompt already says "close-up". Before, the cue was skipped whenever the prompt contained "close-up", and image models read a bare close-up as chest-up: in a 92-shot project 17 of 26 close-ups failed `face_framing` (median face 26% vs the 30% minimum) and needed a retry. The planner's shot instructions now define close_up by size and rule out "upper chest up".
+- **Near-static lip-sync clips are no longer retried:** in a singing close-up the mouth is most of the motion, so clips with strong lip-sync (correlation 0.8) failed `temporal` as "almost static" by a hair. When the lip-sync check passes, the static result is accepted (non-hard, unscored, `static_waived` in its metrics); a frozen clip still fails lip-sync.
+
 ## [0.8.0b3] - 2026-11-25
 
 Third **Beta** release, adding global exclusions, an explicit still-repair API, multi-angle set plates, multi-photo character seeding, a draft grid, and a sketch guide, plus b-roll cast matching and profile/hands reference routing fixes.

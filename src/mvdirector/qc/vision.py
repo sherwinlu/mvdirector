@@ -185,6 +185,29 @@ class VisionVerdict(BaseModel):
     fix: str = ""
 
 
+class FaceIdentityVerdict(BaseModel):
+    """A face-only identity comparison: is the cropped face the reference person?"""
+
+    model_config = ConfigDict(extra="ignore")
+    same_person: float = Field(ge=0.0, le=1.0)
+    reason: str = ""
+
+
+_FACE_IDENTITY_SYSTEM = """\
+You compare faces for identity only, like a casting director checking continuity.
+
+You get one or more REFERENCE images of a character's face, then one FACE TO CHECK cropped from a
+generated image. Decide whether the face to check is the same person as the reference.
+
+Judge only stable facial structure: overall face shape, eye shape and spacing, brow line, nose
+shape, lips, jaw and chin, cheekbones, and permanent marks such as freckles or moles. Ignore
+everything that can change between shots: clothing, hair styling, makeup intensity, lighting,
+color grade, expression, mouth shape (the person may be singing), head angle, and image quality.
+
+Return same_person from 0 to 1: 1.0 = clearly the same person, 0.5 = cannot tell, 0.0 = clearly a
+different person. Give a one-sentence reason naming the features you compared."""
+
+
 MAX_UNAVAILABLE_IN_A_ROW = 3
 
 
@@ -232,6 +255,24 @@ class VisionJudge:
             f"(last error: {error})"
         )
         return True
+
+    def judge_face_identity(
+        self, face: np.ndarray, reference_faces: list[Path]
+    ) -> FaceIdentityVerdict:
+        """Compare a face crop with the character's reference face panels (identity only).
+
+        The face-only crop matters: given whole images, the model weighs costume as heavily as
+        the face, so a different person in a matching outfit scores as a near-match.
+        """
+        content = []
+        for path in reference_faces:
+            content += [text_block("REFERENCE face:"), image_block(path)]
+        content += [text_block("FACE TO CHECK:"), image_block(face)]
+        verdict = self._llm.complete_json(
+            system=_FACE_IDENTITY_SYSTEM, content=content, schema=FaceIdentityVerdict
+        )
+        self.record_success()
+        return verdict
 
     def judge(
         self,

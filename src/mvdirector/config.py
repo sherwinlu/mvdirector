@@ -803,6 +803,12 @@ class ImageQCConfig(_Section):
     sharpness_good: float = 150.0
     identity_hard_min: float = 0.30
     identity_good: float = 0.55
+    # Vision identity (used when the face backend has no embeddings, e.g. MediaPipe): the
+    # model's 0-1 "same person" verdict on a face crop. Smaller faces are skipped because a
+    # different person in the same costume reads as a match at that size.
+    vision_identity_min_face_px: int = Field(default=100, ge=16)
+    vision_identity_hard_min: float = Field(default=0.50, ge=0.0, le=1.0)
+    vision_identity_good: float = Field(default=0.80, ge=0.0, le=1.0)
     # Minimum and maximum face height as a share of frame height, per framing.
     min_face_fraction: dict[Framing, float] = Field(
         default_factory=lambda: {
@@ -873,6 +879,12 @@ class VideoQCConfig(_Section):
     identity_sample_seconds: float = 0.5
     identity_hard_min: float = 0.25
     identity_good: float = 0.50
+    # Vision identity for clips (see ImageQCConfig): frames sampled across the clip, each
+    # judged on its largest faces; the median verdict is scored.
+    vision_identity_frames: int = Field(default=2, ge=1, le=8)
+    vision_identity_min_face_px: int = Field(default=100, ge=16)
+    vision_identity_hard_min: float = Field(default=0.50, ge=0.0, le=1.0)
+    vision_identity_good: float = Field(default=0.80, ge=0.0, le=1.0)
     # Mean absolute frame-to-frame difference, 0-1.
     static_max_motion: float = 0.0008
     jump_cut_threshold: float = 0.25
@@ -887,6 +899,15 @@ class VideoQCConfig(_Section):
 class QCConfig(_Section):
     pass_score: float = 0.70
     vision_enabled: bool = True
+    vision_identity: bool = Field(
+        default=True,
+        description=(
+            "When the face backend has no identity embeddings (MediaPipe), check identity by "
+            "asking the vision model whether a face crop matches the reference sheet's face "
+            "panels. One extra model call per still or clip with a large enough face. Needs "
+            "vision_enabled."
+        ),
+    )
     vision_blind_observer: bool = Field(
         default=False,
         description=(

@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+- **Vision identity check:** with a face backend that has no identity embeddings (the default MediaPipe), the `identity` check no longer always skips. The vision model compares a crop of the singer's face with the reference sheet's face and three-quarter panels, judging facial structure only, not costume, hair or lighting. Faces under `qc.image.vision_identity_min_face_px` (default 100) are skipped as too small to judge; duets score their best-matching face; clips use the median over `qc.video.vision_identity_frames` sampled frames. Hard-fails below `vision_identity_hard_min` (0.50). One extra model call per still or clip with a large enough face; turn off with `qc.vision_identity: false`. InsightFace embedding identity is unchanged.
+
 ## [0.8.0b3] - 2026-11-25
 
 Third **Beta** release, adding global exclusions, an explicit still-repair API, multi-angle set plates, multi-photo character seeding, a draft grid, and a sketch guide, plus b-roll cast matching and profile/hands reference routing fixes.

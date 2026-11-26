@@ -11,7 +11,7 @@ import os
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import numpy as np
@@ -25,6 +25,9 @@ from mvdirector.errors import (
 from mvdirector.models import AssetKind, CheckResult, CheckStatus, Manifest, Shot
 from mvdirector.qc.scoring import linear_score, skipped
 from mvdirector.qc.vision import VisionJudge
+
+if TYPE_CHECKING:  # faces.py imports this module, so only import its types for checking
+    from mvdirector.qc.faces import Face, IdentityReference
 
 log = logging.getLogger(__name__)
 
@@ -157,6 +160,105 @@ def dimensions_check(
         if ok
         else f"got {width}x{height}, expected about {expected_width}x{expected_height}",
         metrics={"width": width, "height": height},
+    )
+
+
+#: Faces compared per frame by the vision identity check (largest first); covers duets.
+_VISION_IDENTITY_MAX_FACES = 2
+#: Reference panels sent with each comparison (face panel first, then an angled view).
+_VISION_IDENTITY_MAX_REFERENCES = 2
+
+
+def crop_face(image: np.ndarray, bbox: tuple[int, int, int, int], pad: float = 0.35) -> np.ndarray:
+    """The face box with some forehead, chin and ear context, clamped to the frame."""
+    x1, y1, x2, y2 = bbox
+    height, width = image.shape[:2]
+    margin = int(round((y2 - y1) * pad))
+    return image[
+        max(0, y1 - margin) : min(height, y2 + margin),
+        max(0, x1 - margin) : min(width, x2 + margin),
+    ]
+
+
+def vision_identity_check(
+    judge: VisionJudge | None,
+    samples: list[tuple[np.ndarray, list[Face]]],
+    reference: IdentityReference | None,
+    *,
+    min_face_px: int,
+    hard_min: float,
+    good: float,
+) -> CheckResult:
+    """Identity from face crops judged by the vision model, for face backends without embeddings.
+
+    ``samples`` are frames with their detected faces (one frame for a still, a few for a clip).
+    Each frame scores its best-matching face, so a duet partner does not fail the check; frames
+    are combined by the median, which tolerates one turned-away frame. Faces under
+    ``min_face_px`` tall are not judged: at that size a different person in the same costume
+    reads as a match.
+    """
+    if judge is None or reference is None:
+        return skipped("identity", "no face embeddings and no vision model to compare faces")
+    if judge.disabled_reason:
+        return skipped("identity", judge.disabled_reason)
+    refs = [path for path in reference.paths if path.is_file()][:_VISION_IDENTITY_MAX_REFERENCES]
+    if not refs:
+        return skipped("identity", "reference face image unavailable")
+    judgeable: list[tuple[np.ndarray, list[Face]]] = []
+    largest_px = 0
+    for frame, faces in samples:
+        heights = [(f, f.bbox[3] - f.bbox[1]) for f in faces if f.bbox is not None]
+        largest_px = max([largest_px] + [h for _, h in heights])
+        sized = [f for f, h in heights if h >= min_face_px]
+        if sized:
+            judgeable.append((frame, sized[:_VISION_IDENTITY_MAX_FACES]))
+    if not judgeable:
+        return skipped(
+            "identity",
+            f"face too small to judge identity ({largest_px}px tall; needs {min_face_px}px)",
+        )
+    frame_scores: list[float] = []
+    reasons: list[str] = []
+    for frame, faces in judgeable:
+        best: tuple[float, str] | None = None
+        for face in faces:
+            if face.bbox is None:
+                continue
+            try:
+                verdict = judge.judge_face_identity(crop_face(frame, face.bbox), refs)
+            except ImagesNotSupportedError as exc:
+                reason = f"the model does not accept images ({exc})"
+                judge.disable(reason)
+                return skipped("identity", reason)
+            except LLMError as exc:
+                # A flaky judge must not block the pipeline; the other checks still apply.
+                log.warning("Vision identity check failed: %s", exc)
+                if isinstance(exc, LLMUnavailableError):
+                    judge.record_unavailable(str(exc))
+                return skipped("identity", f"vision identity check errored: {exc}")
+            if best is None or verdict.same_person > best[0]:
+                best = (verdict.same_person, verdict.reason)
+        if best is not None:
+            frame_scores.append(best[0])
+            reasons.append(best[1])
+    if not frame_scores:
+        return skipped("identity", "no face available to compare")
+    score = float(np.median(frame_scores))
+    failed = score < hard_min
+    worst_reason = reasons[int(np.argmin(frame_scores))]
+    return CheckResult(
+        name="identity",
+        status=CheckStatus.FAILED if failed else CheckStatus.PASSED,
+        hard=True,
+        score=linear_score(score, hard_min, good),
+        detail=f"face match to reference {score:.2f} (vision): {worst_reason}" if failed else "",
+        fix_hint=(
+            "Keep the singer's face matching the reference sheet: same face shape, eyes, brows, "
+            "nose and jaw; avoid extreme angles or anything covering the face."
+        )
+        if failed
+        else None,
+        metrics={"vision_identity": round(score, 4), "frames_judged": float(len(frame_scores))},
     )
 
 

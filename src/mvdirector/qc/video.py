@@ -27,8 +27,13 @@ from mvdirector.models import (
 )
 from mvdirector.qc import continuity as continuity_mod
 from mvdirector.qc import lipsync
-from mvdirector.qc.common import dimensions_check, identity_check, vision_checks
-from mvdirector.qc.faces import FaceAnalyzer, IdentityReference, MouthTracker
+from mvdirector.qc.common import (
+    dimensions_check,
+    identity_check,
+    vision_checks,
+    vision_identity_check,
+)
+from mvdirector.qc.faces import Face, FaceAnalyzer, IdentityReference, MouthTracker
 from mvdirector.qc.scoring import aggregate, linear_score, skipped
 from mvdirector.qc.vision import VisionJudge
 
@@ -478,7 +483,35 @@ class VideoQC:
                     similarities.append(max(sims))
         # The median tolerates a few turned-away frames but catches real identity drift.
         similarity = float(np.median(similarities)) if similarities else None
+        if similarity is None and self._qc.vision_identity:
+            # No embeddings (MediaPipe): the vision model compares face crops from a few frames.
+            return vision_identity_check(
+                self._vision,
+                self._vision_identity_samples(frames),
+                reference,
+                min_face_px=self._cfg.vision_identity_min_face_px,
+                hard_min=self._cfg.vision_identity_hard_min,
+                good=self._cfg.vision_identity_good,
+            )
         return identity_check(similarity, self._cfg.identity_hard_min, self._cfg.identity_good)
+
+    def _vision_identity_samples(
+        self, frames: list[np.ndarray]
+    ) -> list[tuple[np.ndarray, list[Face]]]:
+        """Evenly spaced frames (away from the very first and last) that contain a face."""
+        if self._faces is None or not frames:
+            return []
+        count = self._cfg.vision_identity_frames
+        if len(frames) > 2:
+            positions = np.linspace(0, len(frames) - 1, num=count + 2)[1:-1]
+        else:
+            positions = np.array([0.0])
+        samples: list[tuple[np.ndarray, list[Face]]] = []
+        for index in sorted({int(round(float(p))) for p in positions}):
+            faces = self._faces.faces(frames[index])
+            if faces:
+                samples.append((frames[index], faces))
+        return samples
 
     @staticmethod
     def _sample(frames: list[np.ndarray], count: int) -> list[Path | np.ndarray]:

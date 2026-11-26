@@ -287,6 +287,13 @@ class VideoConfig(_Section):
         ),
     )
     fps: int = Field(default=24, ge=1)
+    i2v_fps: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Optional lower generation FPS for non-lipsync I2V shots (e.g. 12 fps before 2x VFI)."
+        ),
+    )
     max_clip_seconds: float = Field(default=8.0, gt=0.0, allow_inf_nan=False)
     min_clip_seconds: float = Field(default=1.5, gt=0.0, allow_inf_nan=False)
     handle_seconds: float = Field(

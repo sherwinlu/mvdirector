@@ -607,7 +607,14 @@ def _timed_shots(
     config: ProjectConfig, analysis: Analysis, *, snap_sections: bool = False
 ) -> list[Shot]:
     video, video_style, shots = config.video, config.planning.video_style, []
-    for index, seg in enumerate(segment(analysis, video, snap_sections=snap_sections)):
+    for index, seg in enumerate(
+        segment(
+            analysis,
+            video,
+            snap_sections=snap_sections,
+            pacing_plugin=config.plugins.pacing,
+        )
+    ):
         shot_id = f"s{index + 1:03d}"
         slice_start = max(0.0, seg.start - video.handle_seconds)
         slice_end = min(analysis.duration, seg.end + video.handle_seconds)

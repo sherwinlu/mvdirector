@@ -7,13 +7,14 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
 from PIL import Image
 
-from mvdirector import media
+from mvdirector import media, plugins
 from mvdirector.config import QCConfig, VideoConfig
 from mvdirector.errors import MediaToolError
 from mvdirector.models import (
@@ -59,6 +60,7 @@ class VideoQC:
         mouth_tracker: MouthTracker | None,
         vision: VisionJudge | None,
         lipsync_scorer: lipsync.LipSyncScorer | None = None,
+        qc_check_plugins: Sequence[str] = (),
     ) -> None:
         self._qc = qc
         self._cfg = qc.video
@@ -67,6 +69,7 @@ class VideoQC:
         self._mouth = mouth_tracker
         self._vision = vision
         self._lipsync_scorer = lipsync_scorer
+        self._qc_check_plugins = tuple(qc_check_plugins)
 
     def evaluate(
         self,
@@ -111,7 +114,43 @@ class VideoQC:
             extra_references=extra_references,
             spec_hard_min=self._cfg.vision_spec_hard_min,
         )
+        checks += self._plugin_checks(frames, fps, shot, manifest, audio_slice)
         return aggregate(checks, self._qc.weights, self._qc.pass_score)
+
+    def _plugin_checks(
+        self,
+        frames: list[np.ndarray],
+        fps: float,
+        shot: Shot,
+        manifest: Manifest,
+        audio_slice: Path,
+    ) -> list[CheckResult]:
+        if not self._qc_check_plugins:
+            return []
+        fail_hard = self._qc.on_missing_dependency == "fail"
+        results: list[CheckResult] = []
+        for name in self._qc_check_plugins:
+            try:
+                fn = plugins.load_plugin(plugins.QC_CHECKS_GROUP, name)
+                out = fn(frames, fps, shot, manifest, audio_slice)
+                if not isinstance(out, list) or not all(isinstance(c, CheckResult) for c in out):
+                    raise TypeError(f"plugin {name!r} must return list[CheckResult]")
+                results.extend(out)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("QC plugin %r failed on %s: %s", name, shot.id, exc)
+                if fail_hard:
+                    results.append(
+                        CheckResult(
+                            name=name,
+                            status=CheckStatus.FAILED,
+                            hard=True,
+                            score=0.0,
+                            detail=f"plugin error: {exc}",
+                        )
+                    )
+                else:
+                    results.append(skipped(name, f"plugin error: {exc}"))
+        return results
 
     @staticmethod
     def _join_continuity_check(

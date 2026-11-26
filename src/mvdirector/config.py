@@ -440,6 +440,20 @@ class VideoConfig(_Section):
             "(inspired by hexeosis-prime/nightshift)."
         ),
     )
+    encoder: Literal["libx264", "auto", "h264_nvenc", "h264_videotoolbox"] = Field(
+        default="libx264",
+        description=(
+            "Video encoder for assembly ('libx264', 'auto', 'h264_nvenc', or 'h264_videotoolbox')."
+        ),
+    )
+    assembly_workers: int = Field(
+        default=1,
+        ge=1,
+        le=8,
+        description=(
+            "Parallel ffmpeg workers for independent clip conforms and transitions during assembly."
+        ),
+    )
 
     @model_validator(mode="after")
     def _check_draft_dimensions(self) -> VideoConfig:
@@ -1111,6 +1125,48 @@ class MixConfig(_Section):
         return self
 
 
+class PluginsConfig(_Section):
+    """Registered entry-point plugin names (validated against strict identifier allowlist)."""
+
+    qc_checks: list[str] = Field(
+        default_factory=list,
+        description="Additional video QC check plugins (entry-point group mvdirector.qc_checks).",
+    )
+    audio_conditioner: str | None = Field(
+        default=None,
+        description=(
+            "Optional lip-sync conditioning audio plugin (group mvdirector.audio_conditioners)."
+        ),
+    )
+    pacing: str | None = Field(
+        default=None,
+        description="Optional cut-point pacing plugin (entry-point group mvdirector.pacing).",
+    )
+    clip_selector: str | None = Field(
+        default=None,
+        description=(
+            "Optional non-lipsync clip in-point selector plugin "
+            "(entry-point group mvdirector.clip_selectors)."
+        ),
+    )
+
+    @field_validator("qc_checks")
+    @classmethod
+    def _validate_qc_checks(cls, value: list[str]) -> list[str]:
+        from mvdirector.plugins import validate_plugin_name
+
+        return [validate_plugin_name(name, label="qc_checks plugin") for name in value]
+
+    @field_validator("audio_conditioner", "pacing", "clip_selector")
+    @classmethod
+    def _validate_optional_plugin(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        from mvdirector.plugins import validate_plugin_name
+
+        return validate_plugin_name(value)
+
+
 class ProjectConfig(_Section):
     title: str = "Untitled"
     mode: ProjectMode = Field(
@@ -1139,6 +1195,7 @@ class ProjectConfig(_Section):
     qc: QCConfig = Field(default_factory=QCConfig)
     retry: RetryConfig = Field(default_factory=RetryConfig)
     review: ReviewConfig = Field(default_factory=ReviewConfig)
+    plugins: PluginsConfig = Field(default_factory=PluginsConfig)
 
 
 def expand_env(value: Any, *, environ: Mapping[str, str] | None = None) -> Any:

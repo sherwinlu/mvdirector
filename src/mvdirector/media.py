@@ -26,6 +26,101 @@ from mvdirector.errors import MediaToolError
 
 log = logging.getLogger(__name__)
 
+_HW_ENCODERS = ("h264_nvenc", "h264_videotoolbox")
+_ENCODERS_CACHE: frozenset[str] | None = None
+
+
+def clear_encoder_cache() -> None:
+    """Clear the cached encoder probe result (intended for tests)."""
+    global _ENCODERS_CACHE
+    _ENCODERS_CACHE = None
+
+
+def _probe_encoder_works(encoder: str) -> bool:
+    """Run a 1-frame null-mux smoke test to confirm a listed hardware encoder actually works."""
+    try:
+        res = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:d=0.04",
+                "-frames:v",
+                "1",
+                "-c:v",
+                encoder,
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return res.returncode == 0
+
+
+def available_encoders() -> frozenset[str]:
+    """Return verified H.264 encoders usable on this host (cached)."""
+    global _ENCODERS_CACHE
+    if _ENCODERS_CACHE is not None:
+        return _ENCODERS_CACHE
+    found: set[str] = set()
+    try:
+        out = run(["ffmpeg", "-hide_banner", "-encoders"], timeout=10).stdout
+    except MediaToolError:
+        _ENCODERS_CACHE = frozenset({"libx264"})
+        return _ENCODERS_CACHE
+    listed: set[str] = set()
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0].startswith("V"):
+            listed.add(parts[1])
+    if "libx264" in listed:
+        found.add("libx264")
+    for hw in _HW_ENCODERS:
+        if hw in listed and _probe_encoder_works(hw):
+            found.add(hw)
+    if not found:
+        found.add("libx264")
+    _ENCODERS_CACHE = frozenset(found)
+    return _ENCODERS_CACHE
+
+
+def resolve_video_encoder(requested: str) -> str:
+    """Resolve ``libx264``/``auto``/HW encoder name to a verified encoder on this host."""
+    if requested == "libx264":
+        return "libx264"
+    avail = available_encoders()
+    if requested == "auto":
+        for hw in _HW_ENCODERS:
+            if hw in avail:
+                return hw
+        return "libx264"
+    if requested in avail:
+        return requested
+    log.warning(
+        "Requested video encoder %r is unavailable on this host; falling back to libx264.",
+        requested,
+    )
+    return "libx264"
+
+
+def encode_args_for(encoder: str) -> list[str]:
+    """Return ffmpeg video-encoding flags for ``encoder``."""
+    if encoder == "h264_nvenc":
+        return ["-an", "-c:v", "h264_nvenc", "-preset", "p4", "-cq", "16", "-pix_fmt", "yuv420p"]
+    if encoder == "h264_videotoolbox":
+        return ["-an", "-c:v", "h264_videotoolbox", "-q:v", "75", "-pix_fmt", "yuv420p"]
+    return ["-an", "-c:v", "libx264", "-preset", "medium", "-crf", "16", "-pix_fmt", "yuv420p"]
+
 
 @dataclass(frozen=True)
 class MediaInfo:

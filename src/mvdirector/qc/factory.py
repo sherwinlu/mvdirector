@@ -142,7 +142,15 @@ def build_quality_gates(config: ProjectConfig, llm: LLMClient | None) -> Quality
         log.warning("Vision checks are off (%s).", vision_reason)
     return QualityGates(
         image=ImageQC(config.qc, config.video, faces, vision),
-        video=VideoQC(config.qc, config.video, faces, mouth, vision, lipsync_scorer=scorer),
+        video=VideoQC(
+            config.qc,
+            config.video,
+            faces,
+            mouth,
+            vision,
+            lipsync_scorer=scorer,
+            qc_check_plugins=config.plugins.qc_checks,
+        ),
         face_analyzer=faces,
         mouth_tracker=mouth,
         lipsync_scorer=scorer,

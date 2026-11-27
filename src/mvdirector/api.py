@@ -41,7 +41,13 @@ from mvdirector.audio.stems import StemSeparator
 from mvdirector.cleanup import CleanupPlan, apply_cleanup, plan_cleanup
 from mvdirector.comfy.client import ComfyClient
 from mvdirector.comfy.provider import ComfyEndpointProvider, StaticComfyProvider
-from mvdirector.config import CONFIG_FILENAME, LLMConfig, ReviewMode, validate_max_concurrency
+from mvdirector.config import (
+    CONFIG_FILENAME,
+    LLMConfig,
+    ProjectConfig,
+    ReviewMode,
+    validate_max_concurrency,
+)
 from mvdirector.errors import BudgetExceeded, ConfigError, LLMError, MVDError
 from mvdirector.generation import draft_grid as draft_grid_mod
 from mvdirector.generation import plates as plates_mod
@@ -174,6 +180,29 @@ def _build_project_llm(project: Project, config: LLMConfig | None = None) -> LLM
     if project._dotenv:
         return build_llm(target, environ=project.environ())
     return build_llm(target)
+
+
+@contextmanager
+def _open_qc_llm(project: Project, primary_llm: LLMClient | None) -> Iterator[LLMClient | None]:
+    """Yield the dedicated ``qc.llm`` client when configured, otherwise ``primary_llm``."""
+    qc_cfg = project.config.qc.llm
+    if qc_cfg is None:
+        yield primary_llm
+        return
+    with _close_llm(_build_project_llm(project, qc_cfg)) as qc_llm:
+        yield qc_llm
+
+
+def _resolve_audio_llm_config(config: ProjectConfig) -> LLMConfig | None:
+    """Return the audio-capable LLM config for native MP3 listening, or None if not configured."""
+    if config.planning.audio_listen == "never":
+        return None
+    if config.planning.audio_llm is not None:
+        return config.planning.audio_llm if config.planning.audio_llm.enabled else None
+    qc_cfg = config.qc.llm
+    if qc_cfg is not None and qc_cfg.enabled and qc_cfg.provider == "gemini":
+        return qc_cfg
+    return None
 
 
 def open_project(
@@ -465,6 +494,20 @@ def validate_project(
             f"LLM settings ({llm_config.provider}, {llm_config.model}); `mvd llm-check` tests them",
             _check_llm_config,
         )
+    for label_prefix, extra_cfg in (
+        ("Vision QC LLM", project.config.qc.llm),
+        ("Audio listen LLM", project.config.planning.audio_llm),
+    ):
+        if extra_cfg is not None and extra_cfg.enabled:
+
+            def _check_extra(cfg: LLMConfig = extra_cfg) -> None:
+                with _close_llm(_build_project_llm(project, cfg)):
+                    pass
+
+            attempt(
+                f"{label_prefix} settings ({extra_cfg.provider}, {extra_cfg.model})",
+                _check_extra,
+            )
     return checks
 
 
@@ -476,33 +519,42 @@ class LLMCheckOutcome:
     vision_needed: bool = False
     tested_images: bool = False
     result: LLMCheckResult | None = None
+    qc_provider: str | None = None
+    qc_model: str | None = None
+    qc_result: LLMCheckResult | None = None
 
     @property
     def vision_failed(self) -> bool:
-        r = self.result
+        r = self.qc_result if self.qc_result is not None else self.result
         return bool(r and self.tested_images and r.vision not in ("skipped", "ok"))
 
     @property
     def ok(self) -> bool:
-        return not self.enabled or bool(
-            self.result and self.result.json_ok and not self.vision_failed
-        )
+        primary_ok = not self.enabled or bool(self.result and self.result.json_ok)
+        qc_ok = self.qc_result is None or bool(self.qc_result.json_ok)
+        return primary_ok and qc_ok and not self.vision_failed
 
 
 def check_llm(project_dir: ProjectRef, skip_image: bool = False) -> LLMCheckOutcome:
-    """Test the configured model: credentials, JSON output and image input."""
+    """Test the configured model(s): credentials, JSON output and image input."""
     project = open_project(project_dir)
     config = project.config.llm
+    qc_cfg = project.config.qc.llm
     outcome = LLMCheckOutcome(config.provider, config.model, config.enabled)
-    if not config.enabled:
-        return outcome
-    with _close_llm(_build_project_llm(project, config)) as client:
-        if client is None:  # build_llm returns None only for a disabled model, handled above
-            raise MVDError("No language model is configured.")
-        # The image test only matters when vision checks are switched on.
-        outcome.vision_needed = project.config.qc.vision_enabled
-        outcome.tested_images = outcome.vision_needed and not skip_image
-        outcome.result = run_llm_check(client, check_vision=outcome.tested_images)
+    outcome.vision_needed = project.config.qc.vision_enabled
+    outcome.tested_images = outcome.vision_needed and not skip_image
+    if config.enabled:
+        with _close_llm(_build_project_llm(project, config)) as client:
+            if client is None:  # build_llm returns None only for a disabled model, handled above
+                raise MVDError("No language model is configured.")
+            test_primary_vision = outcome.tested_images and qc_cfg is None
+            outcome.result = run_llm_check(client, check_vision=test_primary_vision)
+    if qc_cfg is not None and qc_cfg.enabled and outcome.vision_needed:
+        outcome.qc_provider = qc_cfg.provider
+        outcome.qc_model = qc_cfg.model
+        with _close_llm(_build_project_llm(project, qc_cfg)) as qc_client:
+            if qc_client is not None:
+                outcome.qc_result = run_llm_check(qc_client, check_vision=outcome.tested_images)
     return outcome
 
 
@@ -740,15 +792,31 @@ def plan(
                     else ""
                 )
             with _close_llm(_build_project_llm(project, plan_config.llm)) as llm:
-                manifest = build_manifest(
-                    plan_config,
-                    project.load_analysis(),
-                    lyrics_text,
-                    _read_text_input(project.input_path(inputs.style, "style"), "style"),
-                    llm,
-                    mix_path=mix_path,
-                    exclusions=merged_exclusions,
+                audio_cfg = (
+                    _resolve_audio_llm_config(plan_config)
+                    if (
+                        llm is not None
+                        and mix_path is not None
+                        and not getattr(llm, "supports_audio", False)
+                    )
+                    else None
                 )
+                audio_ctx = (
+                    _close_llm(_build_project_llm(project, audio_cfg))
+                    if audio_cfg is not None
+                    else nullcontext(None)
+                )
+                with audio_ctx as audio_llm:
+                    manifest = build_manifest(
+                        plan_config,
+                        project.load_analysis(),
+                        lyrics_text,
+                        _read_text_input(project.input_path(inputs.style, "style"), "style"),
+                        llm,
+                        mix_path=mix_path,
+                        audio_llm=audio_llm,
+                        exclusions=merged_exclusions,
+                    )
         project.save_manifest(manifest)
     return project, manifest
 
@@ -1250,7 +1318,7 @@ def generate(
             )
         effective_kinds = [k for k in effective_kinds if k is not AssetKind.VIDEO]
 
-    with _close_llm(_build_project_llm(project)) as llm:
+    with _close_llm(_build_project_llm(project)) as llm, _open_qc_llm(project, llm) as qc_llm:
         active_shots = [
             s for s in manifest.shots if selected_shots is None or s.id in selected_shots
         ]
@@ -1310,17 +1378,21 @@ def generate(
                     emit(RunEvent("warning", message=f"Skipping check: {problem}"))
             else:
                 ready.raise_if_blocked()
-        if llm is not None:
-            # Fail before any GPU time is spent, not as a stream of skipped checks afterwards.
-            try:
-                ping_llm(llm)
-            except LLMError as exc:
-                raise LLMError(
-                    f"The language model is not usable: {exc}\nFix it (`mvd llm-check` tests the "
-                    "settings), or set llm.enabled: false to run without a model."
-                ) from exc
+        for label, active_llm in (
+            ("language model", llm),
+            ("Vision QC language model", qc_llm if qc_llm is not llm else None),
+        ):
+            if active_llm is not None:
+                # Fail before any GPU time is spent, not as a stream of skipped checks afterwards.
+                try:
+                    ping_llm(active_llm)
+                except LLMError as exc:
+                    raise LLMError(
+                        f"The {label} is not usable: {exc}\nFix it (`mvd llm-check` tests the "
+                        "settings), or set llm.enabled: false to run without a model."
+                    ) from exc
         result = GenerateResult(project, manifest)
-        gates = build_quality_gates(project.config, llm)
+        gates = build_quality_gates(project.config, qc_llm)
         try:
             result.active_checks, result.skipped_checks = gates.check_summary()
             emit(
@@ -1429,7 +1501,7 @@ def regenerate_still(
         else:
             names = ["still"] if shot.type.shows_singer else ["t2i"]
 
-    with _close_llm(_build_project_llm(project)) as llm:
+    with _close_llm(_build_project_llm(project)) as llm, _open_qc_llm(project, llm) as qc_llm:
         templates = load_templates(project, names)
         if strategy == "repair":
             if shot.type.shows_singer and manifest.mode is not ProjectMode.MIX:
@@ -1455,16 +1527,20 @@ def regenerate_still(
                     emit(RunEvent("warning", message=f"Skipping check: {problem}"))
             else:
                 ready.raise_if_blocked()
-        if llm is not None:
-            try:
-                ping_llm(llm)
-            except LLMError as exc:
-                raise LLMError(
-                    f"The language model is not usable: {exc}\nFix it (`mvd llm-check` tests the "
-                    "settings), or set llm.enabled: false to run without a model."
-                ) from exc
+        for label, active_llm in (
+            ("language model", llm),
+            ("Vision QC language model", qc_llm if qc_llm is not llm else None),
+        ):
+            if active_llm is not None:
+                try:
+                    ping_llm(active_llm)
+                except LLMError as exc:
+                    raise LLMError(
+                        f"The {label} is not usable: {exc}\nFix it (`mvd llm-check` tests the "
+                        "settings), or set llm.enabled: false to run without a model."
+                    ) from exc
         result = GenerateResult(project, manifest)
-        gates = build_quality_gates(project.config, llm)
+        gates = build_quality_gates(project.config, qc_llm)
         try:
             result.active_checks, result.skipped_checks = gates.check_summary()
             emit(
@@ -1612,7 +1688,8 @@ def generate_draft_grid(
     if mode in ("r2v", "both"):
         draft_grid_mod.select_r2v_template(templates, [s for _, grp in chunks for s in grp])
 
-    llm_ctx = _close_llm(_build_project_llm(project)) if run_qc else nullcontext(None)
+    qc_cfg = project.config.qc.llm or project.config.llm
+    llm_ctx = _close_llm(_build_project_llm(project, qc_cfg)) if run_qc else nullcontext(None)
     with llm_ctx as llm:
         gates = build_quality_gates(project.config, llm) if run_qc else None
         try:

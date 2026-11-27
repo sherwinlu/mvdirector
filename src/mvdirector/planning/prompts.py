@@ -300,6 +300,29 @@ def inject_multicut_timestamps(
     return " ".join(lines)
 
 
+AUDIO_LISTEN_SYSTEM = """You are a music supervisor listening directly to a finished song so a
+music video director (who will read your notes alongside the lyrics) can hear what the audio
+actually sounds like. Describe ONLY what you hear in the track—never invent visuals or plot.
+Write every field in English.
+
+- meter_and_groove: time signature and rhythmic feel (for example '3/4 waltz sway', '6/8 lilt',
+  '4/4 driving post-punk pulse', rubato, half-time breakdown, swing). Call out any waltz or
+  triple-meter feel explicitly.
+- instrumentation_and_texture: actual instruments and timbral quality you hear (e.g. music box,
+  bowed cello, pipe organ, detuned piano, distorted guitar, dry acoustic fingerpicking, lush
+  synth pads, stark reverb vs. intimate close-mic dryness).
+- vocal_character: number of singers, vocal registers, phrasing, emotional grit/fragility/restraint,
+  how voices interact (solo, call-and-response, unison/harmony), and any clearly sung proper names
+  or key words if they clarify the lyrics (for example when a sung name may be misheard in a
+  transcript).
+- atmosphere_and_subtext: the genuine sonic atmosphere evoked by the arrangement and vocal tone
+  (e.g. gothic/haunted/uncanny, candlelit/theatrical, sunlit/warm, defiant/metallic, brittle/grief-
+  stricken). Note explicitly when the audio feels darker, eerier, or more dramatic than a plain
+  genre label would suggest.
+- key_musical_turns: 2 to 6 concrete musical turning points in song order (drops, bridge strips,
+  sudden silences, dynamic swells, tempo/meter shifts, vocal breakdowns) that the edit and visual
+  arc should honor."""
+
 BIBLE_SYSTEM = """You are the director of a music video that balances performer shots with
 cutaways. First interpret the song's meaning and musical style, then write the visual bible that
 every shot will follow.
@@ -395,7 +418,9 @@ as id='sakura' with name='さくら').
 - rules: 4 to 10 short rules that every shot follows (camera language, physical camera placement,
   continuity, effects, how much of the video shows the performers). For duets or groups, write
   rules that apply across the cast rather than locking every shot to a single character. Only
-  rules a shot-by-shot director can act on."""
+  rules a shot-by-shot director can act on. Ignore audio-production negative tags in the music
+  style brief (such as '-acoustic guitar', '-rock drums', or '-rap verses')—never turn music genre
+  exclusions into visual rules, because naming excluded objects in prompts risks drawing them."""
 
 SHOTS_SYSTEM = """You are the director of a music video. Timing is already fixed. For each shot
 you are given, choose the creative details.
@@ -526,7 +551,14 @@ Rules:
 - Aim for one striking, printable frame in every 30 seconds: strong symmetry, a silhouette, or a
   single bright light against dark.
 - still_prompt: in English, describes the first frame only: framing, physical camera placement in
-  open space, who is in frame, pose, action, camera angle. Translate imagery from non-English or
+  open space, who is in frame, pose, action, camera angle. Keep each still_prompt concise and
+  focused (roughly 40 to 75 words, one clear visual beat) so image models stay faithful without
+  prompt drift. Never write raw schema enum names (such as 'medium_close' or 'close_up') or
+  post-production/VFX compositing jargon (such as 'isolated light plate', 'alpha matte', or
+  'CGI pass') inside still_prompt or motion_prompt. Whenever motion_prompt reveals an emerging
+  detail (such as a glowing ember under ash, a tear, or light flaring through a seam), plant a
+  subtle starting visual anchor in still_prompt so image-to-video models evolve a visible cue
+  instead of inventing it from flat dark pixels. Translate imagery from non-English or
   multi-language lyrics into concrete English visual descriptions rather than quoting raw lyrics.
   It is sent to an image-edit model together with a reference portrait of the primary singer, and
   the set and character descriptions are added automatically, so do not repeat full physical
@@ -594,7 +626,8 @@ letters, digits, and underscores only.
   realistic patina and lived-in wear (faint scuffs, tarnished edges, natural handling wear) rather
   than factory-fresh CGI sheen.
 - rules: 4 to 10 short actionable visual direction rules (camera language, physical camera
-  placement, lighting evolution, motion rhythm, no people in frame)."""
+  placement, lighting evolution, motion rhythm, uninhabited staging). Ignore audio-production
+  negative tags in the music style brief—never turn music genre exclusions into visual rules."""
 
 NARRATIVE_SHOTS_ADDENDUM = """VIDEO STYLE — NARRATIVE / NON-LIPSYNC PERFORMANCE:
 - This video has NO lip-sync shots. Every 'performance' shot shows the character(s) acting,
@@ -625,7 +658,9 @@ Rules:
 - Use at least three distinct sets or lighting looks across the video. Something should visibly
   evolve every 2 to 4 seconds (light shifting, particles, water, fog, shadows, camera glide).
 - still_prompt: in English, describes the first frame only—framing, camera placement, subject
-  object/environment, lighting, and atmosphere (no people or faces).
+  object/environment, lighting, and atmosphere in an uninhabited scene (roughly 40 to 75 words,
+  no raw schema enum names or VFX compositing jargon; plant a subtle starting visual anchor
+  whenever motion_prompt reveals an emerging light or object).
 - motion_prompt: in English, describes ONLY what moves in the scene (light, weather, particles,
   objects) and how the camera moves—never re-describe static architecture, set dressing, or
   materials fixed in the first frame. Every shot MUST remain a single continuous take with no

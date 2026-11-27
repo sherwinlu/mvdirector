@@ -295,7 +295,7 @@ class VideoConfig(_Section):
         ),
     )
     max_clip_seconds: float = Field(default=8.0, gt=0.0, allow_inf_nan=False)
-    min_clip_seconds: float = Field(default=1.5, gt=0.0, allow_inf_nan=False)
+    min_clip_seconds: float = Field(default=2.5, gt=0.0, allow_inf_nan=False)
     handle_seconds: float = Field(
         default=0.25,
         ge=0.0,

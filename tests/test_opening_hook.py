@@ -97,7 +97,7 @@ def test_opening_config_validation_and_schema_version() -> None:
     assert RetryConfig().opening_extra_attempts == 2
     assert QCConfig().opening_threshold_margin == 0.0
 
-    for bad_float in (-0.1, float("nan"), float("inf"), True, False):
+    for bad_float in (-0.1, 3600.1, float("nan"), float("inf"), True, False):
         with pytest.raises(ValidationError):
             PlanningConfig(opening_seconds=bad_float)  # type: ignore[arg-type]
         with pytest.raises(ValidationError):
@@ -105,7 +105,7 @@ def test_opening_config_validation_and_schema_version() -> None:
 
     with pytest.raises(ValidationError):
         QCConfig(opening_threshold_margin=0.31)
-    for bad_int in (-1, True, False):
+    for bad_int in (-1, 21, True, False):
         with pytest.raises(ValidationError):
             RetryConfig(opening_extra_attempts=bad_int)  # type: ignore[arg-type]
 

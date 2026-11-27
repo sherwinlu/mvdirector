@@ -875,6 +875,7 @@ class PlanningConfig(_Section):
     opening_seconds: float = Field(
         default=8.0,
         ge=0.0,
+        le=3600.0,
         allow_inf_nan=False,
         description=(
             "Seconds from the start of the song treated as the opening hook window (0 disables)."
@@ -1258,6 +1259,7 @@ class RetryConfig(_Section):
     opening_extra_attempts: int = Field(
         default=2,
         ge=0,
+        le=20,
         description=(
             "Extra generation attempts granted to shots starting within planning.opening_seconds."
         ),

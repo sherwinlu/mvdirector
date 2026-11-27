@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import re
 import statistics
 import unicodedata
@@ -1258,9 +1259,22 @@ def _non_singing_gaps(
     min_gap: float = 0.25,
 ) -> list[tuple[float, float]]:
     """Spans inside ``[slice_start, slice_end]`` outside every padded singing span."""
-    if not covered_spans or slice_end - slice_start < min_gap:
+    if (
+        not covered_spans
+        or not (math.isfinite(slice_start) and math.isfinite(slice_end))
+        or slice_end - slice_start < min_gap
+    ):
         return []
-    padded = _merge_spans([(max(0.0, a - pad), b + pad) for a, b in covered_spans if b > a])
+    safe_pad = max(0.0, float(pad)) if math.isfinite(pad) else 0.0
+    padded = _merge_spans(
+        [
+            (max(0.0, a - safe_pad), b + safe_pad)
+            for a, b in covered_spans
+            if math.isfinite(a) and math.isfinite(b) and b > a
+        ]
+    )
+    if not padded:
+        return []
     gaps: list[tuple[float, float]] = []
     cursor = slice_start
     for a, b in padded:

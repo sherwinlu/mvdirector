@@ -287,6 +287,8 @@ def detect_vocal_windows(
 def _word_overlaps_window(win: TimeSpan, word: lyrics_mod.Word) -> bool:
     """True when ``word`` overlaps ``win``, including zero-duration words inside it."""
     w_start, w_end = float(word.start), float(word.end)
+    if not (math.isfinite(w_start) and math.isfinite(w_end)):
+        return False
     if w_end > w_start:
         return min(win.end, w_end) > max(win.start, w_start)
     if w_end == w_start:

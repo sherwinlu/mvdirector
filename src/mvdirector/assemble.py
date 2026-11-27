@@ -11,6 +11,7 @@ never accumulates and the picture stays locked to the music from start to finish
 from __future__ import annotations
 
 import logging
+import math
 import os
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -263,8 +264,15 @@ def _intercut_window(
     if run_end - run_start > _MAX_INTERCUT_WINDOW_SECONDS:
         return originals
 
-    run_beats = [b for b in beats if run_start + 1e-3 < b < run_end - 1e-3]
-    if len(run_beats) < 2 and tempo_bpm is not None and 50.0 <= tempo_bpm <= 220.0:
+    run_beats = sorted(
+        {b for b in beats if math.isfinite(b) and run_start + 1e-3 < b < run_end - 1e-3}
+    )
+    if (
+        len(run_beats) < 2
+        and tempo_bpm is not None
+        and math.isfinite(tempo_bpm)
+        and 50.0 <= tempo_bpm <= 220.0
+    ):
         step_s = 60.0 / tempo_bpm
         k = 1
         synth: list[float] = []
@@ -526,7 +534,14 @@ def _intercut_window(
                     if idx != prev_src and remaining_frames[idx] >= relaxed_min
                 ]
                 if relaxed_cands:
-                    chosen = max(relaxed_cands, key=lambda idx: (remaining_frames[idx], -idx))
+                    chosen = max(
+                        relaxed_cands,
+                        key=lambda idx: (
+                            not sub_plans and originals[idx].source != avoid_first_source,
+                            remaining_frames[idx],
+                            -idx,
+                        ),
+                    )
                     take = min(remaining_frames[chosen], need - relaxed_min)
                     _emit(chosen, take)
                     need -= take

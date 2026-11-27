@@ -887,3 +887,44 @@ def test_live_ffmpeg_assembly_intercut_cut_and_xfade_frame_exact(tmp_path: Path)
                         ov = 0
                 prev_overlap = ov
             cursor += p.frames
+
+
+def test_qa_pass3_boundary_hardening(tmp_path: Path) -> None:
+    """Unsorted/duplicate beats, non-finite words, and inverted spans are handled safely."""
+    from mvdirector.planning.planner import _non_singing_gaps
+
+    # 1. Duplicate and unsorted beats yield identical intercut cuts as clean sorted beats.
+    plans, manifest, analysis = _make_broll_run(
+        tmp_path,
+        bpm=75.0,
+        shot_seconds=4.0,
+        n_shots=2,
+        handle=0.25,
+        intensity=0.80,
+    )
+    clean_out = intercut_plans(plans, manifest, analysis, min_intensity=0.70)
+    dup_analysis = analysis.model_copy(update={"beats": sorted(analysis.beats + analysis.beats)})
+    rev_analysis = analysis.model_copy(update={"beats": list(reversed(analysis.beats))})
+    assert [p.frames for p in intercut_plans(plans, manifest, dup_analysis)] == [
+        p.frames for p in clean_out
+    ]
+    assert [p.frames for p in intercut_plans(plans, manifest, rev_analysis)] == [
+        p.frames for p in clean_out
+    ]
+
+    # 2. Non-finite (+/-inf, nan) word timestamps never match bleed windows.
+    wins = [TimeSpan(start=5.0, end=10.0), TimeSpan(start=15.0, end=20.0)]
+    inf_words = [
+        Word.model_construct(word="x", start=float("-inf"), end=float("inf")),
+        Word.model_construct(word="y", start=float("-inf"), end=float("inf")),
+        Word(word="real1", start=16.0, end=16.5),
+        Word(word="real2", start=17.0, end=17.5),
+    ]
+    assert filter_vocal_windows_by_words(wins, inf_words, pad=0.5) == [
+        TimeSpan(start=15.5, end=18.0)
+    ]
+
+    # 3. _non_singing_gaps never mutes an entire slice on inverted/non-finite covered_spans.
+    assert _non_singing_gaps(0.0, 5.0, [(2.0, 1.0)]) == []
+    assert _non_singing_gaps(0.0, 5.0, [(float("nan"), 2.0)]) == []
+    assert _non_singing_gaps(float("nan"), 5.0, [(1.0, 2.0)]) == []

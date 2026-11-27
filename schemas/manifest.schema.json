@@ -810,7 +810,8 @@
         "sampled",
         "escalated",
         "lipsync",
-        "fallback"
+        "fallback",
+        "opening"
       ],
       "title": "ReviewReason",
       "type": "string"

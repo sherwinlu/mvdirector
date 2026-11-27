@@ -1516,7 +1516,14 @@ def previz_refine(
 
 
 @app.command()
-def assets(project_dir: Path = ProjectDir) -> None:
+def assets(
+    project_dir: Path = ProjectDir,
+    lint: bool = typer.Option(
+        False,
+        "--lint",
+        help="Flag recurring objects/places across shots without a locked reference.",
+    ),
+) -> None:
     """Show which reference sheets and set plates are locked."""
     try:
         manifest = api.open_project(project_dir).load_manifest()
@@ -1548,6 +1555,24 @@ def assets(project_dir: Path = ProjectDir) -> None:
         typer.echo("Prop sheets")
         for prop in bible.props:
             typer.echo(f"  {prop.name:<28} {'locked' if prop.plate else 'not set'}")
+    if lint:
+        try:
+            findings = api.lint_assets(project_dir)
+        except MVDError as exc:
+            raise _fail(exc) from exc
+        typer.echo("Reference coverage lint")
+        if not findings:
+            typer.echo("  No recurring undeclared or unlocked references found.")
+        else:
+            for finding in findings:
+                status = "unlocked" if finding.declared else "undeclared"
+                sec_note = f", {len(finding.sections)} section(s)" if finding.sections else ""
+                shots_note = ", ".join(finding.shot_ids)
+                typer.echo(
+                    f"  [{finding.entity_kind}:{status}] {finding.noun} "
+                    f"({finding.count} shots{sec_note}: {shots_note})"
+                )
+                typer.echo(f"    suggest: {finding.suggested_command}")
 
 
 def _generate(
@@ -1714,9 +1739,25 @@ def _progress(event: RunEvent) -> None:
 def qc_report(
     project_dir: Path = ProjectDir,
     markdown: bool = typer.Option(False, "--markdown", help="Markdown tables, for a README."),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit QC summary and attempt statistics as JSON."
+    ),
 ) -> None:
     """Count, per check, how many attempts passed, failed or were skipped, and why."""
     try:
+        if json_output:
+            import json
+            from dataclasses import asdict
+
+            from mvdirector import report as report_mod
+
+            manifest = api.open_project(project_dir, pull=False).load_manifest()
+            payload = {
+                "summary": asdict(report_mod.summarize(manifest)),
+                "attempt_stats": report_mod.attempt_stats(manifest).to_dict(),
+            }
+            typer.echo(json.dumps(payload, indent=2))
+            return
         text = api.qc_report(project_dir, markdown=markdown)
     except MVDError as exc:
         raise _fail(exc) from exc
@@ -1809,6 +1850,12 @@ def clean(
     yes: bool = typer.Option(
         False, "--yes", help="Delete the files. Without it, only list what would go."
     ),
+    retention_days: int | None = typer.Option(
+        None,
+        "--retention-days",
+        min=0,
+        help="Only delete superseded/orphaned/cached files older than this many days.",
+    ),
     project_dir: Path = ProjectDir,
 ) -> None:
     """Delete takes that lost to a selected attempt, and generations the manifest never used.
@@ -1817,7 +1864,7 @@ def clean(
     audio and your inputs are never touched.
     """
     try:
-        plan = api.clean(project_dir, delete=yes)
+        plan = api.clean(project_dir, delete=yes, retention_days=retention_days)
     except MVDError as exc:
         raise _fail(exc) from exc
     verb = "Deleted" if yes else "Would delete"

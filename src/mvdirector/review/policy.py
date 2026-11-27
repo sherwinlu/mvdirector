@@ -80,6 +80,8 @@ def review_reasons(shot: Shot, manifest: Manifest, config: ProjectConfig) -> lis
             reasons.append(ReviewReason.NEAR_THRESHOLD)
         if shot.type in manifest.escalated_types:
             reasons.append(ReviewReason.ESCALATED)
+        if shot.is_opening_at(config.planning.opening_seconds):
+            reasons.append(ReviewReason.OPENING)
         rate = review.closeup_rate if shot.framing is Framing.CLOSE_UP else review.other_rate
         if is_sampled(shot.id, rate, config.seed):
             reasons.append(ReviewReason.SAMPLED)
@@ -114,6 +116,8 @@ def review_reasons(shot: Shot, manifest: Manifest, config: ProjectConfig) -> lis
         reasons.append(ReviewReason.FALLBACK)
     if shot.type in manifest.escalated_types:
         reasons.append(ReviewReason.ESCALATED)
+    if shot.is_opening_at(config.planning.opening_seconds):
+        reasons.append(ReviewReason.OPENING)
     rate = review.closeup_rate if shot.framing is Framing.CLOSE_UP else review.other_rate
     if is_sampled(shot.id, rate, config.seed):
         reasons.append(ReviewReason.SAMPLED)
@@ -198,6 +202,8 @@ def reject(
         shot.video.reset(extra)
     else:
         shot.video.reset(extra, note)
+        if not config.retry.keep_still_on_video_fail:
+            shot.still.reset(extra)
     # The decision is recorded on the old review; the runner clears it on regeneration.
     shot.review = Review(
         required=True,

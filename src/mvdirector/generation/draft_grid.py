@@ -493,6 +493,7 @@ def generate_section_sheet(
                 reference_notation=notation,
                 bound_references=bound_roles,
                 plate_attached=plate_path is not None,
+                pin_character_details=project.config.planning.pin_character_details,
             )
             if max_chars is not None:
                 prompt = prompts.fit_prompt_budget(prompt, max_chars)

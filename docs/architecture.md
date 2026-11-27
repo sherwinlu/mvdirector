@@ -1,5 +1,42 @@
 # Architecture, Development & Limitations
 
+## System Architecture
+
+```mermaid
+flowchart TB
+    subgraph Entry["Entry Points"]
+        CLI["cli.py (mvd Typer CLI)"]
+        MCP["mcp/server.py (Stdio / HTTP MCP)"]
+        Host["Host Services (songfilm / songfilm-enterprise)"]
+    end
+
+    API["api.py (Public Service Layer)"]
+
+    subgraph Core["Pipeline Modules"]
+        Audio["audio/ (prepare, analyze, stems, lyrics, cues, broadcast_qa)"]
+        Plan["planning/ (segmenter, planner, prompts, brief, world_state)"]
+        Gen["generation/ (runner, preflight, reference, plates, props, draft_grid, upscale)"]
+        QC["qc/ (ImageQC, VideoQC, VisionJudge, faces, lipsync, syncnet, color_drift)"]
+        Review["review/ (policy, Streamlit app) + report.py + cleanup.py"]
+        Asm["assemble.py / mix_assemble.py (FFmpeg conform, intercut, grade, mux)"]
+    end
+
+    subgraph Protocols["Swappable Extension Protocols"]
+        State["StateStore (LocalStateStore or DB-backed)"]
+        Storage["AssetStorage (LocalAssetStorage or R2/S3)"]
+        Comfy["ComfyEndpointProvider (StaticComfyProvider or GPU Pool)"]
+        LLM["LLMClient (Anthropic / Gemini / OpenAI / Ollama)"]
+        Plugins["Entry-Point Plugins (qc_checks, audio_conditioners, pacing, clip_selectors)"]
+    end
+
+    CLI & MCP & Host --> API
+    API --> Audio & Plan & Gen & Review & Asm
+    Gen --> QC
+    API & Gen --> State & Storage & Comfy
+    Plan & QC --> LLM
+    Plan & QC & Asm --> Plugins
+```
+
 ## Code Map
 
 ```text
@@ -34,11 +71,12 @@ src/mvdirector/
   setup.py            environment diagnostics (`mvd setup --check-only`) and interactive project setup
   tuning.py           track characteristic profiling (`TrackProfile`) and parameter auto-tuning
   retry.py            retry policy
-  report.py           per-check tallies for `mvd qc-report`
-  cleanup.py          superseded and orphaned generations for `mvd clean`
+  report.py           per-check tallies and attempt/reject statistics (`attempt_stats`) for `mvd qc-report`
+  cleanup.py          superseded and orphaned generations with optional `--retention-days` for `mvd clean`
   calibrate.py        threshold suggestions from labels for `mvd calibrate`
-  generation/         runner.py (generate -> QC -> retry loop), candidates.py,
-                      reference.py, plates.py, props.py, previz.py, upscale.py, preflight.py
+  generation/         runner.py (generate -> QC -> retry loop, N-slot ref binding), candidates.py,
+                      reference.py, plates.py, props.py, previz.py, upscale.py,
+                      preflight.py (asset checks + zero-LLM `lint_reference_coverage`)
   review/             policy.py (queue and decisions), app.py (Streamlit)
   assemble.py         final cut
   mix_assemble.py     long-form mix circular loop synthesis, HUD cards, and segment cache

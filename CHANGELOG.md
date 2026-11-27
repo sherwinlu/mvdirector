@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+- **Pre-spend reference coverage lint & generic N-slot reference binding:** Added zero-LLM `lint_reference_coverage` (`mvdirector.generation.preflight`, `mvdirector.api.lint_assets`, `mvd assets --lint`), configurable `planning.max_props` (default `3`, `0..30`), priority-ordered generic N-slot binding (`lead > set > secondaries > props` across `prop_image_N` and `reference_image_K_face`) with optional workflow-node pruning and `@imageN` prompt tag alignment.
+- **Opening-hook priority:** Added `planning.opening_seconds` (`8.0s`), `retry.opening_extra_attempts` (`2`), `qc.opening_threshold_margin`, computed `Shot.is_opening` / `Shot.is_opening_at(...)` (no schema migration), planner opening-window guidance, and `ReviewReason.OPENING` review queuing (including in `light` mode).
+- **Rejection-aware attempt statistics:** Added `report.attempt_stats(manifest)` (mean attempts per passed still/video split by shot type plus human-reject rate from `Review.decision`), exposed via `mvdirector.api.attempt_stats` and `mvd qc-report`.
+- **Multi-tenant & workflow execution primitives:** Added `retry.keep_still_on_video_fail` (default `true`), `planning.pin_character_details` (default `true`), `ComfyClient.interrupt()` (`POST /interrupt`), and age-based retention pruning via `cleanup.plan_cleanup(..., retention_days=..., now=...)` and `mvd clean --retention-days`.
+
 ## [0.8.0b4] - 2026-11-27
 
 Fourth **Beta** release, adding a split Vision QC LLM, native audio listening passes for text-only planners, a multi-model planning and Vision QC benchmark harness (`mvd bench`), beat-locked assembly intercuts, entry-point plugin hooks, parallel/hardware-accelerated FFmpeg assembly, vision-model face identity checks, director prompt craft upgrades, frame-exact continuity handoffs, and vocal-bleed lip-sync, QA and security hardening.

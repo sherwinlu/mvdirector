@@ -58,7 +58,7 @@ from mvdirector.generation import upscale as upscale_mod
 from mvdirector.generation.candidates import atomic_save_png, load_rgb_candidate
 from mvdirector.generation.draft_grid import DraftGridResult
 from mvdirector.generation.plates import PlateTurnaroundResult
-from mvdirector.generation.preflight import check_assets
+from mvdirector.generation.preflight import CoverageFinding, check_assets, lint_reference_coverage
 from mvdirector.generation.reference import SeedReferenceResult
 from mvdirector.generation.runner import RunBudget, RunEvent, ShotRunner, load_templates
 from mvdirector.llm import LLMClient, build_llm
@@ -84,16 +84,20 @@ from mvdirector.planning.mix_planner import build_mix_manifest
 from mvdirector.planning.planner import build_manifest
 from mvdirector.project import Project
 from mvdirector.qc.factory import build_quality_gates
+from mvdirector.report import AttemptBucketStats, AttemptStatsSummary
 from mvdirector.retry import RetryPolicy
 from mvdirector.review import policy as review_policy
 from mvdirector.store import path_is_file
 
 __all__ = [
     # types
+    "AttemptBucketStats",
+    "AttemptStatsSummary",
     "BriefResult",
     "BroadcastAudioReport",
     "CleanupPlan",
     "ComfyWiringReport",
+    "CoverageFinding",
     "DraftGridResult",
     "EnvironmentReport",
     "GenerateResult",
@@ -111,6 +115,7 @@ __all__ = [
     "approve",
     "assemble",
     "attach_shot_sketch",
+    "attempt_stats",
     "audio_qc",
     "brief",
     "calibrate",
@@ -128,6 +133,7 @@ __all__ = [
     "generate_reference_videos",
     "init_project",
     "inspect_environment",
+    "lint_assets",
     "load_status",
     "lock_plate",
     "lock_plate_turnaround",
@@ -1840,17 +1846,22 @@ def reject(
     )
 
 
-def clean(project_dir: ProjectRef, *, delete: bool = False) -> CleanupPlan:
+def clean(
+    project_dir: ProjectRef,
+    *,
+    delete: bool = False,
+    retention_days: int | None = None,
+) -> CleanupPlan:
     """Plan, and with ``delete=True`` carry out, the removal of generations no longer needed.
 
     Deleting takes the run lock, so it cannot overlap a run that is still writing.
     """
     project = open_project(project_dir)
     if not delete:
-        return plan_cleanup(project, project.load_manifest())
+        return plan_cleanup(project, project.load_manifest(), retention_days=retention_days)
     with project.run_lock():
         manifest = project.load_manifest()
-        plan = plan_cleanup(project, manifest)
+        plan = plan_cleanup(project, manifest, retention_days=retention_days)
         if plan.files:
             apply_cleanup(project, manifest, plan)
             project.save_manifest(manifest)
@@ -1996,10 +2007,30 @@ def audio_qc(project_dir: ProjectRef, audio_path: Path | None = None) -> Broadca
     )
 
 
+def lint_assets(
+    project_dir: ProjectRef, *, min_shots: int = 3, min_sections: int = 2
+) -> list[CoverageFinding]:
+    """Detect recurring objects, places, or performers in shot prompts lacking a locked asset."""
+    manifest = open_project(project_dir, pull=False).load_manifest()
+    return lint_reference_coverage(manifest, min_shots=min_shots, min_sections=min_sections)
+
+
+def attempt_stats(source: ProjectRef | Manifest) -> AttemptStatsSummary:
+    """Compute retry, attempt-multiplier, and human-rejection statistics for a project."""
+    manifest = (
+        source if isinstance(source, Manifest) else open_project(source, pull=False).load_manifest()
+    )
+    return report_mod.attempt_stats(manifest)
+
+
 def qc_report(project_dir: ProjectRef, markdown: bool = False) -> str:
     """Count, per check, how many attempts passed, failed or were skipped, and why."""
     manifest = open_project(project_dir, pull=False).load_manifest()
-    return report_mod.render(report_mod.summarize(manifest), markdown=markdown)
+    summary_text = report_mod.render(report_mod.summarize(manifest), markdown=markdown).rstrip()
+    stats_text = report_mod.render_attempt_stats(
+        report_mod.attempt_stats(manifest), markdown=markdown
+    )
+    return f"{summary_text}\n\n{stats_text}"
 
 
 def calibrate(project_dir: ProjectRef, labels: Path | None = None) -> str:

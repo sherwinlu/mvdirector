@@ -51,14 +51,19 @@ OPTIONAL_FILE_PARAMS = frozenset(
 
 
 _EXTRA_REF_IMAGE_RE = re.compile(r"^reference_image_([1-9][0-9]*)\Z")
+_EXTRA_PROP_IMAGE_RE = re.compile(r"^prop_image_([1-9][0-9]*)\Z")
+_EXTRA_REF_FACE_RE = re.compile(r"^reference_image_([1-9][0-9]*)_face\Z")
 
 
 def is_optional_file_param(name: str) -> bool:
     """True when ``name`` is an optional per-shot file input whose unused loader should drop."""
     if name in OPTIONAL_FILE_PARAMS:
         return True
-    match = _EXTRA_REF_IMAGE_RE.match(name)
-    return match is not None and int(match.group(1)) >= 2
+    for pattern in (_EXTRA_REF_IMAGE_RE, _EXTRA_PROP_IMAGE_RE, _EXTRA_REF_FACE_RE):
+        match = pattern.match(name)
+        if match is not None and int(match.group(1)) >= 2:
+            return True
+    return False
 
 
 class Binding(BaseModel):

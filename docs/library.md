@@ -30,11 +30,11 @@ Semver applies. While the version is 0.x, a minor release may still change these
 
 | Name | Purpose |
 | --- | --- |
-| `mvdirector.api` | One function per pipeline stage (see `api.__all__`). |
+| `mvdirector.api` | One function per pipeline stage (`analyze`, `plan`, `lint_assets`, `generate`, `attempt_stats`, `approve`, `reject`, `assemble`, `clean`, etc. — see `api.__all__`). |
 | `Project` | A workspace folder plus its config, state store and asset storage. |
 | `StateStore` | Where `analysis` and `manifest` live, plus the single-writer lock. |
-| `AssetStorage` | How the workspace is pulled from and pushed to durable storage. |
-| `ComfyEndpointProvider` | Where each stage gets its ComfyUI client. |
+| `AssetStorage` | How the workspace is pulled from and pushed to durable storage (e.g., Cloudflare R2 / S3). |
+| `ComfyEndpointProvider` | Where each stage gets its `ComfyClient` (including `ComfyClient.interrupt()` for cooperative cancellation). |
 | `Manifest`, `Analysis`, `RunEvent`, `MVDError` | Data and error types. |
 
 Everything else, including `mvdirector.generation`, `.qc`, `.planning` and `.comfy.client`, is

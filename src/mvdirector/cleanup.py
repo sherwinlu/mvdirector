@@ -16,8 +16,10 @@ import contextlib
 import os
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from mvdirector.errors import ConfigError
 from mvdirector.models import AssetKind, AssetState, AssetStatus, Manifest
 from mvdirector.project import Project
 
@@ -64,31 +66,87 @@ def _is_generation_file(project: Project, path: Path) -> bool:
     )
 
 
-def plan_cleanup(project: Project, manifest: Manifest) -> CleanupPlan:
+def _parse_utc(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _file_mtime_utc(path: Path) -> datetime:
+    return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+
+
+def _is_expired(ts: datetime, cutoff: datetime | None) -> bool:
+    return cutoff is None or ts <= cutoff
+
+
+def plan_cleanup(
+    project: Project,
+    manifest: Manifest,
+    *,
+    retention_days: int | None = None,
+    now: datetime | None = None,
+) -> CleanupPlan:
     """What would be deleted; nothing is changed."""
+    cutoff: datetime | None = None
+    if retention_days is not None:
+        if isinstance(retention_days, bool) or retention_days < 0:
+            raise ConfigError(
+                f"retention_days must be a non-negative integer, got {retention_days!r}."
+            )
+        ref_now = now if now is not None else datetime.now(timezone.utc)
+        if ref_now.tzinfo is None:
+            ref_now = ref_now.replace(tzinfo=timezone.utc)
+        else:
+            ref_now = ref_now.astimezone(timezone.utc)
+        cutoff = ref_now - timedelta(days=retention_days)
+
     plan = CleanupPlan()
     kept: set[Path] = set()
     superseded_candidates: list[Path] = []
+    superseded_timestamps: dict[Path, list[datetime]] = {}
     for shot in manifest.shots:
         for kind in AssetKind:
             state = shot.asset(kind)
-            if state.upscaled_path:
+            if state.upscaled_path and not _has_symlink_component(
+                project.root, state.upscaled_path
+            ):
                 kept.add(project.path(state.upscaled_path))
             settled = _is_settled(state)
             for attempt in state.attempts:
                 if not attempt.path:
                     continue
-                is_symlinked = _has_symlink_component(project.root, attempt.path)
+                if _has_symlink_component(project.root, attempt.path):
+                    continue
                 path = project.path(attempt.path)
                 if not settled or attempt.number == state.selected_attempt:
                     kept.add(path)
-                elif not is_symlinked and path.is_file() and _is_generation_file(project, path):
+                elif path.is_file() and _is_generation_file(project, path):
                     superseded_candidates.append(path)
+                    if cutoff is not None:
+                        ts = _parse_utc(attempt.created_at) or _file_mtime_utc(path)
+                        superseded_timestamps.setdefault(path, []).append(ts)
     seen_superseded: set[Path] = set()
+    known_superseded: set[Path] = set()
     for path in superseded_candidates:
-        if path not in kept and path not in seen_superseded:
-            seen_superseded.add(path)
-            plan.superseded.append(path)
+        if path in kept:
+            continue
+        known_superseded.add(path)
+        if path in seen_superseded:
+            continue
+        if cutoff is not None:
+            timestamps = superseded_timestamps.get(path)
+            newest = max(timestamps) if timestamps else _file_mtime_utc(path)
+            if not _is_expired(newest, cutoff):
+                continue
+        seen_superseded.add(path)
+        plan.superseded.append(path)
     for folder in _GENERATION_FOLDERS:
         if _has_symlink_component(project.root, folder):
             continue
@@ -101,7 +159,8 @@ def plan_cleanup(project: Project, manifest: Manifest) -> CleanupPlan:
                 and p.is_file()
                 and _GENERATION_NAME.fullmatch(p.name)
                 and p not in kept
-                and p not in seen_superseded
+                and p not in known_superseded
+                and _is_expired(_file_mtime_utc(p), cutoff)
             )
     if not _has_symlink_component(project.root, "assets/segments"):
         seg_root = project.path("assets/segments")
@@ -122,6 +181,7 @@ def plan_cleanup(project: Project, manifest: Manifest) -> CleanupPlan:
                 and p.is_file()
                 and _SEGMENT_CACHE_NAME.fullmatch(p.name)
                 and p not in active_segments
+                and _is_expired(_file_mtime_utc(p), cutoff)
             )
     cache_root = project.root / ".comfy_cache"
     if cache_root.is_dir() and not cache_root.is_symlink():
@@ -131,7 +191,11 @@ def plan_cleanup(project: Project, manifest: Manifest) -> CleanupPlan:
             dirnames[:] = [d for d in dirnames if not (current / d).is_symlink()]
             for filename in filenames:
                 candidate = current / filename
-                if not candidate.is_symlink() and candidate.is_file():
+                if (
+                    not candidate.is_symlink()
+                    and candidate.is_file()
+                    and _is_expired(_file_mtime_utc(candidate), cutoff)
+                ):
                     cache_files.append(candidate)
         plan.cache_files = sorted(cache_files)
     plan.size_bytes = sum(path.stat().st_size for path in plan.files)

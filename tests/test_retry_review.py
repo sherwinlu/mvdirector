@@ -184,6 +184,7 @@ def test_strict_mode_queues_only_exhausted_shots(config, manifest):
 
 def test_light_mode_queues_closeups_retried_and_near_threshold(config, manifest):
     config.review.other_rate = 0.0
+    config.planning.opening_seconds = 0.0
     clean, closeup, retried, borderline = manifest.shots[:4]
     for shot in (clean, retried, borderline):
         shot.framing = Framing.MEDIUM
@@ -285,6 +286,7 @@ def test_best_attempt_prefers_no_hard_failure_then_score(manifest):
 
 def test_advisory_lipsync_failure_queues_a_passed_shot_for_review(config, manifest):
     config.review.other_rate = 0.0
+    config.planning.opening_seconds = 0.0
     shot = manifest.shots[0]
     shot.framing = Framing.MEDIUM
     _finish(shot)

@@ -12,6 +12,7 @@ be moved between machines.
 
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from collections.abc import Collection, Sequence
@@ -33,6 +34,7 @@ from mvdirector.errors import UnknownIdError
 
 ANALYSIS_SCHEMA_VERSION = 1
 MANIFEST_SCHEMA_VERSION = 1
+DEFAULT_OPENING_SECONDS = 8.0
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 
@@ -779,6 +781,7 @@ class ReviewReason(str, Enum):
     ESCALATED = "escalated"
     LIPSYNC = "lipsync"
     FALLBACK = "fallback"
+    OPENING = "opening"
 
 
 class ReviewDecision(str, Enum):
@@ -1009,6 +1012,21 @@ class Shot(StrictModel):
     @property
     def duration(self) -> float:
         return self.end - self.start
+
+    def is_opening_at(self, opening_seconds: float = DEFAULT_OPENING_SECONDS) -> bool:
+        """True when the shot starts inside ``[0.0, opening_seconds)``."""
+        if (
+            isinstance(opening_seconds, bool)
+            or not math.isfinite(opening_seconds)
+            or opening_seconds <= 0.0
+        ):
+            return False
+        return self.start < opening_seconds
+
+    @property
+    def is_opening(self) -> bool:
+        """True when the shot starts within the default 8-second opening hook window."""
+        return self.is_opening_at(DEFAULT_OPENING_SECONDS)
 
     def asset(self, kind: AssetKind) -> AssetState:
         return self.still if kind is AssetKind.STILL else self.video

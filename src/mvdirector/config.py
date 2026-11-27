@@ -863,6 +863,36 @@ class PlanningConfig(_Section):
             "Defaults to qc.llm when qc.llm is audio-capable."
         ),
     )
+    max_props: int = Field(
+        default=3,
+        ge=0,
+        le=30,
+        description=(
+            "Maximum recurring hero props the visual-bible planner may define (0-30). "
+            "Raise when your image/video R2V workflow binds additional prop_image_N slots."
+        ),
+    )
+    opening_seconds: float = Field(
+        default=8.0,
+        ge=0.0,
+        allow_inf_nan=False,
+        description=(
+            "Seconds from the start of the song treated as the opening hook window (0 disables)."
+        ),
+    )
+    pin_character_details: bool = Field(
+        default=True,
+        description=(
+            "Append each character's pinned invariants to generated still and motion prompts."
+        ),
+    )
+
+    @field_validator("max_props", "opening_seconds", mode="before")
+    @classmethod
+    def _reject_bool_for_planning_number(cls, value: Any, info: ValidationInfo) -> Any:
+        if isinstance(value, bool):
+            raise ValueError(f"planning.{info.field_name} must be a number, not a boolean.")
+        return value
 
 
 class ReferenceConfig(_Section):
@@ -1107,6 +1137,15 @@ class QCConfig(_Section):
             "overridden per media type."
         ),
     )
+    opening_threshold_margin: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=0.3,
+        allow_inf_nan=False,
+        description=(
+            "Optional margin added to QC pass_score and hard minimums for opening-hook shots."
+        ),
+    )
     vision_identity: bool = Field(
         default=True,
         description=(
@@ -1184,7 +1223,12 @@ class QCConfig(_Section):
     video: VideoQCConfig = Field(default_factory=VideoQCConfig)
 
     @field_validator(
-        "pass_score", "vision_spec", "vision_artifacts", "vision_character", mode="before"
+        "pass_score",
+        "vision_spec",
+        "vision_artifacts",
+        "vision_character",
+        "opening_threshold_margin",
+        mode="before",
     )
     @classmethod
     def _reject_bool_for_vision_threshold(cls, value: Any, info: ValidationInfo) -> Any:
@@ -1211,6 +1255,20 @@ class QCConfig(_Section):
 
 class RetryConfig(_Section):
     max_attempts: int = Field(default=4, ge=1)
+    opening_extra_attempts: int = Field(
+        default=2,
+        ge=0,
+        description=(
+            "Extra generation attempts granted to shots starting within planning.opening_seconds."
+        ),
+    )
+    keep_still_on_video_fail: bool = Field(
+        default=True,
+        description=(
+            "Keep an approved still when video generation retries, exhausts, or is rejected "
+            "so video-only retries do not regenerate the still."
+        ),
+    )
     strategies: list[RetryStrategy] = Field(
         default_factory=lambda: [
             RetryStrategy.NEW_SEED,
@@ -1263,6 +1321,13 @@ class RetryConfig(_Section):
     adjust_params: dict[str, dict[str, Any]] = Field(
         default_factory=lambda: {"still": {"steps": 40}, "video": {"steps": 40}}
     )
+
+    @field_validator("opening_extra_attempts", mode="before")
+    @classmethod
+    def _reject_bool_for_retry_number(cls, value: Any, info: ValidationInfo) -> Any:
+        if isinstance(value, bool):
+            raise ValueError(f"retry.{info.field_name} must be a number, not a boolean.")
+        return value
 
     @model_validator(mode="after")
     def _no_initial(self) -> RetryConfig:

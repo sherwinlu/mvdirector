@@ -740,6 +740,19 @@ class ComfyClient:
         except httpx.TransportError as exc:
             log.debug("ComfyUI /free request failed (%s); ignoring", exc)
 
+    def interrupt(self, prompt_id: str | None = None) -> None:
+        """Request ComfyUI to interrupt the currently executing (or specified) prompt."""
+        kwargs: dict[str, Any] = {"timeout": min(self._config.request_timeout, 10.0)}
+        if prompt_id is not None:
+            validated = _validate_prompt_id(prompt_id, label="Invalid ComfyUI prompt_id")
+            kwargs["json"] = {"prompt_id": validated}
+        try:
+            response = self._http.post("/interrupt", **kwargs)
+            if response.status_code >= 400:
+                log.debug("ComfyUI /interrupt returned HTTP %d; ignoring", response.status_code)
+        except httpx.TransportError as exc:
+            log.debug("ComfyUI /interrupt request failed (%s); ignoring", exc)
+
     def upload(
         self,
         path: Path,

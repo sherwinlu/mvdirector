@@ -225,15 +225,54 @@ def shift_to_vocal_onset(
     return result
 
 
-def _allowed_bar_steps(bar_length: float, video: VideoConfig) -> list[int]:
-    """Bar step sizes (from 8, 4, 2, 1) that fit within [min_clip_seconds, max_clip_seconds]."""
+def _allowed_bar_steps(
+    bar_length: float, video: VideoConfig, *, min_clip_override: float | None = None
+) -> list[int]:
+    """Bar step sizes (from 16, 8, 4, 2, 1) that fit within [min_clip, max_clip_seconds]."""
+    min_clip = video.min_clip_seconds if min_clip_override is None else min_clip_override
     max_bars = next((n for n in _VALID_BAR_STEPS if n * bar_length <= video.max_clip_seconds), 1)
     min_bars = next(
-        (n for n in reversed(_VALID_BAR_STEPS) if n * bar_length >= video.min_clip_seconds),
+        (n for n in reversed(_VALID_BAR_STEPS) if n * bar_length >= min_clip),
         1,
     )
     steps = [n for n in _VALID_BAR_STEPS if min_bars <= n <= max_bars]
     return steps or [max_bars]
+
+
+def _aligned_lyric_spans(analysis: Analysis) -> list[TimeSpan]:
+    """Timed lyric spans when Whisper/forced alignment succeeded on at least one line."""
+    has_aligned = any(
+        ln.timing_source == "aligned" and ln.start is not None and ln.end is not None
+        for ln in analysis.lyric_lines
+    )
+    if not has_aligned:
+        return []
+    return [
+        TimeSpan(start=ln.start, end=ln.end)
+        for ln in analysis.lyric_lines
+        if ln.start is not None and ln.end is not None and ln.end > ln.start
+    ]
+
+
+def _is_sung_span(
+    analysis: Analysis,
+    start: float,
+    end: float,
+    min_vocal_fraction: float,
+    lyric_spans: list[TimeSpan],
+) -> bool:
+    """True when ``[start, end]`` carries genuine singing (guarding against vocal-stem bleed)."""
+    duration = end - start
+    if duration <= 0.0:
+        return False
+    sung = sum(window.overlap(start, end) for window in analysis.vocal_windows)
+    if sung / duration < min_vocal_fraction:
+        return False
+    if lyric_spans:
+        lyric_overlap = sum(span.overlap(start, end) for span in lyric_spans)
+        if lyric_overlap < min(0.25, duration * 0.25):
+            return False
+    return True
 
 
 def _step_for_intensity(intensity: float, allowed_steps: list[int]) -> int:
@@ -417,7 +456,26 @@ def cut_points(
     elif len(bars) >= 2:
         bar_length = float(np.median(np.diff(bars)))
         allowed_steps = _allowed_bar_steps(bar_length, video)
+        broll_steps = (
+            _allowed_bar_steps(bar_length, video, min_clip_override=video.broll_min_clip_seconds)
+            if video.broll_min_clip_seconds is not None
+            else allowed_steps
+        )
+        lyric_spans = _aligned_lyric_spans(analysis) if broll_steps != allowed_steps else []
         bars_per_shot = allowed_steps[0]
+
+        def _steps_for_bar(bar_idx: int) -> list[int]:
+            if broll_steps == allowed_steps:
+                return allowed_steps
+            b_start = bars[bar_idx]
+            b_end = bars[bar_idx + 1] if bar_idx + 1 < len(bars) else duration
+            return (
+                allowed_steps
+                if _is_sung_span(
+                    analysis, b_start, b_end, video.lipsync_min_vocal_fraction, lyric_spans
+                )
+                else broll_steps
+            )
 
         if not video.dynamic_pacing and not snap_sections and not handoff_cuts:
             points += [b for b in bars[::bars_per_shot] if 0.0 < b < duration]
@@ -437,22 +495,33 @@ def cut_points(
                 if 0.0 < bar_time < duration and bar_time != points[-1]:
                     points.append(bar_time)
 
+                bar_allowed = _steps_for_bar(idx)
                 step = (
-                    _step_for_intensity(float(intensities[idx]), allowed_steps)
+                    _step_for_intensity(float(intensities[idx]), bar_allowed)
                     if has_contrast
-                    else bars_per_shot
+                    else bar_allowed[0]
+                )
+                min_for_bar = (
+                    video.broll_min_clip_seconds
+                    if (
+                        video.broll_min_clip_seconds is not None
+                        and bar_allowed == broll_steps
+                        and broll_steps != allowed_steps
+                    )
+                    else video.min_clip_seconds
                 )
 
                 # Snap early if a new section starts or intensity surges to a faster tier.
                 next_idx = idx + step
                 for candidate in range(idx + 1, min(num_bars, next_idx)):
                     is_section_start = candidate in section_bars
+                    cand_allowed = _steps_for_bar(candidate)
                     is_intensity_surge = (
                         has_contrast
-                        and _step_for_intensity(float(intensities[candidate]), allowed_steps) < step
+                        and _step_for_intensity(float(intensities[candidate]), cand_allowed) < step
                     )
                     if (is_section_start or is_intensity_surge) and (
-                        bars[candidate] - bars[idx] >= video.min_clip_seconds
+                        bars[candidate] - bars[idx] >= min_for_bar
                     ):
                         next_idx = candidate
                         break
@@ -475,20 +544,33 @@ def cut_points(
         points.append(duration)
 
     protected = {round(c, 3) for c in handoff_cuts}
+    merge_lyric_spans = (
+        _aligned_lyric_spans(analysis) if video.broll_min_clip_seconds is not None else []
+    )
+
+    def _span_min_clip(span_start: float, span_end: float) -> float:
+        if video.broll_min_clip_seconds is None:
+            return video.min_clip_seconds
+        if _is_sung_span(
+            analysis, span_start, span_end, video.lipsync_min_vocal_fraction, merge_lyric_spans
+        ):
+            return video.min_clip_seconds
+        return video.broll_min_clip_seconds
+
     # Drop boundaries that would leave a sliver; prefer keeping singer-handoff cuts over bar cuts.
     merged = [points[0]]
     for point in points[1:-1]:
         r_point = round(point, 3)
-        if point - merged[-1] >= video.min_clip_seconds:
+        if point - merged[-1] >= _span_min_clip(merged[-1], point):
             merged.append(point)
         elif (
             r_point in protected
             and len(merged) > 1
             and round(merged[-1], 3) not in protected
-            and point - merged[-2] >= video.min_clip_seconds
+            and point - merged[-2] >= _span_min_clip(merged[-2], point)
         ):
             merged[-1] = point
-    if len(merged) > 1 and duration - merged[-1] < video.min_clip_seconds:
+    if len(merged) > 1 and duration - merged[-1] < _span_min_clip(merged[-1], duration):
         merged.pop()
     merged.append(duration)
 
@@ -599,33 +681,14 @@ def segment(
 ) -> list[Segment]:
     points = cut_points(analysis, video, snap_sections=snap_sections, pacing_plugin=pacing_plugin)
     timeline = section_timeline(analysis)
-    # When Whisper/forced alignment succeeded on at least one lyric line, guard against Demucs
-    # instrumental bleed (e.g. lead synths leaking into vocals.wav during an intro) by not
-    # scheduling LIPSYNC on segments that have negligible overlap with any timed lyric line.
-    has_aligned_lyrics = any(
-        ln.timing_source == "aligned" and ln.start is not None and ln.end is not None
-        for ln in analysis.lyric_lines
-    )
-    lyric_spans = (
-        [
-            TimeSpan(start=ln.start, end=ln.end)
-            for ln in analysis.lyric_lines
-            if ln.start is not None and ln.end is not None and ln.end > ln.start
-        ]
-        if has_aligned_lyrics
-        else []
-    )
+    lyric_spans = _aligned_lyric_spans(analysis)
     segments = []
     for start, end in zip(points[:-1], points[1:]):
         if end <= start:
             continue
-        duration = end - start
-        sung = sum(window.overlap(start, end) for window in analysis.vocal_windows)
-        is_lipsync = sung / duration >= video.lipsync_min_vocal_fraction
-        if is_lipsync and lyric_spans:
-            lyric_overlap = sum(span.overlap(start, end) for span in lyric_spans)
-            if lyric_overlap < min(0.25, duration * 0.25):
-                is_lipsync = False
+        is_lipsync = _is_sung_span(
+            analysis, start, end, video.lipsync_min_vocal_fraction, lyric_spans
+        )
         segments.append(
             Segment(
                 start=start,

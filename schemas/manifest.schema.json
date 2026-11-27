@@ -810,7 +810,8 @@
         "sampled",
         "escalated",
         "lipsync",
-        "fallback"
+        "fallback",
+        "opening"
       ],
       "title": "ReviewReason",
       "type": "string"
@@ -1245,6 +1246,20 @@
         },
         "review": {
           "$ref": "#/$defs/Review"
+        },
+        "rejection_count": {
+          "default": 0,
+          "description": "How many times a reviewer has rejected this shot. Unlike review.decision, which the runner clears when the shot regenerates, this survives regeneration.",
+          "minimum": 0,
+          "title": "Rejection Count",
+          "type": "integer"
+        },
+        "still_restarts": {
+          "default": 0,
+          "description": "Times this shot restarted from a new still after its video used up its attempts (retry.keep_still_on_video_fail false), capped by retry.max_still_restarts.",
+          "minimum": 0,
+          "title": "Still Restarts",
+          "type": "integer"
         }
       },
       "required": [

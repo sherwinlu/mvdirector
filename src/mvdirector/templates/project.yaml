@@ -116,6 +116,9 @@ planning:
   max_lipsync_share: 0.45        # cap on screen time the singer sings to camera: 0.7 performance,
                                  #   0.45 hybrid, 0.2 narrative; the rest becomes cutaways (null = no cap)
   audio_listen: auto             # auto | always | never: run a 1-call Gemini MP3 listen when planner is text-only
+  max_props: 3                   # max recurring hero props in the visual bible (0-30)
+  opening_seconds: 8.0           # seconds from song start treated as the opening hook window (0 disables)
+  pin_character_details: true    # pin character invariants into generated still & motion prompts
   # audio_llm:                   # optional audio-capable LLM for native MP3 listen (defaults to qc.llm if Gemini)
   #   provider: gemini
   #   model: gemini-3.8-flash
@@ -138,6 +141,7 @@ props:
 
 qc:
   pass_score: 0.70
+  opening_threshold_margin: 0.0  # optional extra QC margin added for opening-hook shots (0.0-0.3)
   vision_enabled: true
   # llm:                         # optional separate LLM for Vision QC (e.g. fast/cheap Gemini while planning with Claude)
   #   provider: gemini
@@ -152,6 +156,9 @@ qc:
 
 retry:
   max_attempts: 4
+  opening_extra_attempts: 2
+  keep_still_on_video_fail: true
+  max_still_restarts: 1
   strategies: [new_seed, rewrite_prompt, adjust_params]
   max_generations_per_run: 300
   adjust_params:

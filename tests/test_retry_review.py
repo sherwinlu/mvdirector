@@ -184,6 +184,7 @@ def test_strict_mode_queues_only_exhausted_shots(config, manifest):
 
 def test_light_mode_queues_closeups_retried_and_near_threshold(config, manifest):
     config.review.other_rate = 0.0
+    config.planning.opening_seconds = 0.0
     clean, closeup, retried, borderline = manifest.shots[:4]
     for shot in (clean, retried, borderline):
         shot.framing = Framing.MEDIUM
@@ -234,7 +235,7 @@ def test_reject_video_resets_it_and_escalates_shot_type(config, manifest):
 
     review.reject(manifest, rejected.id, "eyes look wrong", AssetKind.VIDEO, config)
     assert rejected.video.status is AssetStatus.PENDING
-    assert rejected.video.attempts_allowed == 1 + config.retry.max_attempts
+    assert rejected.video.attempts_allowed == 1 + config.attempt_budget(rejected.start)
     assert rejected.video.director_note == "eyes look wrong"
     assert rejected.still.status is AssetStatus.PASSED
     assert not review.is_ready(rejected)
@@ -285,6 +286,7 @@ def test_best_attempt_prefers_no_hard_failure_then_score(manifest):
 
 def test_advisory_lipsync_failure_queues_a_passed_shot_for_review(config, manifest):
     config.review.other_rate = 0.0
+    config.planning.opening_seconds = 0.0
     shot = manifest.shots[0]
     shot.framing = Framing.MEDIUM
     _finish(shot)

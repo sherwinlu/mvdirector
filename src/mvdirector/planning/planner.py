@@ -470,6 +470,7 @@ def build_manifest(
             audio_notes=listening_notes,
             video_style=video_style,
             exclusions=merged_exclusions,
+            max_props=config.planning.max_props,
         )
     solo_vocals = config.planning.vocals == "solo"
     voice_map = (
@@ -573,6 +574,7 @@ def _write_bible(
     audio_notes: AudioListeningNotes | None = None,
     video_style: VideoStyle = VideoStyle.LIPSYNC,
     exclusions: Sequence[str] = (),
+    max_props: int = 3,
 ) -> None:
     section_list = "\n".join(f"- {name}" for name in _section_order(lyrics_text)) or "(none)"
     parts = [f"MUSIC STYLE AND BRIEF:\n{style_text}"]
@@ -602,11 +604,14 @@ def _write_bible(
     parts.append(f"SONG SECTIONS, IN ORDER:\n{section_list}")
     parts.append(f"LYRICS:\n{lyrics_text}")
     if video_style is VideoStyle.VISUAL:
-        bible_system = prompts.VISUAL_BIBLE_SYSTEM
+        bible_system = prompts.bible_system_prompt(prompts.VISUAL_BIBLE_SYSTEM, max_props)
     elif video_style is VideoStyle.NARRATIVE:
-        bible_system = f"{prompts.BIBLE_SYSTEM}\n\n{prompts.NARRATIVE_BIBLE_ADDENDUM}"
+        bible_system = (
+            f"{prompts.bible_system_prompt(prompts.BIBLE_SYSTEM, max_props)}\n\n"
+            f"{prompts.NARRATIVE_BIBLE_ADDENDUM}"
+        )
     else:
-        bible_system = prompts.BIBLE_SYSTEM
+        bible_system = prompts.bible_system_prompt(prompts.BIBLE_SYSTEM, max_props)
     try:
         bible = complete_json_with_optional_audio(
             llm,
@@ -672,7 +677,7 @@ def _write_bible(
             description=p.description,
             sections=p.sections,
         )
-        for p in bible.props
+        for p in bible.props[:max_props]
     ]
     manifest.visual_bible = prompts.sync_bible_exclusions(
         VisualBible(
@@ -737,6 +742,7 @@ def _timed_shots(
         num_frames = frames_for(
             slice_end - slice_start, video.fps, video.frame_multiple, video.frame_offset
         )
+        shot_attempts = config.attempt_budget(seg.start)
         shots.append(
             Shot(
                 id=shot_id,
@@ -754,8 +760,8 @@ def _timed_shots(
                     head_handle=round(seg.start - slice_start, 3),
                 ),
                 num_frames=num_frames,
-                still=AssetState(attempts_allowed=config.retry.max_attempts),
-                video=AssetState(attempts_allowed=config.retry.max_attempts),
+                still=AssetState(attempts_allowed=shot_attempts),
+                video=AssetState(attempts_allowed=shot_attempts),
             )
         )
     return shots
@@ -1586,6 +1592,7 @@ def _direct_shots(
                     style_text=style_text,
                     video_style=config.planning.video_style,
                     solo_vocals=config.planning.vocals == "solo",
+                    opening_seconds=config.planning.opening_seconds,
                 )
             except LLMUnavailableError as exc:
                 log.warning(
@@ -1789,6 +1796,7 @@ def _ask_for_batch(
     style_text: str = "",
     video_style: VideoStyle = VideoStyle.LIPSYNC,
     solo_vocals: bool = False,
+    opening_seconds: float = 8.0,
 ) -> dict[str, ShotCreative]:
     bible, character = manifest.visual_bible, manifest.character
     lines = []
@@ -1929,13 +1937,29 @@ def _ask_for_batch(
             active_stems = active_stems_in_span(analysis.stems, s.start, s.end)
             if active_stems:
                 stem_hint = f" stems=[{', '.join(active_stems)}]"
+        opening_flag = "opening=true " if s.is_opening_at(opening_seconds) else ""
         shot_lines.append(
-            f"- id={s.id} section={s.section or '(instrumental lead-in)'!r} {singer_hint}"
-            f"at={_clock(s.start)} ({s.start / total:.0%} through the song) type={s.type.value} "
-            f"duration={s.duration:.1f}s intensity={s.intensity:.2f} {pace_note}{stem_hint} "
-            f"lyrics={s.lyrics or '(instrumental)'!r}"
+            f"- id={s.id} {opening_flag}section={s.section or '(instrumental lead-in)'!r} "
+            f"{singer_hint}at={_clock(s.start)} ({s.start / total:.0%} through the song) "
+            f"type={s.type.value} duration={s.duration:.1f}s intensity={s.intensity:.2f} "
+            f"{pace_note}{stem_hint} lyrics={s.lyrics or '(instrumental)'!r}"
         )
     lines.append("SHOTS\n" + "\n".join(shot_lines))
+    if opening_seconds > 0.0 and any(s.is_opening_at(opening_seconds) for s in batch):
+        if video_style is VideoStyle.VISUAL:
+            lines.append(
+                f"OPENING HOOK PRIORITY (first {opening_seconds:g}s, shots marked opening=true): "
+                "Establish the film's visual world immediately with a striking, specific hero "
+                "motif in close_up or medium_close framing and dramatic light; avoid slow plain "
+                "establishing b-roll."
+            )
+        else:
+            lines.append(
+                f"OPENING HOOK PRIORITY (first {opening_seconds:g}s, shots marked opening=true): "
+                "Establish the character and world immediately with a striking visual hook. "
+                "Prefer close_up or medium_close framing of the lead (or the strongest visual "
+                "motif), and avoid plain slow establishing b-roll."
+            )
     if allow_multicut:
         lines.append(
             "MONTAGE MODE ENABLED: For high-energy spans (>= 4s), you may set allow_cuts=true and "

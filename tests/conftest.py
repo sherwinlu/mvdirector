@@ -225,8 +225,21 @@ def offline_gates(config: ProjectConfig) -> QualityGates:
     tests that only need QC wiring use these gates (face checks are recorded as skipped).
     """
     return QualityGates(
-        image=ImageQC(config.qc, config.video, None, None),
-        video=VideoQC(config.qc, config.video, None, None, None),
+        image=ImageQC(
+            config.qc,
+            config.video,
+            None,
+            None,
+            opening_seconds=config.planning.opening_seconds,
+        ),
+        video=VideoQC(
+            config.qc,
+            config.video,
+            None,
+            None,
+            None,
+            opening_seconds=config.planning.opening_seconds,
+        ),
         face_analyzer=None,
     )
 
@@ -240,6 +253,7 @@ class FakeComfy:
         self.uploads: list[str] = []
         self.upload_files: list[str] = []  # original filenames, in upload order
         self.free_calls: list[dict[str, Any]] = []
+        self.interrupt_calls: list[dict[str, Any]] = []
         self.fail_next_jobs = 0
 
     def transport(self) -> httpx.MockTransport:
@@ -251,6 +265,9 @@ class FakeComfy:
             return httpx.Response(200, json={"system": {}})
         if path == "/free":
             self.free_calls.append(json.loads(request.content))
+            return httpx.Response(200, json={})
+        if path == "/interrupt":
+            self.interrupt_calls.append(json.loads(request.content) if request.content else {})
             return httpx.Response(200, json={})
         if path == "/upload/image":
             name = f"upload_{len(self.uploads)}"

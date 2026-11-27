@@ -4,7 +4,7 @@
 
 ## Supported Topologies (Setup- & Model-Neutral)
 
-`mvdirector` (`v0.8.0b1` Beta) has been tested end-to-end **both fully locally and with ComfyUI running on a remote host**. Both ComfyUI and the LLM can run wherever works best for your hardware, using whichever models you choose:
+`mvdirector` (`v1.0.0`) has been tested end-to-end **both fully locally and with ComfyUI running on a remote host**. Both ComfyUI and the LLM can run wherever works best for your hardware, using whichever models you choose:
 
 | Topology | Where ComfyUI runs | Where `mvd` & LLM run | Example `COMFY_URL` |
 |---|---|---|---|
@@ -47,6 +47,7 @@ The extras let you install only what you use; by default `qc.on_missing_dependen
 | `qc` | MediaPipe Tasks (Apache-2.0): face detection, face framing, face presence and lip-sync. The two model files (~5 MB) download once into `~/.cache/mvdirector/mediapipe` (override with `MVD_MEDIAPIPE_CACHE_DIR`); the Docker images pre-fetch them. | Runs stop at startup unless `qc.on_missing_dependency: skip` is set (which records those checks as `skipped`). |
 | `syncnet` | PyTorch + MediaPipe for `qc.lipsync_backend: stable_syncnet` (ByteDance LatentSync's pixel-space `stable_syncnet.pt` under OpenRAIL++ paired with Apache-2.0 MediaPipe Face Detector for face cropping, avoiding Oxford VGG's research-only `syncnet_v2.model` and S3FD). Checkpoint (~1.6 GB) downloads once into `~/.cache/mvdirector/syncnet` (override with `MVD_SYNCNET_CACHE_DIR` or `qc.syncnet_model_path`). | Uses the default CPU-only MediaPipe mouth-vs-loudness check. |
 | `align` | `faster-whisper` word timestamps | Lyric timing is estimated from vocal activity. |
+| `stems` | MIT-licensed Demucs (`mvd prepare`) | Supply your own `inputs/vocals.wav` (and optional `drums.wav`). |
 | `ui` | Streamlit review UI | Use `mvd status`, `mvd approve`, `mvd reject`. |
 | `insightface` | InsightFace `buffalo_l` face-embedding similarity (`qc.face_backend: insightface`) | Identity is checked by the multimodal LLM (`vision_character`) against the reference sheet. |
 
@@ -97,7 +98,7 @@ docker compose run --rm mvd validate -p /workspace/projects/my-song
 
 ## Choosing the Language Model
 
-One model does every text task: writing a Suno brief (`mvd brief`), planning the visual bible and shots (`mvd plan`), planning 3D blocking previz (`mvd previz generate`), judging stills and clips, and rewriting prompts. You pick it once in `project.yaml`.
+By default, one top-level `llm:` model handles every LLM task: writing a Suno brief (`mvd brief`), planning the visual bible and shots (`mvd plan`), planning 3D blocking previz (`mvd previz generate`), judging stills and clips (`VisionJudge`), and rewriting failed prompts. You can also **split LLMs by role** using optional `qc.llm` (for Vision QC) and `planning.audio_llm` (for native MP3 audio listening).
 
 ```yaml
 llm:
@@ -113,6 +114,30 @@ llm:
   context_tokens: null       # ollama: context window to request (default 16384)
   stream: false              # openai / openai_compatible: stream the reply over SSE
 ```
+
+### Split-LLM Routing (Planner vs. Vision QC vs. Audio Listen)
+
+In cloud or hybrid setups, it is often faster and cheaper to pair a flagship reasoning model for creative direction with a fast multimodal model for Vision QC and audio listening:
+
+```yaml
+llm:
+  provider: anthropic
+  model: claude-sonnet-4-6       # plans visual bible, shots, and prompt rewrites
+
+planning:
+  audio_listen: auto             # auto | always | never (1-call MP3 listen when planner is text-only)
+  # audio_llm:                   # optional; defaults to qc.llm when qc.llm is audio-capable (e.g. gemini)
+  #   provider: gemini
+  #   model: gemini-2.5-flash
+
+qc:
+  llm:                           # optional separate model for Vision QC; defaults to top-level llm
+    provider: gemini
+    model: gemini-2.5-flash
+```
+
+- When `qc.llm` is omitted, `VisionJudge` uses the top-level `llm`.
+- When `planning.audio_listen` is `auto` (default) and the main planner does not accept audio input (e.g. Anthropic or OpenAI), `mvd plan` runs a single native-MP3 listening call using `planning.audio_llm` (falling back to `qc.llm` if audio-capable) to capture meter, timbre, and vocal delivery before writing the Visual Bible. Set `planning.audio_listen: never` to skip it.
 
 Set `llm.stream: true` when an `openai` or `openai_compatible` server sits behind a reverse proxy that drops idle connections (for example Cloudflare's 100-second HTTP 524 in front of RunPod vLLM): the reply then arrives in chunks that keep the connection alive. The whole reply is still bounded by `llm.timeout_seconds` and capped at 16 MiB, and a server that ignores `stream: true` and answers with plain JSON is handled too. Other providers ignore the setting.
 

@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import os
+import re
 import sys
 import threading
 import weakref
@@ -67,7 +68,9 @@ class RunEvent:
     ``kind`` is one of ``warning`` (preflight problems, in ``message``), ``qc_summary`` (the
     active and skipped checks, before any GPU time is spent), ``phase_started``,
     ``attempt_started``, ``attempt_finished``, ``asset_passed``, ``shot_converted``,
-    ``asset_exhausted`` and ``run_finished``. Anything building a UI or persisting progress
+    ``asset_exhausted``, ``asset_restarted`` (a video ran out of attempts and, with
+    ``retry.keep_still_on_video_fail`` false, both the still and the video went back to pending
+    for the next run) and ``run_finished``. Anything building a UI or persisting progress
     subscribes to these instead of parsing log lines.
     """
 
@@ -536,15 +539,99 @@ class ShotRunner:
         return None
 
     def _prop_paths(self, shot: Shot) -> list[tuple[str, Path]]:
-        """Locked prop reference images for ``shot.props`` that exist on disk."""
-        resolved: list[tuple[str, Path]] = []
-        for prop in self._manifest.visual_bible.resolve_props(shot.props):
+        """Locked prop reference images for ``shot.props``, sorted by shot-prompt mention."""
+        haystack = (
+            f"{shot.still.prompt_override or shot.still_prompt}\n"
+            f"{shot.video.prompt_override or shot.motion_prompt}"
+        ).casefold()
+        candidates: list[tuple[tuple[int, int, int], str, Path]] = []
+        for orig_idx, prop in enumerate(self._manifest.visual_bible.resolve_props(shot.props)):
             if not prop.plate:
                 continue
             path = self._project.path(prop.plate)
-            if path.is_file():
-                resolved.append((prop.name, path))
-        return resolved
+            if not path.is_file():
+                continue
+            terms = [
+                t
+                for t in dict.fromkeys(
+                    (
+                        prop.name.strip().casefold(),
+                        prop.id.replace("_", " ").strip().casefold(),
+                        prop.id.strip().casefold(),
+                    )
+                )
+                if t
+            ]
+            first_pos: int | None = None
+            for term in terms:
+                if term.replace(" ", "").isalnum():
+                    match = re.search(rf"\b{re.escape(term)}\b", haystack)
+                    pos = match.start() if match else -1
+                else:
+                    pos = haystack.find(term)
+                if pos >= 0 and (first_pos is None or pos < first_pos):
+                    first_pos = pos
+            rank = (0 if first_pos is not None else 1, first_pos or 0, orig_idx)
+            candidates.append((rank, prop.name, path))
+        candidates.sort(key=lambda item: item[0])
+        return [(name, path) for _, name, path in candidates]
+
+    @staticmethod
+    def _prop_slot_names(template: WorkflowTemplate) -> list[str]:
+        slots: list[tuple[int, str]] = []
+        for name in template.bindings.inputs:
+            if name == "prop_image":
+                slots.append((1, name))
+            elif name.startswith("prop_image_"):
+                suffix = name[len("prop_image_") :]
+                if suffix.isascii() and suffix.isdigit() and not suffix.startswith("0"):
+                    slot_num = int(suffix)
+                    if slot_num >= 2:
+                        slots.append((slot_num, name))
+        slots.sort(key=lambda item: item[0])
+        return [name for _, name in slots]
+
+    @staticmethod
+    def _targets_for_params(
+        template: WorkflowTemplate, param_names: Iterable[str]
+    ) -> set[tuple[str, str]]:
+        return {
+            (t.node, t.field)
+            for param in param_names
+            for t in template.bindings.inputs.get(param, ())
+        }
+
+    def _collect_prop_refs(
+        self,
+        template: WorkflowTemplate,
+        prop_refs: list[tuple[str, Path]],
+        *,
+        exclude_param: str | None = None,
+        used_targets: set[tuple[str, str]] | None = None,
+    ) -> tuple[list[tuple[str, str, Path]], dict[str, str]]:
+        """Bind ``prop_refs`` onto available ``prop_image`` / ``prop_image_N`` slots."""
+        if not prop_refs:
+            return [], {}
+        slots = self._prop_slot_names(template)
+        if not slots:
+            return [], {}
+        seen_targets = set(used_targets or ())
+        bound: list[tuple[str, str, Path]] = []
+        bound_names: dict[str, str] = {}
+        prop_iter = iter(prop_refs)
+        for slot in slots:
+            if not self._has_distinct_ref_target(
+                template, slot, exclude_param=exclude_param, used_targets=seen_targets
+            ):
+                continue
+            try:
+                prop_name, prop_path = next(prop_iter)
+            except StopIteration:
+                break
+            bound.append((slot, slot, prop_path))
+            bound_names[slot] = prop_name
+            seen_targets.update((t.node, t.field) for t in template.bindings.inputs.get(slot, ()))
+        return bound, bound_names
 
     def _attach_prop_refs(
         self,
@@ -553,11 +640,22 @@ class ShotRunner:
         prop_refs: list[tuple[str, Path]],
         *,
         client: ComfyClient | None = None,
+        exclude_param: str | None = None,
+        used_targets: set[tuple[str, str]] | None = None,
     ) -> None:
-        if prop_refs and template.accepts("prop_image"):
-            params["prop_image"] = self._upload(prop_refs[0][1], client=client)
-            if len(prop_refs) > 1 and template.accepts("prop_image_2"):
-                params["prop_image_2"] = self._upload(prop_refs[1][1], client=client)
+        prop_slots = set(self._prop_slot_names(template))
+        effective_targets = set(used_targets or ()) | self._targets_for_params(
+            template, (param for param in params if param not in prop_slots)
+        )
+        bound, _ = self._collect_prop_refs(
+            template,
+            prop_refs,
+            exclude_param=exclude_param,
+            used_targets=effective_targets,
+        )
+        for param, _, path in bound:
+            if param not in params:
+                params[param] = self._upload(path, client=client)
 
     def _previz_for(self, shot: Shot, template: WorkflowTemplate) -> Path | None:
         if not shot.previz_video or not template.accepts("previz_video"):
@@ -901,7 +999,9 @@ class ShotRunner:
         notation = self._project.config.comfy.reference_notation
         max_chars = self._project.config.comfy.max_prompt_chars
         still_refs: list[tuple[str, str, Path]] = []
+        still_targets: set[tuple[str, str]] = set()
         video_refs: list[tuple[str, str, Path]] = []
+        video_targets: set[tuple[str, str]] = set()
         prop_refs = self._prop_paths(shot)
         repair_source: Path | None = None
         if kind is AssetKind.STILL:
@@ -947,6 +1047,14 @@ class ShotRunner:
             else:
                 still_refs = self._still_reference_paths(shot, plate)
                 still_tpl = self._templates["still" if shot.type.shows_singer else "t2i"]
+                still_targets = self._targets_for_params(
+                    still_tpl, (param for param, _, _ in still_refs)
+                )
+                bound_props, bound_prop_names = self._collect_prop_refs(
+                    still_tpl, prop_refs, used_targets=still_targets
+                )
+                if bound_props:
+                    still_refs = [*still_refs, *bound_props]
                 sketch_binding = self._sketch_binding(shot, still_tpl, still_refs)
                 if sketch_binding is not None:
                     still_refs = [*still_refs, sketch_binding]
@@ -955,15 +1063,37 @@ class ShotRunner:
                     self._manifest,
                     shot,
                     plate_attached=plate is not None,
-                    props_attached=bool(prop_refs and still_tpl.accepts("prop_image")),
+                    props_attached=bool(bound_props),
                     reference_notation=notation,
                     bound_references=bound_ref_roles,
+                    bound_prop_names=bound_prop_names or None,
                     sketch_attached=sketch_binding is not None,
                     sketch_guidance=shot.sketch_guidance.strip() or None,
+                    pin_character_details=self._project.config.planning.pin_character_details,
                 )
         else:
             video_template = self._video_template(shot)
             video_refs = self._video_reference_paths(shot, video_template)
+            video_targets = self._targets_for_params(
+                video_template, ("image", *(param for param, _, _ in video_refs))
+            )
+            bound_props, bound_prop_names = self._collect_prop_refs(
+                video_template,
+                prop_refs,
+                exclude_param="image",
+                used_targets=video_targets,
+            )
+            if bound_props:
+                # Keep priority order: lead > set > secondaries > props (> draft_grid_image).
+                grid_idx = next(
+                    (i for i, (_, role, _) in enumerate(video_refs) if role == "draft_grid_image"),
+                    len(video_refs),
+                )
+                video_refs = [
+                    *video_refs[:grid_idx],
+                    *bound_props,
+                    *video_refs[grid_idx:],
+                ]
             video_ref_roles = [role for _, role, _ in video_refs] if video_refs else None
             previz = self._previz_for(shot, video_template)
             prompt = prompts.compose_motion_prompt(
@@ -974,6 +1104,8 @@ class ShotRunner:
                 has_audio_video=self._video_uses_audio_video(shot, video_template),
                 previz_attached=previz is not None,
                 bound_references=video_ref_roles,
+                bound_prop_names=bound_prop_names or None,
+                pin_character_details=self._project.config.planning.pin_character_details,
             )
         if max_chars is not None:
             prompt = prompts.fit_prompt_budget(prompt, max_chars)
@@ -995,6 +1127,7 @@ class ShotRunner:
                     still_refs,
                     prop_refs,
                     repair_source=repair_source,
+                    used_targets=still_targets,
                     client=client,
                 )
             else:
@@ -1004,6 +1137,7 @@ class ShotRunner:
                     destination,
                     prop_refs,
                     video_refs=video_refs,
+                    used_targets=video_targets,
                     client=client,
                 )
             attempt.path = self._project.rel(destination)
@@ -1079,15 +1213,22 @@ class ShotRunner:
 
     @staticmethod
     def _has_distinct_ref_target(
-        template: WorkflowTemplate, param: str, *, exclude_param: str | None = None
+        template: WorkflowTemplate,
+        param: str,
+        *,
+        exclude_param: str | None = None,
+        used_targets: set[tuple[str, str]] | None = None,
     ) -> bool:
         if not template.accepts(param):
             return False
-        if exclude_param is None:
-            return True
-        excluded = {(t.node, t.field) for t in template.bindings.inputs.get(exclude_param, ())}
         targets = {(t.node, t.field) for t in template.bindings.inputs.get(param, ())}
-        return bool(targets) and targets.isdisjoint(excluded)
+        if not targets:
+            return False
+        if exclude_param is not None:
+            excluded = {(t.node, t.field) for t in template.bindings.inputs.get(exclude_param, ())}
+            if not targets.isdisjoint(excluded):
+                return False
+        return not (used_targets and not targets.isdisjoint(used_targets))
 
     def _collect_reference_paths(
         self,
@@ -1100,13 +1241,26 @@ class ShotRunner:
     ) -> list[tuple[str, str, Path]]:
         """Ordered ``(binding_param, prompt_role, path)`` triples uploaded to ``template``.
 
-        Shared by ``still`` and R2V video workflows (``lipsync`` / ``i2v``). On solo shots where
-        the workflow exposes ``reference_image_2`` (but not a dedicated ``reference_face`` slot),
-        the singer's face-detail panel is routed into ``reference_image_2`` with prompt role
+        Priority order: lead character > set plate > secondary characters (with optional face
+        panels). Shared by ``still`` and R2V video workflows (``lipsync`` / ``i2v``). On solo shots
+        where the workflow exposes ``reference_image_2`` (but not a dedicated ``reference_face``
+        slot), the singer's face-detail panel is routed into ``reference_image_2`` with prompt role
         ``reference_face`` so multi-reference models get both full-body wardrobe continuity and
         high-resolution facial identity in one pass.
         """
         refs: list[tuple[str, str, Path]] = []
+        used_targets: set[tuple[str, str]] = set()
+
+        def _append_ref(param: str, role: str, path: Path) -> None:
+            refs.append((param, role, path))
+            used_targets.update((t.node, t.field) for t in template.bindings.inputs.get(param, ()))
+
+        def _append_set_plate() -> None:
+            if plate is not None and self._has_distinct_ref_target(
+                template, "set_image", exclude_param=exclude_param, used_targets=used_targets
+            ):
+                _append_ref("set_image", "set_image", plate)
+
         if shot.type.shows_singer:
             reference = self._reference_set(shot)
             front = reference.panel("front") if reference else None
@@ -1139,7 +1293,7 @@ class ShotRunner:
                 return None
 
             if self._has_distinct_ref_target(
-                template, "reference_image", exclude_param=exclude_param
+                template, "reference_image", exclude_param=exclude_param, used_targets=used_targets
             ):
                 if reference is None or front is None:
                     if require_primary_reference:
@@ -1179,7 +1333,7 @@ class ShotRunner:
                     candidate_front = self._project.path(primary_panel)
                     if require_primary_reference or candidate_front.is_file():
                         front_path = candidate_front
-                        refs.append(("reference_image", "reference_image", front_path))
+                        _append_ref("reference_image", "reference_image", front_path)
             # Extra angles go only to workflows that bind them, so nothing is uploaded for nothing.
             has_face_ref = False
             if reference is not None:
@@ -1192,40 +1346,23 @@ class ShotRunner:
                     path = reference.panel(name)
                     param = f"reference_{name}"
                     if path and self._has_distinct_ref_target(
-                        template, param, exclude_param=exclude_param
+                        template, param, exclude_param=exclude_param, used_targets=used_targets
                     ):
                         panel_path = self._project.path(path)
                         if panel_path.is_file():
-                            refs.append((param, param, panel_path))
+                            _append_ref(param, param, panel_path)
                             if name == "face":
                                 has_face_ref = True
             visible = self._manifest.visible_characters(shot)
-            if len(visible) > 1:
-                for idx, (_, sec_char, sec_state) in enumerate(visible[1:], start=2):
-                    param = f"reference_image_{idx}"
-                    if not self._has_distinct_ref_target(
-                        template, param, exclude_param=exclude_param
-                    ):
-                        continue
-                    sec_ref = sec_char.reference_for(sec_state)
-                    if is_rear_view:
-                        sec_panel = _first_existing_panel(sec_ref, ("back", "profile", "front"))
-                    elif is_profile_view:
-                        sec_panel = _first_existing_panel(
-                            sec_ref, ("profile", "three_quarter", "front")
-                        )
-                    else:
-                        sec_panel = sec_ref.panel("front") if sec_ref else None
-                    if sec_panel is not None:
-                        sec_path = self._project.path(sec_panel)
-                        if sec_path.is_file():
-                            refs.append((param, param, sec_path))
-            elif (
+            if (
                 len(visible) == 1
                 and not has_face_ref
                 and reference is not None
                 and self._has_distinct_ref_target(
-                    template, "reference_image_2", exclude_param=exclude_param
+                    template,
+                    "reference_image_2",
+                    exclude_param=exclude_param,
+                    used_targets=used_targets,
                 )
                 and not avoid_frontal_face
             ):
@@ -1236,11 +1373,54 @@ class ShotRunner:
                         front_path is not None and face_path.resolve() == front_path.resolve()
                     )
                     if not same_as_front and face_path.is_file():
-                        refs.append(("reference_image_2", "reference_face", face_path))
-        if plate is not None and self._has_distinct_ref_target(
-            template, "set_image", exclude_param=exclude_param
-        ):
-            refs.append(("set_image", "set_image", plate))
+                        _append_ref("reference_image_2", "reference_face", face_path)
+            _append_set_plate()
+            if len(visible) > 1:
+                for idx, (_, sec_char, sec_state) in enumerate(visible[1:], start=2):
+                    param = f"reference_image_{idx}"
+                    sec_ref = sec_char.reference_for(sec_state)
+                    sec_path: Path | None = None
+                    if self._has_distinct_ref_target(
+                        template,
+                        param,
+                        exclude_param=exclude_param,
+                        used_targets=used_targets,
+                    ):
+                        if is_rear_view:
+                            sec_panel = _first_existing_panel(sec_ref, ("back", "profile", "front"))
+                        elif is_profile_view:
+                            sec_panel = _first_existing_panel(
+                                sec_ref, ("profile", "three_quarter", "front")
+                            )
+                        else:
+                            sec_panel = sec_ref.panel("front") if sec_ref else None
+                        if sec_panel is not None:
+                            candidate = self._project.path(sec_panel)
+                            if candidate.is_file():
+                                sec_path = candidate
+                                _append_ref(param, param, sec_path)
+                    face_param = f"reference_image_{idx}_face"
+                    if (
+                        not avoid_frontal_face
+                        and sec_ref is not None
+                        and self._has_distinct_ref_target(
+                            template,
+                            face_param,
+                            exclude_param=exclude_param,
+                            used_targets=used_targets,
+                        )
+                    ):
+                        sec_face = sec_ref.panel("face")
+                        if sec_face is not None:
+                            sec_face_path = self._project.path(sec_face)
+                            same_as_primary = (
+                                sec_path is not None
+                                and sec_face_path.resolve() == sec_path.resolve()
+                            )
+                            if not same_as_primary and sec_face_path.is_file():
+                                _append_ref(face_param, face_param, sec_face_path)
+        else:
+            _append_set_plate()
         return refs
 
     def _still_reference_paths(self, shot: Shot, plate: Path | None) -> list[tuple[str, str, Path]]:
@@ -1327,6 +1507,7 @@ class ShotRunner:
         prop_refs: list[tuple[str, Path]],
         *,
         repair_source: Path | None = None,
+        used_targets: set[tuple[str, str]] | None = None,
         client: ComfyClient | None = None,
     ) -> None:
         video = self._project.config.video
@@ -1360,7 +1541,14 @@ class ShotRunner:
             if handoff is not None:
                 params["previous_frame"] = self._upload(handoff, client=client)
         if repair_source is None:
-            self._attach_prop_refs(params, template, prop_refs, client=client)
+            self._attach_prop_refs(
+                params,
+                template,
+                prop_refs,
+                client=client,
+                exclude_param="image",
+                used_targets=used_targets,
+            )
         self._run_comfy(
             template.render(params), template.bindings.output, destination, client=client
         )
@@ -1384,6 +1572,7 @@ class ShotRunner:
         prop_refs: list[tuple[str, Path]],
         *,
         video_refs: list[tuple[str, str, Path]] | None = None,
+        used_targets: set[tuple[str, str]] | None = None,
         client: ComfyClient | None = None,
     ) -> None:
         video = self._project.config.video
@@ -1449,7 +1638,14 @@ class ShotRunner:
                 guide_dst = self._project.path(f"assets/stills/{safe_shot_id}_path_guide.png")
                 media.zoom_crop_image(still_path, guide_dst, zoom_factor=shot.camera_path_zoom)
                 params["end_image"] = self._upload(guide_dst, client=client)
-        self._attach_prop_refs(params, template, prop_refs, client=client)
+        self._attach_prop_refs(
+            params,
+            template,
+            prop_refs,
+            client=client,
+            exclude_param="image",
+            used_targets=used_targets,
+        )
         previz = self._previz_for(shot, template)
         if previz is not None:
             params["previz_video"] = self._upload(self._with_audio(previz), client=client)
@@ -1688,7 +1884,7 @@ class ShotRunner:
                 "Light and shadow shift steadily across the frame with natural movement. "
                 "No people. Gentle push-in."
             )
-            shot.still.reset(self._project.config.retry.max_attempts)
+            shot.still.reset(self._project.config.attempt_budget(shot.start))
             shot.still.prompt_override = None
             shot.still.param_overrides = {}
 
@@ -1717,7 +1913,7 @@ class ShotRunner:
             _restore()
             return False
         with self._manifest_lock:
-            state.reset(self._project.config.retry.max_attempts)
+            state.reset(self._project.config.attempt_budget(shot.start))
             state.prompt_override = None
             state.param_overrides = {}
             shot.review = Review()
@@ -1767,7 +1963,7 @@ class ShotRunner:
             shot.fallback_from, shot.type = shot.type, ShotType.PERFORMANCE
             shot.singers = []
             shot.motion_prompt = prompts.PERFORMANCE_MOTION
-            state.reset(self._project.config.retry.max_attempts)
+            state.reset(self._project.config.attempt_budget(shot.start))
             state.prompt_override = None
             state.param_overrides = {}
             shot.review = Review()
@@ -1786,22 +1982,46 @@ class ShotRunner:
             state.status = AssetStatus.EXHAUSTED
             state.selected_attempt = best.number if best else None
             state.clear_pending_overrides()
+            retry = self._project.config.retry
+            wants_restart = kind is AssetKind.VIDEO and not retry.keep_still_on_video_fail
+            restart_from_still = wants_restart and shot.still_restarts < retry.max_still_restarts
+            if restart_from_still:
+                # Re-render the still from scratch. The clips made from the old still no longer
+                # match it, so the video goes back to pending as well and follows once the new
+                # still passes; left EXHAUSTED, it would never be rendered from the new still.
+                # Capped, so a shot that keeps failing goes to review instead of cycling.
+                shot.still_restarts += 1
+                budget = self._project.config.attempt_budget(shot.start)
+                shot.still.reset(budget)
+                state.reset(budget)
             self._project.save_manifest(self._manifest)
+        # A restart is not an exhaustion: the shot is pending again, not queued for review.
         self._emit(
             RunEvent(
-                "asset_exhausted",
+                "asset_restarted" if restart_from_still else "asset_exhausted",
                 asset=kind.value,
                 shot_id=shot.id,
                 attempt=best.number if best else 0,
                 generations_used=self._budget.used,
             )
         )
+        if restart_from_still:
+            outcome = "regenerating the still, then the video (retry.keep_still_on_video_fail)"
+        elif wants_restart and best:
+            outcome = (
+                f"retry.max_still_restarts ({retry.max_still_restarts}) reached; "
+                f"keeping attempt {best.number} for review"
+            )
+        elif best:
+            outcome = f"keeping attempt {best.number} for review"
+        else:
+            outcome = "nothing usable was produced"
         log.warning(
             "%s %s exhausted after %d attempts; %s",
             shot.id,
             kind.value,
             len(state.attempts),
-            f"keeping attempt {best.number} for review" if best else "nothing usable was produced",
+            outcome,
         )
 
     def _effective_mute_spans(self, shot: Shot) -> list[tuple[float, float]]:

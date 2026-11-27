@@ -69,6 +69,7 @@ class ScriptedGate:
 def planned(project, analysis, tmp_path, sample_png):
     """The project with a manifest and a locked reference portrait."""
     project.config.video.max_clip_seconds = 4.0
+    project.config.planning.opening_seconds = 0.0
     manifest = build_manifest(project.config, analysis, "lyrics", "style", llm=None)
     portrait = tmp_path / "portrait.png"
     portrait.write_bytes(sample_png)

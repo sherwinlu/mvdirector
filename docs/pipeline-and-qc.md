@@ -120,7 +120,20 @@ A reference sheet has four panels (front, profile, three-quarter, and macro face
   - **Derived & embedded plates:** Use `SetDesign.parent_set` or `--from-set <set>` to derive a variant lighting/angle plate from an existing locked set. Use `--style-ref <image>` to seed a plate from an external style reference, or `--embed-set <set>` to place an already-locked set inside a screen/window/portal of a new set.
   - When `still` binds `set_image`, each singer still receives its set's locked plate as a second reference image.
 - **Multi-angle set turnarounds (`mvd plates turnaround --set <name>` / `mvd plates lock-turnaround <image> --set <name>`):** From a locked plate, the `still` workflow renders a 2x2 sheet of the same location (`wide`, `reverse`, `side`, `detail`), cropped into `SetDesign.panels`. Each shot gets the panel matching its `plate_angle` override, or else its prompt cues (reverse angle, over-the-shoulder, side view, detail/insert) and framing, falling back to the main plate.
-- **Hero props (`mvd props generate` / `mvd props lock`):** Lock recurring objects (`assets/props/<prop>.png`); shots referencing those props forward `prop_image` / `prop_image_2` to `still` and `VisionJudge`.
+- **Hero props (`mvd props generate` / `mvd props lock`):** Lock recurring objects (`assets/props/<prop>.png`); `planning.max_props` (default `3`, configurable `0..30`) controls how many hero props the Visual Bible may declare. During generation, `ShotRunner` performs **priority-ordered generic N-slot binding** (`lead > set > secondaries > props`), binding `prop_image`, `prop_image_2`, … `prop_image_N` and secondary character panels (`reference_image_K_face`) up to whatever slots the workflow template accepts, and aligning `@imageN` tags in composed prompts when `reference_notation: tags` is enabled.
+- **Pre-spend reference coverage lint (`mvd assets --lint`):** Before spending GPU time, `lint_reference_coverage` scans shot prompts and continuity notes with a zero-LLM noun-phrase extractor, matches against declared characters/sets/props, and suggests `mvd props` / `mvd plates` commands. A declared but unlocked character, set or prop is flagged once it appears in `>= 3` shots or across `>= 2` song sections. An undeclared noun is only a guess at a hero object, so it must recur more: in `>= 3` shots *and* across `>= 3` sections (`undeclared_min_shots` / `undeclared_min_sections` on `lint_reference_coverage` and `api.lint_assets`). A word only counts as a noun once some prompt uses it in a closed noun phrase ("beside a brass lantern."), which keeps verbs and camera directions out of the report. Undeclared findings must first be added under `visual_bible.props` (or `visual_bible.settings`) in `manifest.json`, since the generate commands only accept declared entries.
+
+```mermaid
+flowchart LR
+    Manifest["manifest.json (VisualBible + Shots)"] --> Lint["lint_reference_coverage (zero-LLM)"]
+    Lint -- "Recurring undeclared nouns" --> Warn["Pre-Spend Findings + mvd props/plates hints"]
+    Manifest --> Slots["Priority Ref Binder"]
+    Slots --> P1["1. Lead character panels"]
+    Slots --> P2["2. Set plate / turnaround panel"]
+    Slots --> P3["3. Secondary cast + face panels (reference_image_K_face)"]
+    Slots --> P4["4. Hero props (prop_image .. prop_image_N)"]
+    P1 & P2 & P3 & P4 --> Prune["WorkflowTemplate Optional-Slot Pruning + @imageN Tags"]
+```
 
 ### Matching Detail to Shot Size
 
@@ -192,23 +205,48 @@ A failed **hard** check rejects the attempt outright. Otherwise the attempt pass
 
 Checks that cannot run (missing extra, wide framing, silent slice) are recorded as `skipped` with a reason, so the manifest always shows what was and was not verified. Every `mvd run`, `mvd stills`, and `mvd videos` prints which checks are active or skipped at startup.
 
-### Retry Ladder
+### Retry Ladder, Opening-Hook Priority & Keep-Still Gate
 
-Applied per asset (`retry.strategies`) until one attempt passes or `retry.max_attempts` is exhausted:
+Applied per asset (`retry.strategies`) until one attempt passes or the shot's attempt budget (`retry.max_attempts`, plus `retry.opening_extra_attempts` for shots starting within `planning.opening_seconds`, default `8.0s`) is exhausted. The same budget, opening bonus included, is granted again whenever a shot is rejected or otherwise reset for regeneration:
 
 1. `new_seed`: same prompt, new seed (used first on stochastic artifact/sync failures).
 2. `rewrite_prompt`: the LLM rewrites the prompt from the QC failure reasons and fix hints, replacing backfiring `'no <part>'` phrasing with affirmative visual descriptions (jumped to immediately on Attempt 2 when `vision_spec`, `no_people`, or `face_framing` fails).
 3. `adjust_params`: applies `retry.adjust_params` (for example more steps).
 
-**Explicit still fixes:** `mvd repair-still <shot> -i "<edit>"` edits the shot's current still in place (`repair_still`: keep composition, framing, and identity; apply only the edit) through a workflow that binds `reference_image`, and a repair that does worse on QC than its source is marked regressed and never selected over it. `mvd regenerate-still <shot> --strategy recreate [-i "<note>"]` renders the still from scratch, using the note as rewrite direction. Both reset the shot's video and review.
+```mermaid
+flowchart TD
+    Shot["Pending Shot"] --> OpenCheck{"shot.is_opening\n(start < planning.opening_seconds)?"}
+    OpenCheck -- "Yes" --> OpenBudget["Budget = max_attempts + opening_extra_attempts\nQC margin += qc.opening_threshold_margin"]
+    OpenCheck -- "No" --> StdBudget["Budget = retry.max_attempts"]
+    OpenBudget & StdBudget --> Pin{"planning.pin_character_details?"}
+    Pin -- "Yes" --> PromptPin["Pin character invariants & traits\nin still + motion prompts"]
+    Pin -- "No" --> PromptBase["Standard composed prompts"]
+    PromptPin & PromptBase --> Gen["Generate Attempt (Still or Video)"]
+    Gen --> Gate{"Passes QC Gate?"}
+    Gate -- "Yes" --> ReviewCheck{"Opening shot or\nlight-mode sample?"}
+    ReviewCheck -- "Yes" --> QueueRev["Queue Review (ReviewReason.OPENING / sample)"]
+    ReviewCheck -- "No" --> Done["Accepted"]
+    Gate -- "No" --> AttemptsLeft{"Attempts remaining?"}
+    AttemptsLeft -- "Yes" --> KeepStill{"Video failed &\nkeep_still_on_video_fail?"}
+    KeepStill -- "Yes" --> VideoRetry["Keep approved still;\nretry VIDEO only (next RetryStrategy)"]
+    KeepStill -- "No" --> NextStrat["Advance RetryStrategy\n(new_seed -> rewrite_prompt -> adjust_params)"]
+    VideoRetry & NextStrat --> Gen
+    AttemptsLeft -- "No" --> Exhaust["Keep best attempt &\nQueue for Human Review"]
+```
+
+- **Opening-hook priority:** `Shot.is_opening` is computed from `shot.start < planning.opening_seconds` (no schema migration). Planner prompts prioritize striking lead/motif framing in the opening window, QC optionally tightens thresholds by `qc.opening_threshold_margin`, and `ReviewReason.OPENING` ensures opening shots surface in review (including `light` mode).
+- **Keep approved stills on video failure (`retry.keep_still_on_video_fail: true`):** Video retries and human video rejections preserve an already-approved still rather than regenerating it from scratch. Set it to `false` to restart from the still instead: a rejected or exhausted video then sends both the still and the video back to pending, and the next run renders a new still followed by a video made from it. A shot restarts this way at most `retry.max_still_restarts` times (default `1`, `0` disables it, counted in the manifest's `Shot.still_restarts`); after that, an exhausted video keeps its best attempt and is queued for review.
+- **Pin character details (`planning.pin_character_details: true`):** Keeps non-negotiable character traits pinned into both still and motion prompts across retries.
+- **Explicit still fixes:** `mvd repair-still <shot> -i "<edit>"` edits the shot's current still in place (`repair_still`: keep composition, framing, and identity; apply only the edit) through a workflow that binds `reference_image`, and a repair that does worse on QC than its source is marked regressed and never selected over it. `mvd regenerate-still <shot> --strategy recreate [-i "<note>"]` renders the still from scratch, using the note as rewrite direction. Both reset the shot's video and review.
 
 When attempts run out, the best-scoring attempt is kept and the shot is queued for review. A failed ComfyUI job counts as an attempt; an unreachable server stops the run without using any. `retry.max_generations_per_run` caps total spend per run.
 
-### Calibrating the Quality Checks
+### Calibrating the Quality Checks & Attempt Statistics
 
 1. Generate a batch, then label clips good or bad by eye. Approve and reject them in the review UI, or write a CSV with `shot,kind,attempt,label` rows.
 2. Run `mvd calibrate` (or `mvd calibrate --labels labels.csv`). For every recorded metric it prints the cut that best separates your good and bad labels, the balanced accuracy of that cut, and the `project.yaml` key it belongs to. A balanced accuracy near `0.5` means the metric does not separate your clips; leave that threshold alone.
-3. Run `mvd qc-report` (or `mvd qc-report --markdown`) to see per-check pass, fail, and skip counts with skip reasons.
+3. Run `mvd qc-report` (or `mvd qc-report --markdown`) to see per-check pass, fail, and skip counts with skip reasons, plus **rejection-aware attempt statistics** (`report.attempt_stats(manifest)`: mean attempts per passed still/video split by shot type, the p90 attempt count and its multiplier over the mean, and the human-reject rate: the share of reviewed shots a reviewer rejected at least once, read from the durable `Shot.rejection_count` because `Review.decision` is cleared whenever a shot regenerates).
+4. Run `mvd clean --retention-days <N>` to prune superseded attempts older than `N` days while preserving every selected, approved, and active asset.
 
 By hand, compare your labels with the `metrics` recorded on each check in `manifest.json` and tune thresholds under `qc.image` and `qc.video` in `project.yaml` (all fields and defaults are in [`src/mvdirector/config.py`](../src/mvdirector/config.py)).
 

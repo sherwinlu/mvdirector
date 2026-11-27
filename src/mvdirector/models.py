@@ -12,6 +12,7 @@ be moved between machines.
 
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from collections.abc import Collection, Sequence
@@ -24,6 +25,7 @@ from pydantic import (
     ConfigDict,
     Field,
     SerializerFunctionWrapHandler,
+    ValidationInfo,
     field_validator,
     model_serializer,
     model_validator,
@@ -33,6 +35,7 @@ from mvdirector.errors import UnknownIdError
 
 ANALYSIS_SCHEMA_VERSION = 1
 MANIFEST_SCHEMA_VERSION = 1
+DEFAULT_OPENING_SECONDS = 8.0
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 
@@ -779,6 +782,7 @@ class ReviewReason(str, Enum):
     ESCALATED = "escalated"
     LIPSYNC = "lipsync"
     FALLBACK = "fallback"
+    OPENING = "opening"
 
 
 class ReviewDecision(str, Enum):
@@ -956,6 +960,30 @@ class Shot(StrictModel):
     still: AssetState = Field(default_factory=AssetState)
     video: AssetState = Field(default_factory=AssetState)
     review: Review = Field(default_factory=Review)
+    rejection_count: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "How many times a reviewer has rejected this shot. Unlike review.decision, which the "
+            "runner clears when the shot regenerates, this survives regeneration."
+        ),
+    )
+
+    still_restarts: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Times this shot restarted from a new still after its video used up its attempts "
+            "(retry.keep_still_on_video_fail false), capped by retry.max_still_restarts."
+        ),
+    )
+
+    @field_validator("rejection_count", "still_restarts", mode="before")
+    @classmethod
+    def _reject_bool_counts(cls, value: Any, info: ValidationInfo) -> Any:
+        if isinstance(value, bool):
+            raise ValueError(f"{info.field_name} must be an integer, not a boolean.")
+        return value
 
     @field_validator("id")
     @classmethod
@@ -1009,6 +1037,21 @@ class Shot(StrictModel):
     @property
     def duration(self) -> float:
         return self.end - self.start
+
+    def is_opening_at(self, opening_seconds: float = DEFAULT_OPENING_SECONDS) -> bool:
+        """True when the shot starts inside ``[0.0, opening_seconds)``."""
+        if (
+            isinstance(opening_seconds, bool)
+            or not math.isfinite(opening_seconds)
+            or opening_seconds <= 0.0
+        ):
+            return False
+        return self.start < opening_seconds
+
+    @property
+    def is_opening(self) -> bool:
+        """True when the shot starts within the default 8-second opening hook window."""
+        return self.is_opening_at(DEFAULT_OPENING_SECONDS)
 
     def asset(self, kind: AssetKind) -> AssetState:
         return self.still if kind is AssetKind.STILL else self.video

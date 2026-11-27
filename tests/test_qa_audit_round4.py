@@ -8,14 +8,17 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import threading
 from pathlib import Path
 
+import numpy as np
 import pytest
 from PIL import Image
 from typer.testing import CliRunner
 
 from mvdirector import api
+from mvdirector.assemble import ClipPlan, clip_command, source_frame_index
 from mvdirector.bench.config import BenchmarkConfig, GPUCostConfig, ModelArm
 from mvdirector.bench.dataset import QCLabelItem
 from mvdirector.bench.planning import run_planning_arm
@@ -29,12 +32,14 @@ from mvdirector.models import (
     AssetKind,
     AssetState,
     Attempt,
+    ContinuityMode,
     Framing,
     Manifest,
     RetryStrategy,
     ShotType,
     VisualBible,
 )
+from tests.conftest import needs_ffmpeg
 from tests.test_qa_audit_pr51 import (
     _make_shot,
     _make_tiny_png,
@@ -327,3 +332,63 @@ def test_review_ui_escapes_untrusted_markdown() -> None:
     assert escaped.replace("\\", "") == lyric
     assert md_text("# Title") == "\\# Title"
     assert md_text("José 💥") == "José 💥"
+
+
+# --------------------------------------------------------------------------- i2v_fps seam frames
+
+
+@pytest.mark.parametrize(
+    ("in_point", "drop", "played", "src_fps", "expected"),
+    [
+        # Observed with ffmpeg: a 16 fps source conformed by clip_command to a 24 fps timeline.
+        (0.0, True, 0, 16, 0),  # the dropped frame is a timeline frame; source frame 0 repeats
+        (0.1, True, 0, 16, 3),
+        (0.1, True, 11, 16, 10),
+        (0.25, True, 0, 16, 4),
+        (0.5, True, 11, 16, 16),
+        (0.3125, False, 0, 16, 5),
+        # Equal rates and frame-aligned in-points reduce to the plain frame offset.
+        (0.25, True, 4, 24, 11),
+    ],
+)
+def test_source_frame_index_matches_ffmpeg_conform(
+    in_point: float, drop: bool, played: int, src_fps: int, expected: int
+) -> None:
+    assert source_frame_index(in_point, drop, played, 24, src_fps) == expected
+
+
+@needs_ffmpeg
+def test_source_frame_index_against_real_clip_command(tmp_path: Path) -> None:
+    """Handoff and seam frames must be the frames that actually play after conform."""
+    src_fps, fps = 16, 24
+    src = tmp_path / "src.mkv"
+    raw = b"".join(np.full((32, 32), 4 * i, np.uint8).tobytes() for i in range(40))
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "gray", "-s", "32x32"]
+        + ["-r", str(src_fps), "-i", "-", "-c:v", "ffv1", "-pix_fmt", "gray", str(src)],
+        input=raw,
+        check=True,
+    )
+    # Avoid exact half-tick ties (e.g. 0.3125 s at 16 fps): ffmpeg resolves those by the
+    # container's timestamp precision, which no closed form can know.
+    for in_point, drop in ((0.0, True), (0.1, True), (0.1, False), (0.27, True), (0.5, True)):
+        plan = ClipPlan(
+            "s001",
+            12,
+            src,
+            True,
+            in_point,
+            drop_first_frame=drop,
+            continuity=ContinuityMode.CONTINUE,
+        )
+        out = tmp_path / "out.mp4"
+        subprocess.run(clip_command(plan, out, 32, 32, fps), check=True)
+        decoded = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", str(out), "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+            capture_output=True,
+            check=True,
+        ).stdout
+        frames = np.frombuffer(decoded, np.uint8).reshape(-1, 32, 32)
+        played = [int(round(f[8:24, 8:24].mean() / 4)) for f in frames]
+        expected = [source_frame_index(in_point, drop, j, fps, src_fps) for j in range(12)]
+        assert played == expected, (in_point, drop)

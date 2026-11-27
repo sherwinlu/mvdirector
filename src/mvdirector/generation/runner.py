@@ -606,10 +606,7 @@ class ShotRunner:
             with suppress(MediaToolError):
                 probed = media.probe(video_path)
                 if probed.fps is not None and probed.fps > 0 and abs(probed.fps - fps) > 0.5:
-                    end_sec = timing.in_point + (max(1, frames) - 1) / fps
-                    last_idx = max(0, round(end_sec * probed.fps)) + (
-                        1 if timing.drop_first_frame else 0
-                    )
+                    last_idx = timing.source_frame(max(1, frames) - 1, fps, probed.fps)
         return video_path, last_idx, prev_video
 
     def _previous_handoff_frame(self, shot: Shot) -> Path | None:

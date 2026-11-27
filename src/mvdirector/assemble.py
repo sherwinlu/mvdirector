@@ -341,8 +341,7 @@ def _intercut_run(
                 if need - take == 0 or need - take >= min_sub_frames:
                     split_chosen = (chosen, take)
                 elif (
-                    need >= 2 * min_sub_frames
-                    and remaining_frames[chosen] >= need - min_sub_frames
+                    need >= 2 * min_sub_frames and remaining_frames[chosen] >= need - min_sub_frames
                 ):
                     split_chosen = (chosen, need - min_sub_frames)
             if split_chosen is not None:

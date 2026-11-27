@@ -301,11 +301,7 @@ def filter_vocal_windows_by_words(
         return list(windows)
     kept: list[TimeSpan] = []
     for win in windows:
-        hits = [
-            w
-            for w in words
-            if min(win.end, float(w.end)) > max(win.start, float(w.start))
-        ]
+        hits = [w for w in words if min(win.end, float(w.end)) > max(win.start, float(w.start))]
         if len(hits) < min_words_per_window:
             continue
         trimmed_start = round(max(win.start, min(float(w.start) for w in hits) - pad), 3)

@@ -495,9 +495,7 @@ class VideoQC:
             progress = (
                 1.0
                 if self._cfg.lipsync_good <= self._cfg.lipsync_min
-                else linear_score(
-                    result.correlation, self._cfg.lipsync_min, self._cfg.lipsync_good
-                )
+                else linear_score(result.correlation, self._cfg.lipsync_min, self._cfg.lipsync_good)
             )
             sync_score: float | None = pass_floor + (1.0 - pass_floor) * progress
         elif blocking:

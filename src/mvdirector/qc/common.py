@@ -278,17 +278,22 @@ def vision_identity_check(
     judgeable: list[list[np.ndarray]] = []
     largest_px = 0
     for frame, faces in samples:
+        frame_h, frame_w = frame.shape[:2]
         valid: list[tuple[int, np.ndarray]] = []
         for face in faces:
             if face.bbox is None:
                 continue
-            h = face.bbox[3] - face.bbox[1]
-            if h <= 0 or face.bbox[2] <= face.bbox[0]:
+            x1, y1, x2, y2 = face.bbox
+            if y2 <= y1 or x2 <= x1:
+                continue
+            vis_h = min(frame_h, y2) - max(0, y1)
+            vis_w = min(frame_w, x2) - max(0, x1)
+            if vis_h <= 0 or vis_w <= 0:
                 continue
             crop = crop_face(frame, face.bbox)
             if crop.size == 0:
                 continue
-            valid.append((h, crop))
+            valid.append((vis_h, crop))
         if not valid:
             continue
         valid.sort(key=lambda item: item[0], reverse=True)

@@ -389,7 +389,7 @@ class ChatBackend(ABC):
         system_prompt = schema_prompt(system, schema)
         messages: list[Message] = [{"role": "user", "content": content}]
         self._warn_if_large(system_prompt, messages)
-        started = time.monotonic() if self._on_call is not None else 0.0
+        started: float | None = time.monotonic() if self._on_call is not None else None
         total_usage = TokenUsage()
         attempts = 0
         schema_retries = 0
@@ -478,12 +478,15 @@ class ChatBackend(ABC):
             raise
         finally:
             if self._on_call is not None:
+                latency = (
+                    round(max(0.0, time.monotonic() - started), 4) if started is not None else 0.0
+                )
                 try:
                     self._on_call(
                         CallTelemetry(
                             schema=schema.__name__,
                             model=self._model,
-                            latency_seconds=round(max(0.0, time.monotonic() - started), 4),
+                            latency_seconds=latency,
                             attempts=attempts,
                             schema_retries=schema_retries,
                             first_pass_ok=succeeded and schema_retries == 0,

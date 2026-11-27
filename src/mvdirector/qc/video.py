@@ -192,6 +192,16 @@ class VideoQC:
                         )
                     if check.weight < 0.0:
                         updates["weight"] = 0.0
+                    for metric_key, metric_val in check.metrics.items():
+                        if (
+                            isinstance(metric_val, bool)
+                            or not isinstance(metric_val, (int, float))
+                            or not math.isfinite(float(metric_val))
+                        ):
+                            raise ValueError(
+                                f"plugin {name!r} returned invalid metric {metric_key!r} "
+                                f"for {check.name!r}"
+                            )
                     sanitized.append(check.model_copy(update=updates) if updates else check)
                 results.extend(sanitized)
             except Exception as exc:  # noqa: BLE001
@@ -615,6 +625,8 @@ class VideoQC:
         count = self._cfg.vision_identity_frames
         if len(frames) > 2:
             positions = np.linspace(0, len(frames) - 1, num=count + 2)[1:-1]
+        elif len(frames) == 2 and count >= 2:
+            positions = np.array([0.0, 1.0])
         else:
             positions = np.array([0.0])
         samples: list[tuple[np.ndarray, list[Face]]] = []

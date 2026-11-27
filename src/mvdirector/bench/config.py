@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from collections.abc import Mapping, Sequence
@@ -26,6 +27,7 @@ from mvdirector.config import (
 from mvdirector.dotenv import read_project_dotenv
 from mvdirector.errors import ConfigError
 from mvdirector.project import Project
+from mvdirector.store import atomic_write
 
 _SAFE_ARM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}\Z")
 _SNAPSHOT_SUFFIX_RE = re.compile(
@@ -37,6 +39,20 @@ def _reject_bool_number(value: object, info: ValidationInfo) -> object:
     if isinstance(value, bool):
         raise ValueError(f"{info.field_name} must be a number, not a boolean.")
     return value
+
+
+def validate_budget_usd(max_budget_usd: float | None) -> float | None:
+    """Validate an optional USD spend cap, rejecting booleans, negatives, and NaN/Inf."""
+    if max_budget_usd is None:
+        return None
+    if isinstance(max_budget_usd, bool) or not isinstance(max_budget_usd, (int, float)):
+        raise ConfigError(f"max_budget_usd must be a non-negative number, got {max_budget_usd!r}.")
+    val = float(max_budget_usd)
+    if not math.isfinite(val) or val < 0.0:
+        raise ConfigError(
+            f"max_budget_usd must be finite and non-negative, got {max_budget_usd!r}."
+        )
+    return val
 
 
 class ModelPricing(BaseModel):
@@ -246,7 +262,7 @@ class GPUCostConfig(BaseModel):
 
 
 def default_arms() -> list[ModelArm]:
-    """Default 6-model + 1 optional text-only control test matrix."""
+    """Default 6-model + 5 optional control/specialist arms benchmark matrix."""
     return [
         ModelArm(
             id="A",
@@ -394,7 +410,7 @@ class BenchmarkConfig(BaseModel):
 
 
 def load_benchmark_config(path: Path | None) -> BenchmarkConfig:
-    """Load ``bench.yaml`` if provided, else return the built-in 7-arm default matrix."""
+    """Load ``bench.yaml`` if provided, else return the built-in default benchmark matrix."""
     if path is None:
         return BenchmarkConfig()
     if not path.is_file():
@@ -424,6 +440,8 @@ def open_bench_project(root: Path) -> Project:
         raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
     except (OSError, UnicodeDecodeError, yaml.YAMLError, RecursionError) as exc:
         raise ConfigError(f"Could not read {cfg_path}: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ConfigError(f"Config file {cfg_path} must contain a YAML mapping.")
     masked = mask_unset_allowed_env_refs(raw, environ=effective_env)
     try:
         config = ProjectConfig.model_validate(masked, context={"environ": effective_env})
@@ -446,7 +464,7 @@ def resolve_bench_environ(
 
 
 def write_default_benchmark_config(path: Path, *, overwrite: bool = False) -> Path:
-    """Write an editable starter ``bench.yaml`` containing the default 7-arm matrix."""
+    """Write an editable starter ``bench.yaml`` containing the default benchmark matrix."""
     if path.exists() and not overwrite:
         raise ConfigError(f"{path} already exists. Pass --overwrite to replace it.")
     cfg = BenchmarkConfig()
@@ -463,5 +481,5 @@ def write_default_benchmark_config(path: Path, *, overwrite: bool = False) -> Pa
         "# Optional control arms (optional: true) run with --include-controls or --arm B2.\n\n"
     )
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(header + yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    atomic_write(path, header + yaml.safe_dump(payload, sort_keys=False))
     return path

@@ -15,6 +15,7 @@ import math
 import os
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from PIL import Image
 from mvdirector import media
 from mvdirector.audio import broadcast_qa as broadcast_qa_mod
 from mvdirector.audio import foley as foley_mod
-from mvdirector.errors import ConfigError, MVDError
+from mvdirector.errors import ConfigError, MediaToolError, MVDError
 from mvdirector.models import (
     Analysis,
     Attempt,
@@ -131,6 +132,36 @@ class ClipTiming:
     def last_played_frame(self, frames: int, fps: int) -> int:
         return self.first_played_frame(fps) + max(1, frames) - 1
 
+    def source_frame(self, played: int, fps: int, source_fps: float) -> int:
+        """Native index in the source clip of played frame ``played`` (0-based)."""
+        return source_frame_index(self.in_point, self.drop_first_frame, played, fps, source_fps)
+
+
+def source_frame_index(
+    in_point: float, drop_first_frame: bool, played: int, fps: int, source_fps: float
+) -> int:
+    """Native source-clip frame shown as timeline frame ``played`` of a conformed clip.
+
+    Mirrors ``clip_command``: ``-ss in_point`` keeps source frames from the first one at or after
+    ``in_point``; ``fps={fps}`` (round=near) starts its output grid at that frame's tick and shows
+    the latest source frame whose rounded tick is not past each output tick; then
+    ``trim=start_frame=1`` drops one *timeline* frame, not one source frame. Verified frame-exact
+    against ffmpeg for 16/24/25/30 fps sources conformed to 24 fps, except on exact half-tick ties
+    that depend on the container's timestamp precision.
+    """
+    if fps <= 0 or not math.isfinite(source_fps) or source_fps <= 0:
+        return 0
+
+    def tick(idx: int) -> int:
+        return math.floor((idx / source_fps - in_point) * fps + 0.5)
+
+    first = max(0, math.ceil(in_point * source_fps - 1e-9))
+    target = tick(first) + max(0, played) + (1 if drop_first_frame else 0)
+    idx = first
+    while tick(idx + 1) <= target:
+        idx += 1
+    return idx
+
 
 def clip_timing(
     shot: Shot, video: Attempt, still: Attempt | None, *, sync_delay_compensation: bool
@@ -150,6 +181,8 @@ def clip_timing(
         raw_offset = video.sync_delay_seconds if sync_delay_compensation else 0.0
     else:
         raw_offset = video.optimal_in_offset
+    if not math.isfinite(raw_offset):
+        raw_offset = 0.0
     delay = round(max(-head, min(tail, raw_offset)), 4)
     continuity = shot.continuity
     if continuity is ContinuityMode.CONTINUE and not used_handoff:
@@ -622,8 +655,17 @@ def intercut_plans(
     Lip-sync shots, calm sections (< ``min_intensity``), still holds, and ``CONTINUE`` chains
     are preserved untouched. Total frame count is conserved identically for every run.
     """
-    if analysis is None or len(plans) != len(manifest.shots) or len(plans) < 2:
+    if (
+        analysis is None
+        or len(plans) != len(manifest.shots)
+        or len(plans) < 2
+        or isinstance(min_intensity, bool)
+        or not math.isfinite(min_intensity)
+    ):
         return list(plans)
+    safe_anticipation = (
+        max(0, int(anticipation_frames)) if not isinstance(anticipation_frames, bool) else 0
+    )
 
     used_ids: set[str] = {p.shot_id for p in plans}
     result: list[ClipPlan] = []
@@ -639,7 +681,7 @@ def intercut_plans(
                 manifest.fps,
                 tempo_bpm=analysis.tempo_bpm,
                 min_intensity=min_intensity,
-                anticipation_frames=anticipation_frames,
+                anticipation_frames=safe_anticipation,
                 used_ids=used_ids,
             )
         )
@@ -1002,8 +1044,21 @@ def assemble(
                     prev_png = work / f"{c_idx:04d}_{safe_id}_prev_ref.png"
                     curr_png = work / f"{c_idx:04d}_{safe_id}_curr_ref.png"
                     # First frame this clip actually plays (after any dropped handoff seam frame).
-                    in_frame = round(max(0.0, plan.head_handle + plan.sync_delay) * manifest.fps)
-                    start_idx = in_frame + (1 if plan.drop_first_frame else 0)
+                    in_point = max(0.0, plan.head_handle + plan.sync_delay)
+                    start_idx = round(in_point * manifest.fps) + (1 if plan.drop_first_frame else 0)
+                    if video_cfg.i2v_fps is not None:
+                        # Same rule as ShotRunner's handoff frame: map through time only when
+                        # the clip's native rate really differs from the timeline.
+                        with suppress(MediaToolError):
+                            probed = media.probe(plan.source)
+                            if (
+                                probed.fps is not None
+                                and probed.fps > 0
+                                and abs(probed.fps - manifest.fps) > 0.5
+                            ):
+                                start_idx = source_frame_index(
+                                    in_point, plan.drop_first_frame, 0, manifest.fps, probed.fps
+                                )
                     media.extract_frame_at_index(prev_path, max(0, prev_last_idx), prev_png)
                     media.extract_frame_at_index(plan.source, start_idx, curr_png)
                     with Image.open(prev_png) as p_img, Image.open(curr_png) as c_img:

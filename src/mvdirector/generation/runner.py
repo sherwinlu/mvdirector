@@ -601,7 +601,13 @@ class ShotRunner:
         )
         fps = self._manifest.fps
         frames = assemble.frame_counts([prev], fps)[0]
-        return video_path, timing.last_played_frame(frames, fps), prev_video
+        last_idx = timing.last_played_frame(frames, fps)
+        if self._project.config.video.i2v_fps is not None:
+            with suppress(MediaToolError):
+                probed = media.probe(video_path)
+                if probed.fps is not None and probed.fps > 0 and abs(probed.fps - fps) > 0.5:
+                    last_idx = timing.source_frame(max(1, frames) - 1, fps, probed.fps)
+        return video_path, last_idx, prev_video
 
     def _previous_handoff_frame(self, shot: Shot) -> Path | None:
         """The previous clip's last played frame, used as a ``reframe`` shot's reference."""
@@ -1940,15 +1946,16 @@ class ShotRunner:
         }
         marker = cond_path.with_name(f"{cond_path.name}.json")
         if (
-            cond_resolved.is_relative_to(project_root)
+            not cond_path.is_symlink()
+            and cond_resolved.is_relative_to(project_root)
             and cond_resolved.is_file()
             and cond_resolved.stat().st_size > 0
             and _read_stamp(marker) == stamp
         ):
             return cond_path
         try:
-            if cond_path.is_symlink() and not cond_resolved.is_relative_to(project_root):
-                raise ValueError(f"Conditioned audio path escapes project root: {cond_path}")
+            if cond_path.is_symlink():
+                raise ValueError(f"Conditioned audio path must not be a symlink: {cond_path}")
             analysis = None
             with suppress(Exception):
                 analysis = self._project.load_analysis()

@@ -29,6 +29,8 @@ from pydantic import (
     model_validator,
 )
 
+from mvdirector.errors import UnknownIdError
+
 ANALYSIS_SCHEMA_VERSION = 1
 MANIFEST_SCHEMA_VERSION = 1
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
@@ -652,6 +654,14 @@ class Attempt(StrictModel):
             "handles (ignored on lip-sync shots)."
         ),
     )
+
+    @field_validator("optimal_in_offset", mode="before")
+    @classmethod
+    def _reject_bool_optimal_in_offset(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("optimal_in_offset must be a number, not a boolean.")
+        return value
+
     regressed: bool = Field(
         default=False,
         description=(
@@ -1583,13 +1593,13 @@ class Manifest(StrictModel):
         for shot in self.shots:
             if shot.id == shot_id:
                 return shot
-        raise KeyError(f"No shot with id {shot_id!r}")
+        raise UnknownIdError(f"No shot with id {shot_id!r}")
 
     def chapter(self, chapter_id: str) -> MixChapter:
         for ch in self.chapters:
             if ch.id == chapter_id:
                 return ch
-        raise KeyError(f"No chapter with id {chapter_id!r}")
+        raise UnknownIdError(f"No chapter with id {chapter_id!r}")
 
     def find_chapter(self, chapter_id: str | None) -> MixChapter | None:
         if not chapter_id:

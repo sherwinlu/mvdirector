@@ -156,7 +156,9 @@ def dp_phrase_cuts(
         return penalty
 
     penalties = [_split_penalty(p) for p in pts]
-    lyric_spans = _aligned_lyric_spans(analysis) if video.broll_min_clip_seconds is not None else []
+    lyric_spans = (
+        _effective_aligned_lyric_spans(analysis) if video.broll_min_clip_seconds is not None else []
+    )
     intensities = analysis.bar_intensity
     has_contrast = (
         video.dynamic_pacing
@@ -299,6 +301,24 @@ def _aligned_lyric_spans(analysis: Analysis) -> list[TimeSpan]:
         )
     ]
     return _merge_time_spans(raw)
+
+
+def _effective_aligned_lyric_spans(analysis: Analysis) -> list[TimeSpan]:
+    """Aligned lyric spans that agree with ``analysis.vocal_windows``.
+
+    If Whisper hallucinated words exclusively in silent sections outside every vocal window,
+    returns ``[]`` so callers fall back to ``vocal_windows`` instead of wiping out all lip-sync
+    shots.
+    """
+    aligned = _aligned_lyric_spans(analysis)
+    if not aligned or not analysis.vocal_windows:
+        return aligned
+    overlapping = [
+        span
+        for span in aligned
+        if _span_overlap_total(analysis.vocal_windows, span.start, span.end) > 0.0
+    ]
+    return overlapping
 
 
 def _is_sung_span(
@@ -478,7 +498,7 @@ def _validate_pacing_cuts(
     pts[-1] = round(duration, 3)
     max_clip = max(0.1, video.max_clip_seconds)
     lyric_spans = (
-        _aligned_lyric_spans(analysis)
+        _effective_aligned_lyric_spans(analysis)
         if analysis is not None and video.broll_min_clip_seconds is not None
         else []
     )
@@ -541,7 +561,11 @@ def cut_points(
             if video.broll_min_clip_seconds is not None
             else allowed_steps
         )
-        lyric_spans = _aligned_lyric_spans(analysis) if broll_steps != allowed_steps else []
+        lyric_spans = (
+            _effective_aligned_lyric_spans(analysis)
+            if video.broll_min_clip_seconds is not None
+            else []
+        )
         bars_per_shot = allowed_steps[0]
 
         def _steps_for_bar(bar_idx: int) -> list[int]:
@@ -581,15 +605,6 @@ def cut_points(
                     if has_contrast
                     else bar_allowed[0]
                 )
-                min_for_bar = (
-                    video.broll_min_clip_seconds
-                    if (
-                        video.broll_min_clip_seconds is not None
-                        and bar_allowed == broll_steps
-                        and broll_steps != allowed_steps
-                    )
-                    else video.min_clip_seconds
-                )
 
                 # Snap early if a new section starts or intensity surges to a faster tier.
                 next_idx = idx + step
@@ -601,7 +616,10 @@ def cut_points(
                         and _step_for_intensity(float(intensities[candidate]), cand_allowed) < step
                     )
                     if (is_section_start or is_intensity_surge) and (
-                        bars[candidate] - bars[idx] >= min_for_bar
+                        bars[candidate] - bars[idx]
+                        >= _min_clip_for_span(
+                            analysis, video, bars[idx], bars[candidate], lyric_spans
+                        )
                     ):
                         next_idx = candidate
                         break
@@ -625,7 +643,7 @@ def cut_points(
 
     protected = {round(c, 3) for c in handoff_cuts}
     merge_lyric_spans = (
-        _aligned_lyric_spans(analysis) if video.broll_min_clip_seconds is not None else []
+        _effective_aligned_lyric_spans(analysis) if video.broll_min_clip_seconds is not None else []
     )
 
     def _span_min_clip(span_start: float, span_end: float) -> float:
@@ -755,7 +773,7 @@ def segment(
 ) -> list[Segment]:
     points = cut_points(analysis, video, snap_sections=snap_sections, pacing_plugin=pacing_plugin)
     timeline = section_timeline(analysis)
-    lyric_spans = _aligned_lyric_spans(analysis)
+    lyric_spans = _effective_aligned_lyric_spans(analysis)
     segments = []
     for start, end in zip(points[:-1], points[1:]):
         if end <= start:

@@ -12,6 +12,7 @@ breakdown and approve/reject controls. All decision logic lives in
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 import streamlit as st
@@ -31,6 +32,22 @@ from mvdirector.models import (
 )
 from mvdirector.project import Project
 from mvdirector.review import policy
+
+# Every Markdown-significant ASCII character, plus ':' (Streamlit's `:color[...]`/emoji
+# directives) and '$' (LaTeX). CommonMark treats a backslash before any ASCII punctuation as a
+# literal.
+_MARKDOWN_SPECIAL = re.compile(r"([\\`*_{}\[\]()#+\-.!|<>~:$])")
+
+
+def md_text(value: object) -> str:
+    """Escape manifest/LLM text for Streamlit Markdown.
+
+    Lyrics, chapter titles and tags come from user files, transcription or a model. Unescaped,
+    ``![x](https://host/p.png)`` made the reviewer's browser fetch a remote URL, and ``*sigh*`` or
+    a leading ``#`` silently restyled the text.
+    """
+    return _MARKDOWN_SPECIAL.sub(r"\\\1", str(value)).replace("\n", "  \n")
+
 
 _STATUS_ICON = {CheckStatus.PASSED: "✅", CheckStatus.FAILED: "❌", CheckStatus.SKIPPED: "➖"}
 
@@ -81,7 +98,7 @@ def _render_shot(project: Project, shot: Shot, *, stills_only: bool = False) -> 
     st.subheader(f"{shot.id} · {shot.type.value} · {shot.framing.value}")
     st.caption(f"{shot.start:.2f}s to {shot.end:.2f}s · queued because: {reasons}")
     if shot.lyrics:
-        st.markdown(f"**Lyrics:** {shot.lyrics}")
+        st.markdown(f"**Lyrics:** {md_text(shot.lyrics)}")
 
     video = shot.video.selected or shot.video.best_attempt()
     still = shot.still.selected or shot.still.best_attempt()
@@ -167,15 +184,15 @@ def _render_shot(project: Project, shot: Shot, *, stills_only: bool = False) -> 
 
 
 def _render_mix_chapter_header(chapter: MixChapter) -> None:
-    tags = ", ".join([*chapter.genre_tags, *chapter.mood_tags])
+    tags = md_text(", ".join([*chapter.genre_tags, *chapter.mood_tags]))
     tag_note = f" · {tags}" if tags else ""
-    label = format_chapter_label(chapter.title, chapter.artist)
+    label = md_text(format_chapter_label(chapter.title, chapter.artist))
     st.markdown(
         f"### {chapter.id} · {label} ({chapter.start:.0f}s–{chapter.end:.0f}s · "
         f"{chapter.bpm:.0f} BPM{tag_note})"
     )
     if chapter.environment:
-        st.caption(f"Theme: {chapter.environment}")
+        st.caption(f"Theme: {md_text(chapter.environment)}")
 
 
 def _render_mix_queue(
@@ -225,7 +242,7 @@ def main() -> None:
 
     queue = policy.pending_review(manifest)
     ready = sum(1 for shot in manifest.shots if policy.is_ready(shot, stills_only=stills_only))
-    st.title(manifest.title)
+    st.title(md_text(manifest.title))
     if manifest.mode is ProjectMode.MIX:
         cached = mix_assemble.cached_segment_count(project, manifest)
         st.caption(

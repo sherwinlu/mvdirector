@@ -179,6 +179,8 @@ def fit_optimal_transport_color_match(
         ("max_matrix_deviation", max_matrix_deviation),
         ("max_bias", max_bias),
     ):
+        if isinstance(param_val, bool):
+            raise ValueError(f"{param_name} must be a number, not a boolean.")
         val = float(param_val)
         if not math.isfinite(val) or val < 0.0:
             raise ValueError(f"{param_name} must be finite and non-negative, got {param_val!r}.")

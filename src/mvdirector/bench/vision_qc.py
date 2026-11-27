@@ -13,6 +13,7 @@ import html
 import io
 import json
 import logging
+import math
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -20,7 +21,7 @@ from typing import Any
 
 import numpy as np
 from PIL import Image
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from mvdirector.bench.config import (
     BenchmarkConfig,
@@ -28,6 +29,7 @@ from mvdirector.bench.config import (
     ModelArm,
     open_bench_project,
     resolve_bench_environ,
+    validate_budget_usd,
 )
 from mvdirector.bench.dataset import (
     FailureTag,
@@ -46,7 +48,7 @@ from mvdirector.config import ImageQCConfig
 from mvdirector.errors import ConfigError, ImagesNotSupportedError, LLMError
 from mvdirector.llm.base import is_refusal_error
 from mvdirector.llm.factory import build_llm
-from mvdirector.models import AssetKind, Manifest
+from mvdirector.models import AssetKind, Manifest, Shot
 from mvdirector.project import Project
 from mvdirector.qc.vision import VisionJudge
 from mvdirector.store import atomic_write
@@ -69,6 +71,8 @@ _CHECK_TO_TAG: dict[str, FailureTag] = {
 class CheckCalibrationMetrics(BaseModel):
     """Per-check balanced accuracy and optimal cut matching ``mvd calibrate``."""
 
+    model_config = ConfigDict(allow_inf_nan=False)
+
     check: str
     good_count: int = 0
     bad_count: int = 0
@@ -86,6 +90,8 @@ class CheckCalibrationMetrics(BaseModel):
 
 class GateOutcomeMetrics(BaseModel):
     """Combined hard-gate classification performance and Net Effective Cost / 90-shot Video."""
+
+    model_config = ConfigDict(allow_inf_nan=False)
 
     spec_threshold: float
     artifacts_threshold: float
@@ -110,6 +116,8 @@ class GateOutcomeMetrics(BaseModel):
 class QCItemVerdict(BaseModel):
     """One model arm's replay verdict on one labeled still."""
 
+    model_config = ConfigDict(allow_inf_nan=False)
+
     item_id: str
     project: str
     shot_id: str
@@ -129,11 +137,15 @@ class QCItemVerdict(BaseModel):
     latency_seconds: float = 0.0
     estimated_usd: float = 0.0
     cache_fingerprint: str = ""
+    # Digest of the still, reference images and shot specification that were judged.
+    input_digest: str = ""
     call: CallRecord | None = None
 
 
 class VisionQCArmResult(BaseModel):
     """Aggregated Track 2 Vision QC benchmark outcome for one model arm."""
+
+    model_config = ConfigDict(allow_inf_nan=False)
 
     arm_id: str
     arm_label: str
@@ -147,6 +159,8 @@ class VisionQCArmResult(BaseModel):
     errors: int = 0
     refusal_rate: float = 0.0
     wall_seconds: float = 0.0
+    # USD spent on live (uncached) judge calls during the run that produced this result.
+    live_usd: float = 0.0
     telemetry: TelemetrySummary = Field(default_factory=TelemetrySummary)
     per_check: dict[str, CheckCalibrationMetrics] = Field(default_factory=dict)
     default_gate: GateOutcomeMetrics | None = None
@@ -239,6 +253,36 @@ def _qc_cache_fingerprint(
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _qc_item_input_digest(
+    shot: Shot,
+    manifest: Manifest,
+    still_path: Path,
+    reference_image: Path | None,
+    extra_references: Sequence[tuple[str, Path]],
+) -> str:
+    """Digest of everything the judge sees for one item.
+
+    Item ids name a shot and attempt, not an image: an ``attempt``-less row follows whichever
+    take is selected, and a regenerated still, re-locked reference sheet or edited prompt keeps
+    the same id. A cached verdict is reused only when this digest still matches.
+    """
+    payload = {
+        "still": _file_sha256(still_path),
+        "reference": _file_sha256(reference_image) if reference_image is not None else None,
+        "extra": [[label, _file_sha256(path)] for label, path in extra_references],
+        "spec": VisionJudge.specification(shot, manifest),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
 def _load_compatible_cached_verdicts(
     arm_dir: Path,
     arm: ModelArm,
@@ -302,6 +346,18 @@ def evaluate_hard_gate(
     no active vision check drops below its hard minimum (note that refused/errored vision calls
     are skipped in production and therefore do not block an escaping bad still).
     """
+    for name, val in (
+        ("spec_min", spec_min),
+        ("artifacts_min", artifacts_min),
+        ("character_min", character_min),
+        ("mean_llm_usd_per_still", mean_llm_usd_per_still),
+    ):
+        if isinstance(val, bool) or not math.isfinite(float(val)):
+            raise ConfigError(f"{name} must be a finite number, got {val!r}.")
+    if mean_llm_usd_per_still < 0.0:
+        raise ConfigError(
+            f"mean_llm_usd_per_still must be non-negative, got {mean_llm_usd_per_still!r}."
+        )
     tp = tn = fp = fn = 0
     for v in verdicts:
         predicted_pass = _verdict_passes_gate(
@@ -447,6 +503,7 @@ def run_vision_qc_arm(
     on_progress: Callable[[str], None] | None = None,
 ) -> VisionQCArmResult:
     """Replay all labeled stills in ``dataset`` through ``arm`` using ``VisionJudge``."""
+    budget_cap = validate_budget_usd(max_budget_usd)
     arm_dir = out_root / "vision_qc" / arm.id
     arm_dir.mkdir(parents=True, exist_ok=True)
     verdicts_file = arm_dir / "verdicts.json"
@@ -478,10 +535,21 @@ def run_vision_qc_arm(
             proj, manifest, item, include_plates=include_plates
         )
         resolved_items.append((item, manifest, shot, still_path, ref_img, extra_refs))
+    input_digests = {
+        item.id: _qc_item_input_digest(shot, manifest, still_path, ref_img, extra_refs)
+        for item, manifest, shot, still_path, ref_img, extra_refs in resolved_items
+    }
+    # Verdicts for items outside this dataset are kept (and re-persisted) untouched.
+    cached_by_id = {
+        item_id: verdict
+        for item_id, verdict in cached_by_id.items()
+        if item_id not in input_digests
+        or (verdict.input_digest and verdict.input_digest == input_digests[item_id])
+    }
 
     started = time.monotonic()
     need_live = any(item.id not in cached_by_id for item, *_ in resolved_items) and (
-        max_budget_usd is None or max_budget_usd > 0.0
+        budget_cap is None or budget_cap > 0.0
     )
 
     raw_llm = None
@@ -522,11 +590,11 @@ def run_vision_qc_arm(
                     )
                 )
                 continue
-            if max_budget_usd is not None and live_spent_usd >= max_budget_usd:
+            if budget_cap is not None and live_spent_usd >= budget_cap:
                 if on_progress and not budget_hit:
                     on_progress(
                         f"Budget cap reached during Arm {arm.id} "
-                        f"(${live_spent_usd:.4f} >= ${max_budget_usd:.2f}); "
+                        f"(${live_spent_usd:.4f} >= ${budget_cap:.2f}); "
                         "skipping remaining uncached stills."
                     )
                 budget_hit = True
@@ -618,6 +686,7 @@ def run_vision_qc_arm(
                 latency_seconds=item_lat,
                 estimated_usd=item_usd,
                 cache_fingerprint=cache_fp,
+                input_digest=input_digests[item.id],
                 call=primary_call,
             )
             live_spent_usd += item_usd
@@ -648,6 +717,7 @@ def run_vision_qc_arm(
         blind_observer=blind_observer,
         cache_fingerprint=cache_fp,
     )
+    result.live_usd = round(live_spent_usd, 6)
     atomic_write(arm_dir / "metrics.json", result.model_dump_json(indent=2) + "\n")
     return result
 
@@ -685,6 +755,7 @@ def run_vision_qc_benchmark(
     """Run Track 2 Vision QC across selected arms and write merged summary + error reports."""
     if not dataset:
         raise ConfigError("Vision QC dataset is empty.")
+    budget_cap = validate_budget_usd(max_budget_usd)
     arms = config.select_arms(arm_ids, include_controls=include_controls)
     dataset_ids = {item.id for item in dataset}
     results: list[VisionQCArmResult] = []
@@ -700,19 +771,17 @@ def run_vision_qc_benchmark(
             )
         )
         fully_cached = dataset_ids.issubset(prior_cached)
-        if max_budget_usd is not None and not fully_cached and spent_usd >= max_budget_usd:
+        if budget_cap is not None and not fully_cached and spent_usd >= budget_cap:
             if on_progress and not budget_hit:
                 on_progress(
-                    f"Budget cap reached (${spent_usd:.4f} >= ${max_budget_usd:.2f}); "
+                    f"Budget cap reached (${spent_usd:.4f} >= ${budget_cap:.2f}); "
                     "skipping remaining uncached arms."
                 )
             budget_hit = True
             continue
         if on_progress:
             on_progress(f"Starting Track 2 Vision QC for Arm {arm.id} ({arm.model})...")
-        remaining_budget = (
-            max(0.0, max_budget_usd - spent_usd) if max_budget_usd is not None else None
-        )
+        remaining_budget = max(0.0, budget_cap - spent_usd) if budget_cap is not None else None
         res = run_vision_qc_arm(
             dataset,
             arm,
@@ -726,7 +795,9 @@ def run_vision_qc_benchmark(
             llm_factory=llm_factory,
             on_progress=on_progress,
         )
-        spent_usd += sum(v.estimated_usd for v in res.verdicts if v.item_id not in prior_cached)
+        # Count what this arm actually spent: an id in prior_cached is still re-judged live when
+        # its still, references or spec changed since the cached verdict.
+        spent_usd += res.live_usd
         results.append(res)
     merged = load_vision_qc_results(out_root / "vision_qc")
     write_vision_qc_reports(merged or results, out_root / "vision_qc")
@@ -735,7 +806,7 @@ def run_vision_qc_benchmark(
 
 def _format_check_cell(result: VisionQCArmResult, name: str) -> str:
     c = result.per_check.get(name)
-    if c is None or c.balanced_accuracy is None:
+    if c is None or c.balanced_accuracy is None or c.optimal_threshold is None:
         return "n/a"
     base = f"{c.balanced_accuracy:.3f} ({c.optimal_threshold:.2f})"
     if c.tag_balanced_accuracy is not None:

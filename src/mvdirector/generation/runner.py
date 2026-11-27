@@ -1367,12 +1367,14 @@ class ShotRunner:
         gen_frames = (
             max(1, int(round(clip_duration * gen_fps))) if gen_fps != video.fps else shot.num_frames
         )
+        neg_prompt = prompts.merge_negative_prompt(
+            self._manifest.visual_bible.negative_prompt,
+            self._manifest.visual_bible.exclusions,
+        )
         params: dict[str, Any] = {
             "positive_prompt": attempt.prompt,
-            "negative_prompt": prompts.merge_negative_prompt(
-                self._manifest.visual_bible.negative_prompt,
-                self._manifest.visual_bible.exclusions,
-            ),
+            "negative_prompt": neg_prompt,
+            "nag_enabled": bool(self._project.config.comfy.nag_enabled and neg_prompt.strip()),
             "lyrics": shot.lyrics,
             "seed": attempt.seed,
             "image": self._upload(still_path, client=client),

@@ -592,6 +592,13 @@ class ComfyConfig(_Section):
             "encoder and reference caches warm (inspired by xenoform and musicvision)."
         ),
     )
+    nag_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable ComfySwitchNode-gated NAG nodes (e.g. LTX2_NAG / WanVideoNAG) on distilled "
+            "cfg=1 video workflows whenever negative_prompt is non-empty."
+        ),
+    )
     min_free_vram_gb: float | None = Field(
         default=None,
         ge=0.5,

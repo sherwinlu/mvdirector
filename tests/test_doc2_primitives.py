@@ -363,8 +363,10 @@ def test_still_restarts_are_capped_then_the_shot_goes_to_review(
     shot = manifest.shots[0]
     shot.type = ShotType.BROLL
     fake = FakeComfy(png=sample_png, mp4=sample_mp4)
+    events: list[str] = []
 
     def _run() -> None:
+        events.clear()
         ShotRunner(
             project,
             manifest,
@@ -375,14 +377,18 @@ def test_still_restarts_are_capped_then_the_shot_goes_to_review(
             RetryPolicy(project.config.retry, project.config.seed, llm=None),
             load_templates(project, ["t2i", "still", "lipsync", "i2v"]),
             RunBudget(10),
+            observer=lambda event: events.append(event.kind),
         ).run([AssetKind.STILL, AssetKind.VIDEO], shot_ids=[shot.id])
 
     _run()  # first exhaustion: restart from a new still
     assert shot.still_restarts == 1
     assert shot.still.status is AssetStatus.PENDING
     assert shot.video.status is AssetStatus.PENDING
+    # Regression: a restart was reported as "exhausted; queued for review".
+    assert "asset_restarted" in events and "asset_exhausted" not in events
 
     _run()  # second exhaustion: the cap is reached, so it is kept for review
+    assert "asset_exhausted" in events and "asset_restarted" not in events
     assert shot.still_restarts == 1
     assert shot.still.status is AssetStatus.PASSED
     assert shot.video.status is AssetStatus.EXHAUSTED
@@ -399,3 +405,14 @@ def test_still_restarts_are_capped_then_the_shot_goes_to_review(
     shot = other
     _run()
     assert other.still_restarts == 0 and other.video.status is AssetStatus.EXHAUSTED
+
+
+def test_cli_progress_reports_restart_as_pending_not_review(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from mvdirector.cli import _progress
+    from mvdirector.generation.runner import RunEvent
+
+    _progress(RunEvent("asset_restarted", asset="video", shot_id="s01", attempt=2))
+    out = capsys.readouterr().out
+    assert "run again" in out and "queued for review" not in out

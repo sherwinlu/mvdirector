@@ -68,7 +68,9 @@ class RunEvent:
     ``kind`` is one of ``warning`` (preflight problems, in ``message``), ``qc_summary`` (the
     active and skipped checks, before any GPU time is spent), ``phase_started``,
     ``attempt_started``, ``attempt_finished``, ``asset_passed``, ``shot_converted``,
-    ``asset_exhausted`` and ``run_finished``. Anything building a UI or persisting progress
+    ``asset_exhausted``, ``asset_restarted`` (a video ran out of attempts and, with
+    ``retry.keep_still_on_video_fail`` false, both the still and the video went back to pending
+    for the next run) and ``run_finished``. Anything building a UI or persisting progress
     subscribes to these instead of parsing log lines.
     """
 
@@ -1993,9 +1995,10 @@ class ShotRunner:
                 shot.still.reset(budget)
                 state.reset(budget)
             self._project.save_manifest(self._manifest)
+        # A restart is not an exhaustion: the shot is pending again, not queued for review.
         self._emit(
             RunEvent(
-                "asset_exhausted",
+                "asset_restarted" if restart_from_still else "asset_exhausted",
                 asset=kind.value,
                 shot_id=shot.id,
                 attempt=best.number if best else 0,

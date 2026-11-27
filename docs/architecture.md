@@ -145,7 +145,7 @@ flowchart TD
   - `VideoQC` checks dimensions, duration, temporal stability (static/jump-cut/flicker, relaxed for `allow_cuts`), face presence, advisory lip-sync (`MediaPipeMouthTracker` or `StableSyncNetScorer`), identity, `join_continuity`, `beat_motion`, `color_drift`, and sampled-frame `VisionJudge`.
   - Any hard-check failure rejects the attempt; otherwise the weighted average (`qc.weights`) must meet `qc.pass_score` (plus `qc.opening_threshold_margin` for shots in `planning.opening_seconds`).
 - **Retry ladder (`retry.py`):** Escalates `new_seed` → `rewrite_prompt` (LLM rewrites from QC failure reasons) → `adjust_params` (e.g. higher `steps`). Supports `keep_still_on_video_fail`, targeted `in_place_repair`, `lipsync_fallback` (downgrade exhausted singing shot to `performance` or `broll`), and `smart_cutaway_rescue`.
-- **Event stream:** `ShotRunner` emits typed `RunEvent` objects (`warning`, `qc_summary`, `phase_started`, `attempt_started`, `attempt_finished`, `asset_passed`, `shot_converted`, `asset_exhausted`, `run_finished`) to any `observer` callback (CLI printer, MCP async job tracker, or host service).
+- **Event stream:** `ShotRunner` emits typed `RunEvent` objects (`warning`, `qc_summary`, `phase_started`, `attempt_started`, `attempt_finished`, `asset_passed`, `shot_converted`, `asset_exhausted`, `asset_restarted` (video exhausted with `retry.keep_still_on_video_fail: false`, so the still and video go back to pending), `run_finished`) to any `observer` callback (CLI printer, MCP async job tracker, or host service).
 
 ### 3.6 Review, Assembly & Mix Mode (`review/`, `assemble.py`, `mix_assemble.py`)
 

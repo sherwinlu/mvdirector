@@ -1742,6 +1742,12 @@ def _progress(event: RunEvent) -> None:
             f"      {event.shot_id} {event.asset} exhausted; queued for review",
             fg=typer.colors.YELLOW,
         )
+    elif event.kind == "asset_restarted":
+        typer.secho(
+            f"      {event.shot_id} {event.asset} exhausted; still and video reset "
+            "(retry.keep_still_on_video_fail), run again to regenerate them",
+            fg=typer.colors.YELLOW,
+        )
 
 
 @app.command("qc-report")

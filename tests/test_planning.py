@@ -403,3 +403,69 @@ def test_segment_suppresses_lipsync_on_instrumental_bleed_when_lyrics_aligned():
     # Unaligned / no-lyrics fallback keeps vocal_windows behavior unchanged
     unaligned = analysis.model_copy(update={"lyric_lines": []})
     assert all(s.type is ShotType.LIPSYNC for s in segment(unaligned, video))
+
+
+def test_filter_vocal_windows_by_words_drops_bleed_and_trims_edges():
+    from mvdirector.audio.analysis import filter_vocal_windows_by_words
+    from mvdirector.audio.lyrics import Word
+
+    windows = [
+        TimeSpan(start=5.0, end=14.1),  # synth pad with 1 spurious word
+        TimeSpan(start=15.0, end=29.8),  # real verse
+    ]
+    words = [
+        Word(word="I", start=5.3, end=6.1),
+        Word(word="Static", start=15.3, end=15.9),
+        Word(word="in", start=15.9, end=16.2),
+        Word(word="skin", start=27.7, end=28.4),
+        Word(word="You", start=43.5, end=44.9),  # hallucination in silence
+    ]
+    filtered = filter_vocal_windows_by_words(windows, words)
+    assert filtered == [TimeSpan(start=15.0, end=28.9)]
+    # When Whisper found <2 words in every window, keep original windows untouched
+    assert filter_vocal_windows_by_words(windows, [Word(word="You", start=43.5, end=44.9)]) == (
+        windows
+    )
+
+
+def test_populate_slice_mutes_silences_non_lyric_lead_in_and_preserves_breaths():
+    from mvdirector.models import AudioSlice, Manifest, Shot, VisualBible
+    from mvdirector.planning.planner import _populate_slice_mutes
+
+    analysis = Analysis(
+        duration=20.0,
+        tempo_bpm=120.0,
+        beats=[0.5 * i for i in range(40)],
+        bars=[2.0 * i for i in range(10)],
+        bar_intensity=[0.6] * 10,
+        vocal_windows=[TimeSpan(start=14.0, end=20.0)],
+        lyric_lines=[
+            LyricLine(text="First line", start=14.7, end=16.0, timing_source="aligned"),
+            LyricLine(text="Next line", start=16.3, end=18.0, timing_source="aligned"),
+        ],
+    )
+    # Shot 14.0-17.0s (slice 13.75-17.25s): lead-in 13.75-14.50s muted, brief 0.3s breath at
+    # 16.0-16.3s stays unmuted because +/-0.20s padding bridges it!
+    shot = Shot(
+        id="s009",
+        index=0,
+        start=14.0,
+        end=17.0,
+        type=ShotType.LIPSYNC,
+        framing=Framing.MEDIUM_CLOSE,
+        still_prompt="Singer.",
+        motion_prompt="Sings.",
+        audio_slice=AudioSlice(
+            path="assets/audio_slices/s009.wav", start=13.75, end=17.25, head_handle=0.25
+        ),
+        num_frames=85,
+    )
+    manifest = Manifest(
+        title="Test",
+        duration=20.0,
+        fps=24,
+        visual_bible=VisualBible(concept="c", style="s", palette="p", lighting="l"),
+        shots=[shot],
+    )
+    _populate_slice_mutes(manifest, analysis, voice_map={})
+    assert shot.audio_slice.mute_spans == [TimeSpan(start=13.75, end=14.5)]

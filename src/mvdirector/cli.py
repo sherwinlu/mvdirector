@@ -1747,13 +1747,12 @@ def qc_report(
     try:
         if json_output:
             import json
-            from dataclasses import asdict
 
             from mvdirector import report as report_mod
 
             manifest = api.open_project(project_dir, pull=False).load_manifest()
             payload = {
-                "summary": asdict(report_mod.summarize(manifest)),
+                "summary": report_mod.summarize(manifest).to_dict(),
                 "attempt_stats": report_mod.attempt_stats(manifest).to_dict(),
             }
             typer.echo(json.dumps(payload, indent=2))

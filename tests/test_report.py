@@ -82,6 +82,11 @@ def test_summary_counts_checks_attempts_and_asset_outcomes():
     assert stills.checks["face_present"].failed == 1
     # Nothing has been generated for the videos yet.
     assert summary.videos.pending == 2 and summary.videos.checks == {}
+    assert type(stills.checks) is dict and type(summary.videos.checks) is dict
+    serialized = summary.to_dict()
+    assert serialized["stills"]["checks"]["vision_spec"]["skip_reasons"] == {
+        "vision check disabled": 2
+    }
 
 
 def test_render_lists_every_check_with_skip_reasons_in_text_and_markdown():

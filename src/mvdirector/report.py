@@ -11,7 +11,7 @@ exercised a check shows up as such.
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -54,6 +54,14 @@ class CheckTally:
     def ran(self) -> int:
         return self.passed + self.failed
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "passed": self.passed,
+            "failed": self.failed,
+            "skipped": self.skipped,
+            "skip_reasons": dict(self.skip_reasons),
+        }
+
 
 @dataclass
 class AssetTally:
@@ -65,7 +73,20 @@ class AssetTally:
     exhausted: int = 0
     accepted_by_reviewer: int = 0
     pending: int = 0
-    checks: dict[str, CheckTally] = field(default_factory=lambda: defaultdict(CheckTally))
+    checks: dict[str, CheckTally] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "shots": self.shots,
+            "attempts": self.attempts,
+            "errored_attempts": self.errored_attempts,
+            "passed": self.passed,
+            "passed_first_try": self.passed_first_try,
+            "exhausted": self.exhausted,
+            "accepted_by_reviewer": self.accepted_by_reviewer,
+            "pending": self.pending,
+            "checks": {name: entry.to_dict() for name, entry in self.checks.items()},
+        }
 
 
 @dataclass
@@ -75,6 +96,9 @@ class QCReportSummary:
 
     def tally(self, kind: AssetKind) -> AssetTally:
         return self.stills if kind is AssetKind.STILL else self.videos
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"stills": self.stills.to_dict(), "videos": self.videos.to_dict()}
 
 
 def summarize(manifest: Manifest) -> QCReportSummary:
@@ -101,7 +125,7 @@ def summarize(manifest: Manifest) -> QCReportSummary:
                 if attempt.qc is None:
                     continue
                 for check in attempt.qc.checks:
-                    entry = tally.checks[check.name]
+                    entry = tally.checks.setdefault(check.name, CheckTally())
                     if check.status is CheckStatus.PASSED:
                         entry.passed += 1
                     elif check.status is CheckStatus.FAILED:

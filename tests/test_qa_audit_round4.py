@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -409,3 +410,18 @@ def test_source_frame_index_against_real_clip_command(tmp_path: Path, src_fps: i
         played = [int(round(f[8:24, 8:24].mean() / 4)) for f in frames]
         expected = [source_frame_index(in_point, drop, j, fps, src_fps) for j in range(12)]
         assert played == expected, (src_fps, in_point, drop)
+
+
+def test_source_frame_index_is_constant_time_and_total() -> None:
+    """A probed rate like 90000 fps (odd timebase) must not turn the lookup into a long scan."""
+    started = time.monotonic()
+    for _ in range(200):
+        source_frame_index(0.1, True, 479, 24, 1_000_000.0)
+    assert time.monotonic() - started < 0.5
+    assert source_frame_index(0.1, True, 479, 24, 1_000_000.0) == source_frame_index(
+        0.1, True, 479, 24, 1_000_000
+    )
+    # Non-finite or negative in-points degrade to the clip start instead of raising.
+    assert source_frame_index(float("nan"), False, 0, 24, 24) == 0
+    assert source_frame_index(float("inf"), False, 3, 24, 24) == 3
+    assert source_frame_index(-1.0, False, 0, 24, 24) == 0

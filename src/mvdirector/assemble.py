@@ -158,15 +158,20 @@ def source_frame_index(
     """
     if fps <= 0 or not math.isfinite(source_fps) or source_fps <= 0:
         return 0
+    start = max(0.0, in_point) if math.isfinite(in_point) else 0.0
 
     def tick(idx: int) -> int:
-        return math.floor((idx / source_fps - in_point) * fps + 0.5)
+        return math.floor((idx / source_fps - start) * fps + 0.5)
 
-    first = max(0, math.ceil(in_point * source_fps - 1e-9))
+    first = max(0, math.ceil(start * source_fps - 1e-9))
     target = tick(first) + max(0, played) + (1 if drop_first_frame else 0)
-    idx = first
+    # Closed form for the last source frame whose tick is <= target, then settle float error with
+    # the exact predicate (O(1): a probed rate such as 90000 fps must not make this a long scan).
+    idx = max(first, math.ceil((start + (target + 0.5) / fps) * source_fps) - 1)
     while tick(idx + 1) <= target:
         idx += 1
+    while idx > first and tick(idx) > target:
+        idx -= 1
     return idx
 
 

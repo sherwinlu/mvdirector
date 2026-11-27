@@ -435,8 +435,9 @@ Rules:
   off-center rule-of-thirds placement, head angle (slight three-quarter vs frontal), posture, and
   lighting depth across consecutive lipsync shots—never repeat the same dead-center symmetrical
   passport mugshot.
-- Character close_up framing: frame from the chin to the collarbone so the face fills at least a
-  third of the frame height, with both eyes and mouth clearly inside the frame. Never write
+- Character close_up framing: frame from just above the head to the collarbone so the face fills
+  at least a third of the frame height, with both eyes and mouth clearly inside the frame. Never
+  write
   "from the chest up" or "upper chest up" for close_up; that is medium_close. Never ask for
   extreme mouth-only or eye-only macros on character shots, which crop off the head and break
   face framing checks. On close_up and medium_close shots, describe ONLY face, neck, shoulders,
@@ -1526,8 +1527,13 @@ def compose_still_prompt(
     """
     bible = manifest.visual_bible
     raw_still = (shot.still.prompt_override or shot.still_prompt).strip()
+    non_portrait_performance = shot.type is ShotType.PERFORMANCE and (
+        is_rear_view_prompt(raw_still)
+        or is_silhouette_prompt(raw_still)
+        or is_hands_detail_prompt(raw_still)
+    )
     parts: list[str] = []
-    if shot.type.shows_singer and shot.framing is Framing.CLOSE_UP:
+    if shot.type.shows_singer and shot.framing is Framing.CLOSE_UP and not non_portrait_performance:
         # Always, even when the planner's prompt already says "close-up": image models read a
         # bare "close-up" (often "from the upper chest up") as chest-up, and the face lands at
         # ~26% of frame height against face_framing's 30% minimum. A concrete size cue fixed
@@ -1536,6 +1542,7 @@ def compose_still_prompt(
     elif (
         shot.type.shows_singer
         and shot.framing is Framing.MEDIUM_CLOSE
+        and not non_portrait_performance
         and not _EXPLICIT_TIGHT_FRAMING_RE.search(raw_still)
     ):
         parts.append("Chest-up medium close-up shot (head and upper chest fill frame).")
@@ -1609,9 +1616,12 @@ def compose_still_prompt(
         else:
             parts.append("Face clearly visible, mouth unobstructed.")
     if shot.type.shows_singer:
-        parts.append(_FRAMING_SCALE_NOTE.get(shot.framing, CAMERA_PLACEMENT_NOTE))
-        raw_still_text = shot.still.prompt_override or shot.still_prompt
-        rear_view = shot.type is not ShotType.LIPSYNC and is_rear_view_prompt(raw_still_text)
+        parts.append(
+            CAMERA_PLACEMENT_NOTE
+            if (non_portrait_performance and shot.framing is not Framing.WIDE)
+            else _FRAMING_SCALE_NOTE.get(shot.framing, CAMERA_PLACEMENT_NOTE)
+        )
+        rear_view = shot.type is not ShotType.LIPSYNC and is_rear_view_prompt(raw_still)
         if rear_view:
             parts.append(
                 "Camera behind subject (rear view): show only the back of the head and back of "

@@ -807,8 +807,17 @@ class ImageQCConfig(_Section):
     # model's 0-1 "same person" verdict on a face crop. Smaller faces are skipped because a
     # different person in the same costume reads as a match at that size.
     vision_identity_min_face_px: int = Field(default=100, ge=16)
-    vision_identity_hard_min: float = Field(default=0.50, ge=0.0, le=1.0)
-    vision_identity_good: float = Field(default=0.80, ge=0.0, le=1.0)
+    vision_identity_hard_min: float = Field(default=0.50, ge=0.0, le=1.0, allow_inf_nan=False)
+    vision_identity_good: float = Field(default=0.80, ge=0.0, le=1.0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _check_vision_identity_thresholds(self) -> ImageQCConfig:
+        if self.vision_identity_good < self.vision_identity_hard_min:
+            raise ValueError(
+                "qc.image.vision_identity_good must be >= qc.image.vision_identity_hard_min"
+            )
+        return self
+
     # Minimum and maximum face height as a share of frame height, per framing.
     min_face_fraction: dict[Framing, float] = Field(
         default_factory=lambda: {
@@ -880,11 +889,21 @@ class VideoQCConfig(_Section):
     identity_hard_min: float = 0.25
     identity_good: float = 0.50
     # Vision identity for clips (see ImageQCConfig): frames sampled across the clip, each
-    # judged on its largest faces; the median verdict is scored.
+    # judged on its largest faces; the median verdict is scored. Measured on analysis_width-scaled
+    # frames (at analysis_width=512, 40px matches ImageQC's 100px floor on 1280px stills).
     vision_identity_frames: int = Field(default=2, ge=1, le=8)
-    vision_identity_min_face_px: int = Field(default=100, ge=16)
-    vision_identity_hard_min: float = Field(default=0.50, ge=0.0, le=1.0)
-    vision_identity_good: float = Field(default=0.80, ge=0.0, le=1.0)
+    vision_identity_min_face_px: int = Field(default=40, ge=16)
+    vision_identity_hard_min: float = Field(default=0.50, ge=0.0, le=1.0, allow_inf_nan=False)
+    vision_identity_good: float = Field(default=0.80, ge=0.0, le=1.0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _check_vision_identity_thresholds(self) -> VideoQCConfig:
+        if self.vision_identity_good < self.vision_identity_hard_min:
+            raise ValueError(
+                "qc.video.vision_identity_good must be >= qc.video.vision_identity_hard_min"
+            )
+        return self
+
     # Mean absolute frame-to-frame difference, 0-1.
     static_max_motion: float = 0.0008
     jump_cut_threshold: float = 0.25
@@ -897,7 +916,7 @@ class VideoQCConfig(_Section):
 
 
 class QCConfig(_Section):
-    pass_score: float = 0.70
+    pass_score: float = Field(default=0.70, ge=0.0, le=1.0, allow_inf_nan=False)
     vision_enabled: bool = True
     vision_identity: bool = Field(
         default=True,

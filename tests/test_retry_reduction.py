@@ -92,8 +92,95 @@ def test_medium_close_anchor_still_defers_to_explicit_framing():
 
 
 def test_planner_instructions_define_close_up_by_size():
-    assert "chin to the collarbone" in prompts.SHOTS_SYSTEM
+    assert "just above the head to the collarbone" in prompts.SHOTS_SYSTEM
+    assert "chin to the collarbone" not in prompts.SHOTS_SYSTEM
     assert "upper chest up" in prompts.SHOTS_SYSTEM  # named as the thing not to write
+
+
+@pytest.mark.parametrize(
+    "raw_prompt",
+    [
+        "Close-up from behind The Witch's head as she faces the hearth.",
+        "Close-up of The Witch's hands gripping a silver key.",
+        "Tight close-up backlit silhouette of The Witch in the doorway.",
+    ],
+)
+def test_close_up_size_anchor_skipped_for_non_portrait_performance_close_ups(raw_prompt: str):
+    manifest = _manifest(ShotType.PERFORMANCE, Framing.CLOSE_UP, raw_prompt)
+    composed = prompts.compose_still_prompt(manifest, manifest.shots[0])
+    assert prompts.CLOSE_UP_SIZE_ANCHOR not in composed
+    assert "tight head-and-shoulders close-up" not in composed
+    assert prompts.CAMERA_PLACEMENT_NOTE in composed
+
+
+def test_near_static_lipsync_clip_with_jump_cut_or_strobe_flicker_is_not_waived(
+    tmp_path, monkeypatch
+):
+    import numpy as np
+    import soundfile as sf
+
+    from mvdirector import media
+    from mvdirector.config import ProjectConfig
+    from mvdirector.qc.lipsync import SyncMeasurement
+    from mvdirector.qc.video import VideoQC
+
+    wav_path = tmp_path / "slice.wav"
+    sr = 16000
+    t = np.linspace(0.0, 4.0, sr * 4, endpoint=False)
+    sf.write(str(wav_path), 0.3 * np.sin(2 * np.pi * 440.0 * t), sr)
+    clip_path = tmp_path / "clip.mp4"
+    clip_path.write_bytes(b"fake")
+
+    manifest = _manifest(ShotType.LIPSYNC, Framing.CLOSE_UP, "Close-up of The Witch singing.")
+    shot = manifest.shots[0]
+    shot.end = 4.0
+    shot.num_frames = 96
+
+    class GoodSync:
+        def score(self, frames, fps, samples, sample_rate, max_lag_seconds, max_faces=1):
+            return SyncMeasurement(correlation=0.70, lag_frames=0, face_presence=1.0)
+
+    monkeypatch.setattr(
+        media,
+        "probe",
+        lambda _: media.MediaInfo(duration=4.0, width=1280, height=704, fps=24.0, has_audio=False),
+    )
+
+    cfg = ProjectConfig()
+    gate = VideoQC(cfg.qc, cfg.video, None, None, None, lipsync_scorer=GoodSync())
+
+    # 1. Clean near-static singing clip -> static failure is waived when lip-sync passes.
+    base = np.full((64, 64, 3), 40, dtype=np.uint8)
+    clean_frames = [base.copy() for _ in range(96)]
+    monkeypatch.setattr(media, "extract_frames", lambda *_, **__: clean_frames)
+    clean_report = gate.evaluate(clip_path, shot, manifest, wav_path, None)
+    clean_temporal = next(c for c in clean_report.checks if c.name == "temporal")
+    assert clean_report.passed
+    assert clean_temporal.status is CheckStatus.PASSED
+    assert clean_temporal.metrics.get("static_waived") == 1.0
+
+    # 2. Near-static clip with a single mid-clip jump cut -> NOT waived, hard fails.
+    jump_frames = [base.copy() for _ in range(48)] + [
+        np.full((64, 64, 3), 240, dtype=np.uint8) for _ in range(48)
+    ]
+    monkeypatch.setattr(media, "extract_frames", lambda *_, **__: jump_frames)
+    jump_report = gate.evaluate(clip_path, shot, manifest, wav_path, None)
+    jump_temporal = next(c for c in jump_report.checks if c.name == "temporal")
+    assert not jump_report.passed and jump_report.has_hard_failure
+    assert jump_temporal.status is CheckStatus.FAILED and jump_temporal.hard
+    assert "abrupt scene change" in jump_temporal.detail
+    assert "static_waived" not in jump_temporal.metrics
+
+    # 3. Near-static clip with 7 intermittent strobe frames (p95 > flicker_bad) -> NOT waived.
+    strobe_frames = [base.copy() for _ in range(96)]
+    for idx in (10, 20, 30, 40, 50, 60, 70):
+        strobe_frames[idx] = np.full((64, 64, 3), 95, dtype=np.uint8)
+    monkeypatch.setattr(media, "extract_frames", lambda *_, **__: strobe_frames)
+    strobe_report = gate.evaluate(clip_path, shot, manifest, wav_path, None)
+    strobe_temporal = next(c for c in strobe_report.checks if c.name == "temporal")
+    assert strobe_temporal.status is CheckStatus.FAILED and strobe_temporal.score == 0.0
+    assert "flicker" in strobe_temporal.detail
+    assert "static_waived" not in strobe_temporal.metrics
 
 
 def _static() -> CheckResult:

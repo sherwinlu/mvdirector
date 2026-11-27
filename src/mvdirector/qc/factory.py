@@ -41,6 +41,7 @@ class QualityGates:
     mouth_tracker: MouthTracker | None = None
     lipsync_scorer: LipSyncScorer | None = None
     vision_enabled: bool = False
+    vision_identity_enabled: bool = False
     face_backend: str = "mediapipe"
     lipsync_backend: str = "mediapipe"
     vision_reason: str | None = None
@@ -72,12 +73,29 @@ class QualityGates:
         if self.face_backend == "insightface" and self.face_analyzer is not None:
             active.append("identity")
         elif self.face_backend == "mediapipe":
-            skipped.append(
-                (
-                    "identity",
-                    "mediapipe omits face embeddings; vision_character checks identity",
+            if (
+                self.face_analyzer is not None
+                and self.vision_enabled
+                and self.vision_identity_enabled
+            ):
+                active.append("identity")
+            elif self.face_analyzer is None:
+                skipped.append(("identity", "mediapipe unavailable"))
+            elif not self.vision_enabled:
+                skipped.append(
+                    (
+                        "identity",
+                        "mediapipe omits face embeddings; "
+                        f"{self.vision_reason or 'vision checks disabled'}",
+                    )
                 )
-            )
+            else:
+                skipped.append(
+                    (
+                        "identity",
+                        "mediapipe omits face embeddings and qc.vision_identity is false",
+                    )
+                )
         else:
             skipped.append(("identity", "insightface unavailable"))
         if self.vision_enabled:
@@ -147,6 +165,7 @@ def build_quality_gates(config: ProjectConfig, llm: LLMClient | None) -> Quality
         mouth_tracker=mouth,
         lipsync_scorer=scorer,
         vision_enabled=vision is not None,
+        vision_identity_enabled=config.qc.vision_identity,
         face_backend=config.qc.face_backend,
         lipsync_backend=config.qc.lipsync_backend,
         vision_reason=vision_reason,

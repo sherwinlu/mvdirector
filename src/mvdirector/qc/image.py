@@ -333,7 +333,12 @@ class ImageQC:
             status=CheckStatus.PASSED,
             hard=True,
         )
-        if similarity is None and reference is not None and self._qc.vision_identity:
+        if (
+            similarity is None
+            and reference is not None
+            and self._qc.vision_identity
+            and self._qc.face_backend != "insightface"
+        ):
             # No embeddings (MediaPipe): let the vision model compare face crops instead.
             identity = vision_identity_check(
                 self._vision,
@@ -342,6 +347,7 @@ class ImageQC:
                 min_face_px=self._cfg.vision_identity_min_face_px,
                 hard_min=self._cfg.vision_identity_hard_min,
                 good=self._cfg.vision_identity_good,
+                pass_score=self._qc.pass_score,
             )
         else:
             identity = identity_check(

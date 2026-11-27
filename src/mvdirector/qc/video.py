@@ -34,7 +34,7 @@ from mvdirector.qc.common import (
     vision_identity_check,
 )
 from mvdirector.qc.faces import Face, FaceAnalyzer, IdentityReference, MouthTracker
-from mvdirector.qc.scoring import aggregate, linear_score, skipped
+from mvdirector.qc.scoring import aggregate, floor_passing_score, linear_score, skipped
 from mvdirector.qc.vision import VisionJudge
 
 log = logging.getLogger(__name__)
@@ -257,18 +257,6 @@ class VideoQC:
         }
         if allow_cuts:
             metrics["cut_count"] = float(cut_count)
-        if median < self._cfg.static_max_motion:
-            return [
-                CheckResult(
-                    name="temporal",
-                    status=CheckStatus.FAILED,
-                    hard=True,
-                    score=0.0,
-                    detail=_STATIC_DETAIL,
-                    metrics=metrics,
-                    fix_hint="Describe clear, continuous motion of the singer and the camera.",
-                )
-            ]
         max_montage_cuts = max(3, differences.size // 4)
         if cut_count > 0 and (not allow_cuts or cut_count > max_montage_cuts or not non_cut.size):
             detail = (
@@ -293,26 +281,40 @@ class VideoQC:
                 )
             ]
         unstable = flicker > self._cfg.flicker_bad
+        if unstable:
+            return [
+                CheckResult(
+                    name="temporal",
+                    status=CheckStatus.FAILED,
+                    score=0.0,
+                    detail="heavy flicker or erratic motion",
+                    fix_hint="Ask for smooth, stable motion and a steady camera.",
+                    metrics=metrics,
+                )
+            ]
+        if median < self._cfg.static_max_motion:
+            return [
+                CheckResult(
+                    name="temporal",
+                    status=CheckStatus.FAILED,
+                    hard=True,
+                    score=0.0,
+                    detail=_STATIC_DETAIL,
+                    metrics=metrics,
+                    fix_hint="Describe clear, continuous motion of the singer and the camera.",
+                )
+            ]
         # Measure erratic spikes above steady continuous motion (p95 - median) so smooth camera
         # moves or steady environmental motion (water, embers, snow) are not penalized as flicker,
-        # while still failing hard when raw p95 exceeds flicker_bad (strobe / heavy flicker).
-        score = (
-            0.0
-            if unstable
-            else linear_score(flicker_excess, self._cfg.flicker_bad, self._cfg.flicker_good)
-        )
-        detail = (
-            "heavy flicker or erratic motion"
-            if unstable
-            else (f"multi-cut montage ({cut_count} cut(s))" if allow_cuts and cut_count else "")
-        )
+        # while raw p95 > flicker_bad is already rejected above.
+        score = linear_score(flicker_excess, self._cfg.flicker_bad, self._cfg.flicker_good)
+        detail = f"multi-cut montage ({cut_count} cut(s))" if allow_cuts and cut_count else ""
         return [
             CheckResult(
                 name="temporal",
-                status=CheckStatus.FAILED if unstable else CheckStatus.PASSED,
+                status=CheckStatus.PASSED,
                 score=score,
                 detail=detail,
-                fix_hint="Ask for smooth, stable motion and a steady camera." if unstable else None,
                 metrics=metrics,
             )
         ]
@@ -491,13 +493,12 @@ class VideoQC:
         if in_sync:
             # A passing lip-sync check must score at least pass_score so its heavy weight cannot
             # drag an otherwise-passing clip below the overall pass mark and waste retry renders.
-            pass_floor = self._qc.pass_score
-            progress = (
-                1.0
-                if self._cfg.lipsync_good <= self._cfg.lipsync_min
-                else linear_score(result.correlation, self._cfg.lipsync_min, self._cfg.lipsync_good)
+            sync_score: float | None = floor_passing_score(
+                result.correlation,
+                self._cfg.lipsync_min,
+                self._cfg.lipsync_good,
+                self._qc.pass_score,
             )
-            sync_score: float | None = pass_floor + (1.0 - pass_floor) * progress
         elif blocking:
             sync_score = linear_score(
                 result.correlation, self._cfg.lipsync_bad, self._cfg.lipsync_good
@@ -521,6 +522,20 @@ class VideoQC:
     ) -> CheckResult:
         if self._faces is None or reference is None:
             return skipped("identity", "face analysis or reference portrait unavailable")
+        if self._qc.face_backend != "insightface" and self._qc.vision_identity:
+            samples = self._vision_identity_samples(frames)
+            has_embeddings = any(f.embedding is not None for _, faces in samples for f in faces)
+            if not has_embeddings:
+                # No embeddings (MediaPipe): the vision model compares face crops from a few frames.
+                return vision_identity_check(
+                    self._vision,
+                    samples,
+                    reference,
+                    min_face_px=self._cfg.vision_identity_min_face_px,
+                    hard_min=self._cfg.vision_identity_hard_min,
+                    good=self._cfg.vision_identity_good,
+                    pass_score=self._qc.pass_score,
+                )
         step = max(1, round(self._cfg.identity_sample_seconds * fps))
         similarities = []
         for frame in frames[::step]:
@@ -531,16 +546,6 @@ class VideoQC:
                     similarities.append(max(sims))
         # The median tolerates a few turned-away frames but catches real identity drift.
         similarity = float(np.median(similarities)) if similarities else None
-        if similarity is None and self._qc.vision_identity:
-            # No embeddings (MediaPipe): the vision model compares face crops from a few frames.
-            return vision_identity_check(
-                self._vision,
-                self._vision_identity_samples(frames),
-                reference,
-                min_face_px=self._cfg.vision_identity_min_face_px,
-                hard_min=self._cfg.vision_identity_hard_min,
-                good=self._cfg.vision_identity_good,
-            )
         return identity_check(similarity, self._cfg.identity_hard_min, self._cfg.identity_good)
 
     def _vision_identity_samples(

@@ -433,16 +433,29 @@ def build_manifest(
         )
     else:
         listening_notes: AudioListeningNotes | None = None
+        wants_listen = config.planning.audio_listen != "never" and (
+            config.planning.audio_listen == "always" or not getattr(llm, "supports_audio", False)
+        )
+        effective_audio_llm = (
+            audio_llm
+            if (audio_llm is not None and getattr(audio_llm, "supports_audio", False))
+            else (
+                llm
+                if (
+                    config.planning.audio_listen == "always"
+                    and getattr(llm, "supports_audio", False)
+                )
+                else None
+            )
+        )
         if (
-            config.planning.audio_listen != "never"
+            wants_listen
             and mix_path is not None
             and mix_path.is_file()
-            and not getattr(llm, "supports_audio", False)
-            and audio_llm is not None
-            and getattr(audio_llm, "supports_audio", False)
+            and effective_audio_llm is not None
         ):
             listening_notes = _listen_to_audio(
-                audio_llm,
+                effective_audio_llm,
                 mix_path,
                 lyrics_text=lyrics_text,
                 analysis=analysis,
@@ -1086,6 +1099,10 @@ _INANIMATE_MATERIAL = (
     r"sugar-glass|sugar|clockwork|miniature|tin|wax|plaster|clay|sculpted|etched|"
     r"engraved|inanimate|toy|music-box|stained-glass|woodcut|gilded)"
 )
+_LIVE_ACTION_VERB_LOOKAHEAD = (
+    r"(?!\s+(?:stands?|sits?|walks?|runs?|looks?|gazes?|stares?|dances?|sings?|"
+    r"speaks?|smiles?|weeps?|cries?|turns?)\b)"
+)
 _INANIMATE_FIGURE_RE = re.compile(
     rf"\b(?:"
     rf"(?:(?:two|three|small|tiny)\s+)?{_INANIMATE_MATERIAL}\s+(?:{_INANIMATE_MATERIAL}\s+)?"
@@ -1095,7 +1112,7 @@ _INANIMATE_FIGURE_RE = re.compile(
     rf"(?:(?:two|three|small|tiny)\s+)?(?:angel|man|woman|boy|girl|couple|dancer|human|sugar)\s+"
     rf"(?:figurines?|statues?|statuettes?|carvings?|busts?|sculptures?|mannequins?|dolls?|"
     rf"ornaments?|reliefs?|portraits?|engravings?|etchings?)"
-    rf")\b",
+    rf")\b{_LIVE_ACTION_VERB_LOOKAHEAD}",
     re.IGNORECASE,
 )
 _ANONYMOUS_POSSESSIVE_DETAIL_RE = re.compile(
@@ -1109,7 +1126,8 @@ _ANONYMOUS_POSSESSIVE_DETAIL_RE = re.compile(
 _BROLL_PEOPLE_RE = re.compile(
     r"\b(?:performers?|singers?|bartenders?|security\s+(?:guards?|staff|officers?|personnel)|"
     r"two\s+figures?|"
-    r"(?:a\s+|the\s+)?(?:man|woman|girl|boy|person|couple)\s+(?:stands?|sits?|walks?|looks?|gazes?|stares?|dances?|sings?))\b",
+    r"(?:a\s+|the\s+)?(?:man|woman|girl|boy|person|couple|he|she)\s+"
+    r"(?:stands?|sits?|walks?|looks?|gazes?|stares?|dances?|sings?))\b",
     re.IGNORECASE,
 )
 _BROLL_TIGHT_FIGURE_RE = re.compile(

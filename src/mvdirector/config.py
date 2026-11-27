@@ -1158,6 +1158,13 @@ class QCConfig(_Section):
     image: ImageQCConfig = Field(default_factory=ImageQCConfig)
     video: VideoQCConfig = Field(default_factory=VideoQCConfig)
 
+    @field_validator("vision_spec", "vision_artifacts", "vision_character", mode="before")
+    @classmethod
+    def _reject_bool_for_vision_threshold(cls, value: Any, info: ValidationInfo) -> Any:
+        if isinstance(value, bool):
+            raise ValueError(f"qc.{info.field_name} must be a number, not a boolean.")
+        return value
+
     @model_validator(mode="after")
     def _apply_vision_threshold_shorthands(self) -> QCConfig:
         shorthands = (

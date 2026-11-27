@@ -1139,21 +1139,24 @@ def llm_check(
         outcome = api.check_llm(project_dir, skip_image=skip_image)
     except MVDError as exc:
         raise _fail(exc) from exc
-    if not outcome.enabled or outcome.result is None:
+    if (not outcome.enabled or outcome.result is None) and outcome.qc_result is None:
         typer.echo("llm.enabled is false: planning is rule-based and no model is used.")
         return
-    result = outcome.result
-    typer.echo(f"Provider: {outcome.provider}   Model: {outcome.model}")
 
     def line(ok: bool, text: str) -> None:
         colour = typer.colors.GREEN if ok else typer.colors.RED
         typer.secho(f"[{'ok' if ok else 'FAIL':>4}] {text}", fg=colour)
 
-    line(
-        result.json_ok,
-        f"JSON output ({result.json_seconds:.1f} s)"
-        + (f": {result.json_detail}" if result.json_detail else ""),
-    )
+    result = outcome.result
+    if outcome.enabled and result is not None:
+        typer.echo(f"Provider: {outcome.provider}   Model: {outcome.model}")
+        line(
+            result.json_ok,
+            f"JSON output ({result.json_seconds:.1f} s)"
+            + (f": {result.json_detail}" if result.json_detail else ""),
+        )
+    else:
+        typer.echo("llm.enabled is false: planning is rule-based.")
     if not outcome.vision_needed:
         _yellow("[skip] Image input not tested: qc.vision_enabled is false.")
     elif outcome.qc_result is not None:
@@ -1172,7 +1175,7 @@ def llm_check(
                     "Without image input the vision checks cannot run. Choose a model that "
                     "accepts images, or set qc.vision_enabled: false in project.yaml."
                 )
-    elif outcome.tested_images and result.vision != "skipped":
+    elif result is not None and outcome.tested_images and result.vision != "skipped":
         detail = f": {result.vision_detail}" if result.vision_detail else ""
         line(not outcome.vision_failed, f"Image input ({result.vision_seconds:.1f} s){detail}")
         if result.vision in ("unsupported", "wrong"):

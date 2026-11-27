@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import logging
@@ -116,6 +117,7 @@ class PlanningArmResult(BaseModel):
     provider: str
     model: str
     attach_audio: bool
+    config_fingerprint: str = ""
     output_dir: str
     manifest_path: str | None = None
     status: str = "ok"  # "ok" | "error"
@@ -300,10 +302,84 @@ def evaluate_planning_quality(
     )
 
 
+def _planning_cache_fingerprint(arm: ModelArm) -> str:
+    payload = {
+        "provider": arm.provider,
+        "model": arm.model,
+        "attach_audio": arm.attach_audio,
+        "max_tokens": arm.max_tokens,
+        "shots_per_request": arm.shots_per_request,
+        "json_mode": arm.json_mode,
+        "base_url": arm.base_url,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def _load_valid_cached_planning(
+    metrics_path: Path,
+    manifest_path: Path,
+    arm: ModelArm,
+) -> PlanningArmResult | None:
+    if not (metrics_path.is_file() and manifest_path.is_file()):
+        return None
+    try:
+        cached = PlanningArmResult.model_validate_json(metrics_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if cached.status != "ok":
+        return None
+    if (
+        cached.provider != arm.provider
+        or cached.model != arm.model
+        or cached.attach_audio != arm.attach_audio
+    ):
+        return None
+    expected_fp = _planning_cache_fingerprint(arm)
+    if cached.config_fingerprint and cached.config_fingerprint != expected_fp:
+        return None
+    return cached
+
+
+def _sanitized_arm_yaml(source_project: Project, arm: ModelArm, title: str) -> dict[str, Any]:
+    """Build an isolated project.yaml mapping without expanding or persisting env secrets."""
+    cfg_path = source_project.root / CONFIG_FILENAME
+    raw_yaml: dict[str, Any] = {}
+    if cfg_path.is_file():
+        try:
+            loaded = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                raw_yaml = loaded
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            raw_yaml = {}
+    raw_yaml["title"] = title
+    raw_yaml["llm"] = {
+        "enabled": True,
+        "provider": arm.provider,
+        "model": arm.model,
+        "base_url": arm.base_url,
+        "api_key_env": arm.api_key_env,
+        "max_tokens": arm.max_tokens,
+        "shots_per_request": arm.shots_per_request,
+        "timeout_seconds": arm.timeout_seconds,
+        "json_mode": arm.json_mode,
+        "stream": arm.stream,
+    }
+    # Benchmarks never connect to ComfyUI; strip any connection secrets if present literally.
+    comfy_raw = raw_yaml.get("comfy")
+    if isinstance(comfy_raw, dict):
+        sanitized_comfy = dict(comfy_raw)
+        sanitized_comfy.pop("headers", None)
+        sanitized_comfy.pop("api_key_comfy_org", None)
+        raw_yaml["comfy"] = sanitized_comfy
+    return raw_yaml
+
+
 def _stage_isolated_arm_folder(
     source_project: Project,
     arm: ModelArm,
     arm_dir: Path,
+    *,
+    environ: Mapping[str, str] | None = None,
 ) -> tuple[ProjectConfig, str, str, Path | None]:
     """Copy frozen planning inputs into ``arm_dir`` and return patched config + text inputs."""
     arm_dir.mkdir(parents=True, exist_ok=True)
@@ -319,7 +395,7 @@ def _stage_isolated_arm_folder(
     shutil.copy2(src_analysis, arm_dir / "analysis.json")
 
     cfg = source_project.config.model_copy(deep=True)
-    cfg.llm = arm.to_llm_config()
+    cfg.llm = arm.to_llm_config(environ=environ)
     cfg.title = f"{source_project.config.title} [{arm.id}: {arm.label}]"
 
     style_path = source_project.input_path(cfg.inputs.style, "style")
@@ -337,8 +413,8 @@ def _stage_isolated_arm_folder(
             lyrics_text = cand.read_text(encoding="utf-8-sig")
             (inputs_dir / "lyrics.txt").write_text(lyrics_text, encoding="utf-8")
 
-    # Write a clean project.yaml into the isolated benchmark folder for reproducibility.
-    raw_yaml = cfg.model_dump(mode="json")
+    # Write a secret-free project.yaml into the isolated benchmark folder for reproducibility.
+    raw_yaml = _sanitized_arm_yaml(source_project, arm, cfg.title)
     atomic_write(arm_dir / CONFIG_FILENAME, yaml.safe_dump(raw_yaml, sort_keys=False))
 
     mix_path: Path | None = None
@@ -381,24 +457,25 @@ def run_planning_arm(
     metrics_path = arm_dir / "metrics.json"
     manifest_path = arm_dir / "manifest.json"
 
-    if not overwrite and metrics_path.is_file() and manifest_path.is_file():
-        try:
-            cached = PlanningArmResult.model_validate_json(metrics_path.read_text(encoding="utf-8"))
-            if cached.status == "ok":
-                log.info("Skipping cached Track 1 run %s / %s (%s)", track, arm.id, arm_dir)
-                return cached
-        except (OSError, ValueError):
-            pass
+    if not overwrite:
+        cached = _load_valid_cached_planning(metrics_path, manifest_path, arm)
+        if cached is not None:
+            log.info("Skipping cached Track 1 run %s / %s (%s)", track, arm.id, arm_dir)
+            return cached
 
+    effective_env = resolve_bench_environ(source_project.environ(), environ)
     cfg, lyrics_text, style_text, mix_path = _stage_isolated_arm_folder(
-        source_project, arm, arm_dir
+        source_project, arm, arm_dir, environ=effective_env
     )
     analysis = source_project.load_analysis()
-    effective_env = resolve_bench_environ(source_project.environ(), environ)
+    cache_fp = _planning_cache_fingerprint(arm)
 
     started = time.monotonic()
     collector = _PlannerWarningCollector()
     planner_logger = logging.getLogger("mvdirector.planning.planner")
+    prev_logger_level = planner_logger.level
+    if planner_logger.getEffectiveLevel() > logging.INFO:
+        planner_logger.setLevel(logging.INFO)
     planner_logger.addHandler(collector)
 
     raw_llm = None
@@ -431,6 +508,7 @@ def run_planning_arm(
             provider=arm.provider,
             model=arm.model,
             attach_audio=arm.attach_audio,
+            config_fingerprint=cache_fp,
             output_dir=str(arm_dir),
             manifest_path=str(manifest_path),
             status="ok",
@@ -449,8 +527,9 @@ def run_planning_arm(
             provider=arm.provider,
             model=arm.model,
             attach_audio=arm.attach_audio,
+            config_fingerprint=cache_fp,
             output_dir=str(arm_dir),
-            manifest_path=str(manifest_path) if manifest_path.is_file() else None,
+            manifest_path=None,
             status="error",
             error=str(exc),
             wall_seconds=round(max(0.0, time.monotonic() - started), 3),
@@ -459,6 +538,7 @@ def run_planning_arm(
         )
     finally:
         planner_logger.removeHandler(collector)
+        planner_logger.setLevel(prev_logger_level)
         if instrumented is not None:
             instrumented.close()
         elif raw_llm is not None:
@@ -503,8 +583,10 @@ def run_planning_benchmark(
             arm_dir = out_root / "planning" / track / arm.id
             already_cached = (
                 not overwrite
-                and (arm_dir / "metrics.json").is_file()
-                and (arm_dir / "manifest.json").is_file()
+                and _load_valid_cached_planning(
+                    arm_dir / "metrics.json", arm_dir / "manifest.json", arm
+                )
+                is not None
             )
             if max_budget_usd is not None and not already_cached and spent_usd >= max_budget_usd:
                 if on_progress and not budget_hit:

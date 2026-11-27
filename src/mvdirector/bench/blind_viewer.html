@@ -107,13 +107,14 @@
 <script>
 const BLIND_DATA = __BLIND_DATA__;
 const ENCODED_KEY = __ENCODED_KEY__;
+const VIEWER_ID = __VIEWER_ID__;
 const RUBRICS = [
   { key: "originality", label: "Visual originality" },
   { key: "audio_fit", label: "Audio / mood fit" },
   { key: "continuity", label: "Continuity precision" },
   { key: "prompt_craft", label: "ComfyUI prompt craft" }
 ];
-const STORAGE_KEY = "mvd_bench_blind_scores_v1";
+const STORAGE_KEY = `mvd_bench_blind_scores_v1_${VIEWER_ID}`;
 
 let state = {
   trackIdx: 0,
@@ -269,8 +270,9 @@ function renderLeaderboardTab(track) {
   const b2Row = rows.find(r => r.info.arm_id === "B2");
   let audioCallout = "";
   if (bRow && b2Row && bRow.avg !== null && b2Row.avg !== null) {
-    const delta = (bRow.avg - b2Row.avg).toFixed(2);
-    audioCallout = `<div class="callout"><b>Native Audio Lift (Arm B vs. Arm B2 Text-Only Control):</b> Human avg ${bRow.avg.toFixed(2)} vs. ${b2Row.avg.toFixed(2)} (<b>${delta >= 0 ? "+" : ""}${delta}</b>), cost $${bRow.info.telemetry.estimated_usd.toFixed(4)} vs. $${b2Row.info.telemetry.estimated_usd.toFixed(4)}.</div>`;
+    const deltaNum = bRow.avg - b2Row.avg;
+    const delta = deltaNum.toFixed(2);
+    audioCallout = `<div class="callout"><b>Native Audio Lift (Arm B vs. Arm B2 Text-Only Control):</b> Human avg ${bRow.avg.toFixed(2)} vs. ${b2Row.avg.toFixed(2)} (<b>${deltaNum >= 0 ? "+" : ""}${delta}</b>), cost $${bRow.info.telemetry.estimated_usd.toFixed(4)} vs. $${b2Row.info.telemetry.estimated_usd.toFixed(4)}.</div>`;
   }
 
   return `
@@ -297,7 +299,7 @@ function renderLeaderboardTab(track) {
               <td><code>${esc(r.info.model)}</code><br><span class="muted">${esc(r.info.arm_label)}</span></td>
               <td>${r.info.attach_audio ? "yes" : "no"}</td>
               <td><b>${r.avg !== null ? r.avg.toFixed(2) : "—"}</b></td>
-              <td>${breakdown}</td>
+              <td>${esc(breakdown)}</td>
               <td>${Math.round((t.first_pass_rate || 0) * 100)}% (${t.schema_retries}r/${t.truncations}t)</td>
               <td>${q.fallback_shots}/${q.total_shots}</td>
               <td>${Math.round((q.framing_detail_compliance || 0) * 100)}% / ${Math.round((q.affirmative_phrasing_compliance || 0) * 100)}%</td>

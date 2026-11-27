@@ -284,6 +284,37 @@ def detect_vocal_windows(
     ]
 
 
+def filter_vocal_windows_by_words(
+    windows: list[TimeSpan],
+    words: Sequence[lyrics_mod.Word],
+    *,
+    min_words_per_window: int = 2,
+    pad: float = 0.5,
+) -> list[TimeSpan]:
+    """Drop non-speech stem-bleed windows and trim edges using transcribed word timestamps.
+
+    Only activates when at least one window contains ``>= min_words_per_window`` transcribed
+    words; if transcription returned nothing usable (e.g. instrumental vocalise or unavailable
+    model), returns ``windows`` unchanged.
+    """
+    if not windows or not words:
+        return list(windows)
+    kept: list[TimeSpan] = []
+    for win in windows:
+        hits = [
+            w
+            for w in words
+            if min(win.end, float(w.end)) > max(win.start, float(w.start))
+        ]
+        if len(hits) < min_words_per_window:
+            continue
+        trimmed_start = round(max(win.start, min(float(w.start) for w in hits) - pad), 3)
+        trimmed_end = round(min(win.end, max(float(w.end) for w in hits) + pad), 3)
+        if trimmed_end > trimmed_start:
+            kept.append(TimeSpan(start=trimmed_start, end=trimmed_end))
+    return kept if kept else list(windows)
+
+
 def detect_vocal_windows_heuristic(
     samples: np.ndarray,
     sr: int = ANALYSIS_SR,
@@ -1120,12 +1151,24 @@ def analyze_project(project: Project) -> Analysis:
         "Found %d vocal windows covering %.1fs", len(windows), sum(w.duration for w in windows)
     )
 
+    is_lipsync_style = project.config.planning.video_style is VideoStyle.LIPSYNC
     words = (
         lyrics_mod.load_or_transcribe_words(project)
-        if lines and (vocals is not None or inputs.word_timestamps)
+        if (lines and (vocals is not None or inputs.word_timestamps))
+        or (is_lipsync_style and vocals is not None and bool(windows))
         else []
     )
-    if words:
+    if words and windows:
+        refined_windows = filter_vocal_windows_by_words(windows, words)
+        if refined_windows != windows:
+            log.info(
+                "Refined vocal windows with %d transcribed word(s): %.1fs -> %.1fs",
+                len(words),
+                sum(w.duration for w in windows),
+                sum(w.duration for w in refined_windows),
+            )
+            windows = refined_windows
+    if words and lines:
         lines = lyrics_mod.align_lines_to_words(lines, words)
     lines = lyrics_mod.estimate_missing_timings(lines, windows)
 

@@ -36,7 +36,7 @@ video:
   size_multiple: 1               # grid your workflow renders on (LTX: 64); sizes snap to it, keeping the aspect
   fps: 24
   max_clip_seconds: 8.0          # longest clip your video workflow handles well
-  min_clip_seconds: 1.5
+  min_clip_seconds: 2.5
   handle_seconds: 0.25           # extra on each side of a shot, trimmed at assembly
   frame_multiple: 8              # frame rule multiple*n+offset (LTX: 8/1, Wan: 4/1, MiniMax: 1/0)
   frame_offset: 1

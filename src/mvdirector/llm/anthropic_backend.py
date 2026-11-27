@@ -11,8 +11,24 @@ from typing import Any
 from pydantic import BaseModel
 
 from mvdirector.errors import DependencyMissing, LLMError, LLMQuotaError, LLMUnavailableError
-from mvdirector.llm.base import ChatBackend, Message, Reply
+from mvdirector.llm.base import ChatBackend, Message, Reply, TokenUsage
 from mvdirector.llm.http import is_quota_error
+
+
+def _anthropic_usage(response: Any) -> TokenUsage | None:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return None
+    inp = getattr(usage, "input_tokens", None)
+    out = getattr(usage, "output_tokens", None)
+    cached = getattr(usage, "cache_read_input_tokens", None)
+    if not any(isinstance(v, int) and v > 0 for v in (inp, out, cached)):
+        return None
+    return TokenUsage(
+        input_tokens=int(inp) if isinstance(inp, int) and inp > 0 else 0,
+        output_tokens=int(out) if isinstance(out, int) and out > 0 else 0,
+        cached_tokens=int(cached) if isinstance(cached, int) and cached > 0 else 0,
+    )
 
 
 class AnthropicChat(ChatBackend):
@@ -92,4 +108,13 @@ class AnthropicChat(ChatBackend):
                 ) from exc
             raise LLMError(f"Anthropic API call failed: {exc}") from exc
         text = "".join(block.text for block in response.content if block.type == "text")
-        return Reply(text, truncated=getattr(response, "stop_reason", None) == "max_tokens")
+        stop_reason = getattr(response, "stop_reason", None)
+        if not text and stop_reason == "refusal":
+            raise LLMError("Anthropic refused the request.")
+        return Reply(
+            text,
+            truncated=stop_reason == "max_tokens",
+            usage=_anthropic_usage(response),
+            refused=stop_reason == "refusal",
+            finish_reason=stop_reason if isinstance(stop_reason, str) else None,
+        )

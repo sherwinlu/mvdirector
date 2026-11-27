@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -155,7 +156,15 @@ def dp_phrase_cuts(
         return penalty
 
     penalties = [_split_penalty(p) for p in pts]
-    target_dur = 0.5 * (video.min_clip_seconds + video.max_clip_seconds)
+    lyric_spans = _aligned_lyric_spans(analysis) if video.broll_min_clip_seconds is not None else []
+    intensities = analysis.bar_intensity
+    has_contrast = (
+        video.dynamic_pacing
+        and len(intensities) >= len(analysis.bars)
+        and len(analysis.bars) >= 2
+        and (max(intensities[: len(analysis.bars)]) - min(intensities[: len(analysis.bars)]))
+        >= _MIN_INTENSITY_SPREAD
+    )
     inf = float("inf")
     dp = [inf] * n
     prev = [-1] * n
@@ -166,8 +175,19 @@ def dp_phrase_cuts(
             span = pts[j] - pts[i]
             if span > video.max_clip_seconds + 1e-6:
                 break
-            if span < video.min_clip_seconds - 1e-6:
+            min_span = _min_clip_for_span(analysis, video, pts[i], pts[j], lyric_spans)
+            if span < min_span - 1e-6:
                 continue
+            if has_contrast:
+                span_intensity = _intensity_between(analysis, pts[i], pts[j])
+                if span_intensity >= _HIGH_INTENSITY_THRESHOLD:
+                    target_dur = min_span
+                elif span_intensity < _MEDIUM_INTENSITY_THRESHOLD:
+                    target_dur = video.max_clip_seconds
+                else:
+                    target_dur = 0.5 * (min_span + video.max_clip_seconds)
+            else:
+                target_dur = 0.5 * (min_span + video.max_clip_seconds)
             dur_cost = 0.15 * abs(span - target_dur)
             cost = dp[i] + penalties[j] + dur_cost
             if cost < dp[j]:
@@ -239,19 +259,46 @@ def _allowed_bar_steps(
     return steps or [max_bars]
 
 
-def _aligned_lyric_spans(analysis: Analysis) -> list[TimeSpan]:
-    """Timed lyric spans when Whisper/forced alignment succeeded on at least one line."""
-    has_aligned = any(
-        ln.timing_source == "aligned" and ln.start is not None and ln.end is not None
-        for ln in analysis.lyric_lines
-    )
-    if not has_aligned:
+def _merge_time_spans(spans: Sequence[TimeSpan]) -> list[TimeSpan]:
+    """Merge overlapping or adjacent ``TimeSpan`` intervals into disjoint sorted spans."""
+    ordered = sorted((s for s in spans if s.end > s.start), key=lambda s: (s.start, s.end))
+    if not ordered:
         return []
-    return [
+    merged: list[TimeSpan] = [ordered[0]]
+    for span in ordered[1:]:
+        prev = merged[-1]
+        if span.start <= prev.end:
+            merged[-1] = TimeSpan(start=prev.start, end=max(prev.end, span.end))
+        else:
+            merged.append(span)
+    return merged
+
+
+def _span_overlap_total(spans: Sequence[TimeSpan], start: float, end: float) -> float:
+    """Total seconds of ``[start, end]`` covered by the union of ``spans`` (no double-counting)."""
+    if end <= start or not spans:
+        return 0.0
+    clipped = [
+        TimeSpan(start=max(start, s.start), end=min(end, s.end))
+        for s in spans
+        if min(end, s.end) > max(start, s.start)
+    ]
+    return sum(s.duration for s in _merge_time_spans(clipped))
+
+
+def _aligned_lyric_spans(analysis: Analysis) -> list[TimeSpan]:
+    """Disjoint timed spans for lines aligned by Whisper/forced alignment."""
+    raw = [
         TimeSpan(start=ln.start, end=ln.end)
         for ln in analysis.lyric_lines
-        if ln.start is not None and ln.end is not None and ln.end > ln.start
+        if (
+            ln.timing_source == "aligned"
+            and ln.start is not None
+            and ln.end is not None
+            and ln.end > ln.start
+        )
     ]
+    return _merge_time_spans(raw)
 
 
 def _is_sung_span(
@@ -265,14 +312,29 @@ def _is_sung_span(
     duration = end - start
     if duration <= 0.0:
         return False
-    sung = sum(window.overlap(start, end) for window in analysis.vocal_windows)
+    sung = _span_overlap_total(analysis.vocal_windows, start, end)
     if sung / duration < min_vocal_fraction:
         return False
     if lyric_spans:
-        lyric_overlap = sum(span.overlap(start, end) for span in lyric_spans)
+        lyric_overlap = _span_overlap_total(lyric_spans, start, end)
         if lyric_overlap < min(0.25, duration * 0.25):
             return False
     return True
+
+
+def _min_clip_for_span(
+    analysis: Analysis,
+    video: VideoConfig,
+    start: float,
+    end: float,
+    lyric_spans: list[TimeSpan],
+) -> float:
+    """Minimum clip duration for ``[start, end]``: full floor if sung, else B-roll floor."""
+    if video.broll_min_clip_seconds is None:
+        return video.min_clip_seconds
+    if _is_sung_span(analysis, start, end, video.lipsync_min_vocal_fraction, lyric_spans):
+        return video.min_clip_seconds
+    return video.broll_min_clip_seconds
 
 
 def _step_for_intensity(intensity: float, allowed_steps: list[int]) -> int:
@@ -394,7 +456,10 @@ def _phrase_points(analysis: Analysis, bars: list[float]) -> list[float]:
 
 
 def _validate_pacing_cuts(
-    candidate: object, duration: float, video: VideoConfig
+    candidate: object,
+    duration: float,
+    video: VideoConfig,
+    analysis: Analysis | None = None,
 ) -> list[float] | None:
     """Validate plugin cut points are finite, increasing, cover [0, duration], and obey bounds."""
     if not isinstance(candidate, list) or len(candidate) < 2:
@@ -412,9 +477,24 @@ def _validate_pacing_cuts(
     pts[0] = 0.0
     pts[-1] = round(duration, 3)
     max_clip = max(0.1, video.max_clip_seconds)
-    min_clip = min(video.min_clip_seconds, duration)
+    lyric_spans = (
+        _aligned_lyric_spans(analysis)
+        if analysis is not None and video.broll_min_clip_seconds is not None
+        else []
+    )
+    fallback_min = (
+        video.broll_min_clip_seconds
+        if video.broll_min_clip_seconds is not None
+        else video.min_clip_seconds
+    )
     for prev, nxt in zip(pts[:-1], pts[1:]):
         span = nxt - prev
+        raw_min = (
+            _min_clip_for_span(analysis, video, prev, nxt, lyric_spans)
+            if analysis is not None
+            else fallback_min
+        )
+        min_clip = min(raw_min, duration)
         if span <= 0.0 or span < min_clip - 1e-2 or span > max_clip + 1e-2:
             return None
     return pts
@@ -549,13 +629,7 @@ def cut_points(
     )
 
     def _span_min_clip(span_start: float, span_end: float) -> float:
-        if video.broll_min_clip_seconds is None:
-            return video.min_clip_seconds
-        if _is_sung_span(
-            analysis, span_start, span_end, video.lipsync_min_vocal_fraction, merge_lyric_spans
-        ):
-            return video.min_clip_seconds
-        return video.broll_min_clip_seconds
+        return _min_clip_for_span(analysis, video, span_start, span_end, merge_lyric_spans)
 
     # Drop boundaries that would leave a sliver; prefer keeping singer-handoff cuts over bar cuts.
     merged = [points[0]]
@@ -588,7 +662,7 @@ def cut_points(
         try:
             fn = plugins.load_plugin(plugins.PACING_GROUP, pacing_plugin)
             proposed = fn(list(cuts), analysis, video)
-            validated = _validate_pacing_cuts(proposed, duration, video)
+            validated = _validate_pacing_cuts(proposed, duration, video, analysis=analysis)
             if validated is not None:
                 return validated
             log.warning(

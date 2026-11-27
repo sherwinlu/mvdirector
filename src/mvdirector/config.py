@@ -497,6 +497,36 @@ class VideoConfig(_Section):
         ),
     )
 
+    @field_validator(
+        "width",
+        "height",
+        "draft_width",
+        "draft_height",
+        "size_multiple",
+        "fps",
+        "i2v_fps",
+        "max_clip_seconds",
+        "min_clip_seconds",
+        "broll_min_clip_seconds",
+        "handle_seconds",
+        "frame_multiple",
+        "frame_offset",
+        "beats_per_bar",
+        "lipsync_min_vocal_fraction",
+        "audio_vae_offset_seconds",
+        "transition_seconds",
+        "film_grain",
+        "assembly_workers",
+        "assembly_intercut_min_intensity",
+        "assembly_intercut_anticipation_frames",
+        mode="before",
+    )
+    @classmethod
+    def _reject_bool_for_number(cls, value: Any, info: ValidationInfo) -> Any:
+        if isinstance(value, bool):
+            raise ValueError(f"video.{info.field_name} must be a number, not a boolean.")
+        return value
+
     @model_validator(mode="after")
     def _check_draft_dimensions(self) -> VideoConfig:
         if (self.draft_width is None) != (self.draft_height is None):
@@ -506,10 +536,13 @@ class VideoConfig(_Section):
                 f"video.i2v_fps ({self.i2v_fps}) must be less than video.fps ({self.fps})."
             )
         if self.min_clip_seconds > self.max_clip_seconds:
-            raise ValueError(
-                f"video.min_clip_seconds ({self.min_clip_seconds}) must not exceed "
-                f"video.max_clip_seconds ({self.max_clip_seconds})."
-            )
+            if "min_clip_seconds" not in self.model_fields_set:
+                self.min_clip_seconds = self.max_clip_seconds
+            else:
+                raise ValueError(
+                    f"video.min_clip_seconds ({self.min_clip_seconds}) must not exceed "
+                    f"video.max_clip_seconds ({self.max_clip_seconds})."
+                )
         if (
             self.broll_min_clip_seconds is not None
             and self.broll_min_clip_seconds > self.min_clip_seconds

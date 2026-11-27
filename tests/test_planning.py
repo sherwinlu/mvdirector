@@ -372,3 +372,34 @@ def test_close_and_medium_close_framing_notes_discourage_stiff_mugshot_pose():
         )
         composed = compose_still_prompt(manifest, shot)
         assert "do not copy the stiff centered frontal pose" in composed
+
+
+def test_segment_suppresses_lipsync_on_instrumental_bleed_when_lyrics_aligned():
+    bars = [2.0 * i for i in range(12)]
+    beats = [0.5 * i for i in range(48)]
+    # Demucs synth bleed creates a continuous vocal_window [0, 24], while Whisper aligned
+    # lyrics only start at 12.0s.
+    analysis = Analysis(
+        duration=24.0,
+        tempo_bpm=120.0,
+        beats=beats,
+        bars=bars,
+        bar_intensity=[0.6] * len(bars),
+        vocal_windows=[TimeSpan(start=0.0, end=24.0)],
+        lyric_lines=[
+            LyricLine(text="First line", start=12.0, end=16.0, timing_source="aligned"),
+            LyricLine(text="Second line", start=16.0, end=20.0, timing_source="aligned"),
+        ],
+    )
+    video = VideoConfig(min_clip_seconds=2.0, max_clip_seconds=4.0)
+    segs = segment(analysis, video)
+    by_start = {s.start: s for s in segs}
+    assert by_start[0.0].type is ShotType.PERFORMANCE
+    assert by_start[4.0].type is ShotType.PERFORMANCE
+    assert by_start[8.0].type is ShotType.PERFORMANCE
+    assert by_start[12.0].type is ShotType.LIPSYNC
+    assert by_start[16.0].type is ShotType.LIPSYNC
+    assert by_start[20.0].type is ShotType.PERFORMANCE
+    # Unaligned / no-lyrics fallback keeps vocal_windows behavior unchanged
+    unaligned = analysis.model_copy(update={"lyric_lines": []})
+    assert all(s.type is ShotType.LIPSYNC for s in segment(unaligned, video))

@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+- **Whisper defaults to `large-v3-turbo`:** `prepare.whisper_model` now defaults to `large-v3-turbo` (was `small`), so the first `mvd prepare` / `mvd analyze` transcription downloads a larger model (about 1.6 GB) and runs slower on CPU; set `whisper_model: medium` (or `small`) in `project.yaml` for lighter CPU runs. The `align` extra now requires `faster-whisper>=1.1`, the first release with the `large-v3-turbo` alias. Projects created from the old template keep `whisper_model: small`, and `auto_tune` still upgrades it to `large-v3-turbo` for non-English tracks as before.
+- **Wider non-Latin auto-tuning:** `auto_tune` now detects Greek, Hebrew, Bengali, Punjabi, Gujarati, Tamil, Telugu, Kannada, Malayalam, Georgian, Armenian, Amharic, Khmer, Burmese and Lao lyrics, and tells Ukrainian, Belarusian, Serbian, Macedonian, Kazakh, Uzbek, Tajik, Tatar, Bashkir and Mongolian apart from Russian by their distinctive Cyrillic letters (every Cyrillic lyric used to lock Whisper to `ru`). Syllable-rate measurement now handles Indic scripts and accented Latin/Greek, and language names in `style.md` Visual direction / Exclusions sections no longer count as the song's language. See [Language Support & Known Limitations](docs/pipeline-and-qc.md#language-support--known-limitations).
+
+### Fixed
+- **Assembly / continuity hang on a corrupt clip:** a clip whose container reported an absurd frame rate (or an in-point past float precision) made `source_frame_index` loop forever during `mvd run` handoffs and `mvd assemble`. `media.probe` now reports rates above 1000 fps (and rates too large for a float, which used to raise `OverflowError`) as unknown, and the frame lookup is bounded.
+
 ## [1.0.0] - 2026-11-27
 
 First **stable** release. It adds a pre-spend reference coverage lint (`mvd assets --lint`), generic N-slot reference binding for props and secondary faces, opening-hook priority, rejection-aware attempt statistics, age-based cleanup retention and ComfyUI interrupts, together with QA fixes to cleanup symlink handling, still restarts after video exhaustion, and durable rejection counts. Manifests from `0.8.x` load unchanged (`schema_version` `1`).

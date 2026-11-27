@@ -601,12 +601,13 @@ class ShotRunner:
         )
         fps = self._manifest.fps
         frames = assemble.frame_counts([prev], fps)[0]
-        last_idx = timing.last_played_frame(frames, fps)
+        source_fps: float = float(fps)
         if self._project.config.video.i2v_fps is not None:
             with suppress(MediaToolError):
                 probed = media.probe(video_path)
                 if probed.fps is not None and probed.fps > 0 and abs(probed.fps - fps) > 0.5:
-                    last_idx = timing.source_frame(max(1, frames) - 1, fps, probed.fps)
+                    source_fps = probed.fps
+        last_idx = timing.last_played_frame(frames, fps, source_fps)
         return video_path, last_idx, prev_video
 
     def _previous_handoff_frame(self, shot: Shot) -> Path | None:

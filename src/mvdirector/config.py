@@ -287,6 +287,13 @@ class VideoConfig(_Section):
         ),
     )
     fps: int = Field(default=24, ge=1)
+    i2v_fps: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Optional lower generation FPS for non-lipsync I2V shots (e.g. 12 fps before 2x VFI)."
+        ),
+    )
     max_clip_seconds: float = Field(default=8.0, gt=0.0, allow_inf_nan=False)
     min_clip_seconds: float = Field(default=1.5, gt=0.0, allow_inf_nan=False)
     handle_seconds: float = Field(
@@ -440,11 +447,29 @@ class VideoConfig(_Section):
             "(inspired by hexeosis-prime/nightshift)."
         ),
     )
+    encoder: Literal["libx264", "auto", "h264_nvenc", "h264_videotoolbox"] = Field(
+        default="libx264",
+        description=(
+            "Video encoder for assembly ('libx264', 'auto', 'h264_nvenc', or 'h264_videotoolbox')."
+        ),
+    )
+    assembly_workers: int = Field(
+        default=1,
+        ge=1,
+        le=8,
+        description=(
+            "Parallel ffmpeg workers for independent clip conforms and transitions during assembly."
+        ),
+    )
 
     @model_validator(mode="after")
     def _check_draft_dimensions(self) -> VideoConfig:
         if (self.draft_width is None) != (self.draft_height is None):
             raise ValueError("Set both video.draft_width and video.draft_height together.")
+        if self.i2v_fps is not None and self.i2v_fps >= self.fps:
+            raise ValueError(
+                f"video.i2v_fps ({self.i2v_fps}) must be less than video.fps ({self.fps})."
+            )
         if self.min_clip_seconds > self.max_clip_seconds:
             raise ValueError(
                 f"video.min_clip_seconds ({self.min_clip_seconds}) must not exceed "
@@ -569,6 +594,13 @@ class ComfyConfig(_Section):
         description=(
             "Sort shot generation order by workflow/setting/prompt prefix to keep ComfyUI text "
             "encoder and reference caches warm (inspired by xenoform and musicvision)."
+        ),
+    )
+    nag_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable ComfySwitchNode-gated NAG nodes (e.g. LTX2_NAG / WanVideoNAG) on distilled "
+            "cfg=1 video workflows whenever negative_prompt is non-empty."
         ),
     )
     min_free_vram_gb: float | None = Field(
@@ -1151,6 +1183,62 @@ class MixConfig(_Section):
         return self
 
 
+class PluginsConfig(_Section):
+    """Registered entry-point plugin names (validated against strict identifier allowlist)."""
+
+    qc_checks: list[str] = Field(
+        default_factory=list,
+        description="Additional video QC check plugins (entry-point group mvdirector.qc_checks).",
+    )
+    audio_conditioner: str | None = Field(
+        default=None,
+        description=(
+            "Optional lip-sync conditioning audio plugin (group mvdirector.audio_conditioners)."
+        ),
+    )
+    pacing: str | None = Field(
+        default=None,
+        description="Optional cut-point pacing plugin (entry-point group mvdirector.pacing).",
+    )
+    clip_selector: str | None = Field(
+        default=None,
+        description=(
+            "Optional non-lipsync clip in-point selector plugin "
+            "(entry-point group mvdirector.clip_selectors)."
+        ),
+    )
+
+    @field_validator("qc_checks")
+    @classmethod
+    def _validate_qc_checks(cls, value: list[str]) -> list[str]:
+        from mvdirector.plugins import validate_plugin_name
+
+        validated: list[str] = []
+        seen: set[str] = set()
+        for name in value:
+            try:
+                clean = validate_plugin_name(name, label="qc_checks plugin")
+            except ConfigError as exc:
+                raise ValueError(str(exc)) from exc
+            if clean in seen:
+                raise ValueError(f"Duplicate plugin name {clean!r} in plugins.qc_checks.")
+            seen.add(clean)
+            validated.append(clean)
+        return validated
+
+    @field_validator("audio_conditioner", "pacing", "clip_selector")
+    @classmethod
+    def _validate_optional_plugin(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        from mvdirector.plugins import validate_plugin_name
+
+        try:
+            return validate_plugin_name(value)
+        except ConfigError as exc:
+            raise ValueError(str(exc)) from exc
+
+
 class ProjectConfig(_Section):
     title: str = "Untitled"
     mode: ProjectMode = Field(
@@ -1179,6 +1267,7 @@ class ProjectConfig(_Section):
     qc: QCConfig = Field(default_factory=QCConfig)
     retry: RetryConfig = Field(default_factory=RetryConfig)
     review: ReviewConfig = Field(default_factory=ReviewConfig)
+    plugins: PluginsConfig = Field(default_factory=PluginsConfig)
 
 
 def expand_env(value: Any, *, environ: Mapping[str, str] | None = None) -> Any:

@@ -87,5 +87,5 @@ Changing `models.py` changes the manifest format. Once a release has shipped, bu
 - **Vision judge token overhead:** `vision_character` adds the reference sheet image (and optional hero prop image) to each call.
 - **Sheet panels are cut by position:** The image model is asked for four equal panels and the code cuts the image into equal parts. If it draws uneven panels, the crops will be off. Check `assets/reference/<state>/` after locking, or lock a hand-made sheet with `--single`.
 - **Multi-image editing:** Whether a specific ComfyUI image-edit workflow follows multi-reference wording (`prose` vs `tags`) and accepts several input images (`reference_image`, `set_image`, `prop_image`) depends on the underlying model/workflow.
-- **Sequential generation:** Generation runs sequentially against a single ComfyUI endpoint.
+- **Dependency-wave parallelism:** Independent `CUT` shots run concurrently up to `comfy.max_concurrency` (`--concurrency`), while `CONTINUE` / `REFRAME` chains execute in topological waves.
 - **Re-planning overwrites history:** `mvd plan --overwrite` discards generation history. Edit `manifest.json` by hand to change direction for individual shots instead.

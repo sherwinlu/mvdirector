@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -23,7 +24,7 @@ from mvdirector import media
 from mvdirector.audio import broadcast_qa as broadcast_qa_mod
 from mvdirector.audio import foley as foley_mod
 from mvdirector.errors import ConfigError, MVDError
-from mvdirector.models import Attempt, ContinuityMode, Manifest, RetryStrategy, Shot
+from mvdirector.models import Attempt, ContinuityMode, Manifest, RetryStrategy, Shot, ShotType
 from mvdirector.project import Project, require_safe_id
 from mvdirector.qc.color_drift import fit_color_drift_affine
 from mvdirector.review.policy import is_ready, refresh_reviews
@@ -111,7 +112,7 @@ class ClipTiming:
     """
 
     in_point: float  # seconds into the source clip (ffmpeg -ss), lip-sync delay included
-    sync_delay: float  # lip-sync offset applied, clamped to the shot's audio handles
+    sync_delay: float  # lip-sync delay or optimal in-point offset applied, clamped to handles
     drop_first_frame: bool  # a CONTINUE clip's frame 0 repeats the previous clip's last frame
     continuity: ContinuityMode  # CONTINUE only when the still really was a handoff frame
 
@@ -128,14 +129,19 @@ def clip_timing(
     """Timing of ``shot``'s clip ``video`` as assembly will play it."""
     head = shot.audio_slice.head_handle
     tail = max(0.0, shot.audio_slice.end - shot.end)
-    raw_delay = video.sync_delay_seconds if sync_delay_compensation else 0.0
-    delay = round(max(-head, min(tail, raw_delay)), 4)
     used_handoff = (
         shot.index > 0
         and shot.continuity is ContinuityMode.CONTINUE
         and still is not None
         and still.strategy is RetryStrategy.HANDOFF
     )
+    if used_handoff:
+        raw_offset = 0.0
+    elif shot.type is ShotType.LIPSYNC:
+        raw_offset = video.sync_delay_seconds if sync_delay_compensation else 0.0
+    else:
+        raw_offset = video.optimal_in_offset
+    delay = round(max(-head, min(tail, raw_offset)), 4)
     continuity = shot.continuity
     if continuity is ContinuityMode.CONTINUE and not used_handoff:
         # A fresh (non-handoff) still makes the join a plain cut: no seam treatment applies.
@@ -203,6 +209,7 @@ def clip_command(
     *,
     extra_frames: int = 0,
     extra_vf: str | None = None,
+    encode_args: list[str] | None = None,
 ) -> list[str]:
     """ffmpeg command that conforms one source to ``plan.frames + extra_frames`` frames.
 
@@ -259,7 +266,7 @@ def clip_command(
         filters,
         "-frames:v",
         str(target_frames),
-        *_ENCODE,
+        *(encode_args if encode_args is not None else _ENCODE),
         str(output.resolve()),
     ]
 
@@ -317,7 +324,13 @@ def _fit_active_pair(
 
 
 def _transition_pieces(
-    clips: list[tuple[ClipPlan, Path, int]], work: Path, fps: int, transition: str
+    clips: list[tuple[ClipPlan, Path, int]],
+    work: Path,
+    fps: int,
+    transition: str,
+    *,
+    encode_args: list[str] | None = None,
+    workers: int = 1,
 ) -> list[Path]:
     """Body and crossfade pieces that concatenate into the frame-exact, beat-locked timeline.
 
@@ -327,31 +340,34 @@ def _transition_pieces(
     clips: one ffmpeg graph over every clip holds a decoder per shot open at once and needs
     gigabytes of memory for a full-length video at 1080p.
     """
+    codec_flags = encode_args if encode_args is not None else _ENCODE
     tb = f"1/{fps}"
-    pieces: list[Path] = []
+    tasks: list[tuple[Path, list[str]]] = []
     head_skip = 0  # frames of this clip already shown inside the previous crossfade
     for idx, (plan, clip_path, overlap) in enumerate(clips):
         if plan.frames > head_skip:
             body = work / f"{clip_path.stem}_body.mp4"
-            media.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-v",
-                    "error",
-                    "-protocol_whitelist",
-                    "file",
-                    "-i",
-                    str(clip_path.resolve()),
-                    "-vf",
-                    f"trim=start_frame={head_skip}:end_frame={plan.frames},setpts=PTS-STARTPTS",
-                    "-frames:v",
-                    str(plan.frames - head_skip),
-                    *_ENCODE,
-                    str(body.resolve()),
-                ]
+            tasks.append(
+                (
+                    body,
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-v",
+                        "error",
+                        "-protocol_whitelist",
+                        "file",
+                        "-i",
+                        str(clip_path.resolve()),
+                        "-vf",
+                        f"trim=start_frame={head_skip}:end_frame={plan.frames},setpts=PTS-STARTPTS",
+                        "-frames:v",
+                        str(plan.frames - head_skip),
+                        *codec_flags,
+                        str(body.resolve()),
+                    ],
+                )
             )
-            pieces.append(body)
         head_skip = 0
         if overlap > 0 and idx + 1 < len(clips):
             blend = work / f"{clip_path.stem}_xfade.mp4"
@@ -362,33 +378,41 @@ def _transition_pieces(
                 f"[1:v]trim=start_frame=0:end_frame={overlap},setpts=PTS-STARTPTS,settb={tb}[b];"
                 f"[a][b]xfade=transition={transition}:duration={overlap / fps:.6f}:offset=0[v]"
             )
-            media.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-v",
-                    "error",
-                    "-protocol_whitelist",
-                    "file",
-                    "-i",
-                    str(clip_path.resolve()),
-                    "-protocol_whitelist",
-                    "file",
-                    "-i",
-                    str(clips[idx + 1][1].resolve()),
-                    "-filter_complex",
-                    graph,
-                    "-map",
-                    "[v]",
-                    "-frames:v",
-                    str(overlap),
-                    *_ENCODE,
-                    str(blend.resolve()),
-                ]
+            tasks.append(
+                (
+                    blend,
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-v",
+                        "error",
+                        "-protocol_whitelist",
+                        "file",
+                        "-i",
+                        str(clip_path.resolve()),
+                        "-protocol_whitelist",
+                        "file",
+                        "-i",
+                        str(clips[idx + 1][1].resolve()),
+                        "-filter_complex",
+                        graph,
+                        "-map",
+                        "[v]",
+                        "-frames:v",
+                        str(overlap),
+                        *codec_flags,
+                        str(blend.resolve()),
+                    ],
+                )
             )
-            pieces.append(blend)
             head_skip = overlap
-    return pieces
+    if workers > 1 and len(tasks) > 1:
+        with ThreadPoolExecutor(max_workers=min(workers, len(tasks))) as pool:
+            list(pool.map(lambda item: media.run(item[1]), tasks))
+    else:
+        for _, cmd in tasks:
+            media.run(cmd)
+    return [piece for piece, _ in tasks]
 
 
 def assemble(
@@ -422,8 +446,11 @@ def assemble(
         xfade_frames = (
             max(1, round(video_cfg.transition_seconds * manifest.fps)) if use_xfade else 0
         )
+        encoder = media.resolve_video_encoder(video_cfg.encoder)
+        encode_args = media.encode_args_for(encoder)
+        workers = max(1, min(8, video_cfg.assembly_workers))
+
         clips: list[tuple[ClipPlan, Path, int]] = []
-        prev_clip_info: tuple[Path, int] | None = None
         for idx, plan in enumerate(active_plans):
             safe_id = require_safe_id(plan.shot_id, "shot id")
             clip = work / f"{safe_id}.mp4"
@@ -450,61 +477,98 @@ def assemble(
                     overlap = min(overlap, avail_tail)
             else:
                 overlap = 0
-            vf_parts: list[str] = []
-            if (
+            clips.append((plan, clip, overlap))
+
+        # Partition clips into independent chains so CONTINUE color-drift joins run sequentially
+        # while all independent CUT clips conform in parallel.
+        chains: list[list[int]] = []
+        for idx, (plan, _, _) in enumerate(clips):
+            needs_prev = (
                 video_cfg.color_drift_correction
                 and plan.continuity is ContinuityMode.CONTINUE
-                and prev_clip_info is not None
                 and plan.is_video
                 and plan.source is not None
-            ):
-                # Clean-room VAE color-drift affine match using exact boundary frames only
-                # (inspired by SonderSaid/ComfyUI-Sonder-Editor color_correction.py).
-                prev_path, prev_last_idx = prev_clip_info
-                prev_png = work / f"{safe_id}_prev_ref.png"
-                curr_png = work / f"{safe_id}_curr_ref.png"
-                # First frame this clip actually plays (after any dropped handoff seam frame).
-                in_frame = round(max(0.0, plan.head_handle + plan.sync_delay) * manifest.fps)
-                start_idx = in_frame + (1 if plan.drop_first_frame else 0)
-                media.extract_frame_at_index(prev_path, max(0, prev_last_idx), prev_png)
-                media.extract_frame_at_index(plan.source, start_idx, curr_png)
-                with Image.open(prev_png) as p_img, Image.open(curr_png) as c_img:
-                    prev_arr, curr_arr = _fit_active_pair(p_img, c_img, out_w, out_h)
-                affine = fit_color_drift_affine([curr_arr], [prev_arr])
-                if mixer := affine.to_ffmpeg_colorchannelmixer():
-                    vf_parts.append(mixer)
-            # When color_drift_correction is enabled, apply grade_vf once after concat/xfade so
-            # chained CONTINUE clips are never double-graded against already-graded neighbors.
-            if grade_vf and not video_cfg.color_drift_correction:
-                vf_parts.append(grade_vf)
-            media.run(
-                clip_command(
-                    plan,
-                    clip,
-                    out_w,
-                    out_h,
-                    manifest.fps,
-                    extra_frames=overlap,
-                    extra_vf=",".join(vf_parts) if vf_parts else None,
+                and idx > 0
+            )
+            if needs_prev and chains:
+                chains[-1].append(idx)
+            else:
+                chains.append([idx])
+
+        def _conform_chain(indices: list[int]) -> None:
+            prev_clip_info: tuple[Path, int] | None = None
+            for c_idx in indices:
+                plan, clip, overlap = clips[c_idx]
+                safe_id = require_safe_id(plan.shot_id, "shot id")
+                vf_parts: list[str] = []
+                if (
+                    video_cfg.color_drift_correction
+                    and plan.continuity is ContinuityMode.CONTINUE
+                    and prev_clip_info is not None
+                    and plan.is_video
+                    and plan.source is not None
+                ):
+                    # Clean-room VAE color-drift affine match using exact boundary frames only
+                    # (inspired by SonderSaid/ComfyUI-Sonder-Editor color_correction.py).
+                    prev_path, prev_last_idx = prev_clip_info
+                    prev_png = work / f"{safe_id}_prev_ref.png"
+                    curr_png = work / f"{safe_id}_curr_ref.png"
+                    # First frame this clip actually plays (after any dropped handoff seam frame).
+                    in_frame = round(max(0.0, plan.head_handle + plan.sync_delay) * manifest.fps)
+                    start_idx = in_frame + (1 if plan.drop_first_frame else 0)
+                    media.extract_frame_at_index(prev_path, max(0, prev_last_idx), prev_png)
+                    media.extract_frame_at_index(plan.source, start_idx, curr_png)
+                    with Image.open(prev_png) as p_img, Image.open(curr_png) as c_img:
+                        prev_arr, curr_arr = _fit_active_pair(p_img, c_img, out_w, out_h)
+                    affine = fit_color_drift_affine([curr_arr], [prev_arr])
+                    if mixer := affine.to_ffmpeg_colorchannelmixer():
+                        vf_parts.append(mixer)
+                # When color_drift_correction is enabled, apply grade_vf once after concat/xfade so
+                # chained CONTINUE clips are never double-graded against already-graded neighbors.
+                if grade_vf and not video_cfg.color_drift_correction:
+                    vf_parts.append(grade_vf)
+                media.run(
+                    clip_command(
+                        plan,
+                        clip,
+                        out_w,
+                        out_h,
+                        manifest.fps,
+                        extra_frames=overlap,
+                        extra_vf=",".join(vf_parts) if vf_parts else None,
+                        encode_args=encode_args,
+                    )
                 )
-            )
-            clips.append((plan, clip, overlap))
-            prev_clip_info = (
-                (clip, plan.frames - 1) if (plan.is_video and plan.source is not None) else None
-            )
+                prev_clip_info = (
+                    (clip, plan.frames - 1) if (plan.is_video and plan.source is not None) else None
+                )
+
+        if workers > 1 and len(chains) > 1:
+            with ThreadPoolExecutor(max_workers=min(workers, len(chains))) as pool:
+                list(pool.map(_conform_chain, chains))
+        else:
+            for chain in chains:
+                _conform_chain(chain)
 
         silent = work / "picture.mp4"
         post_grade_vf = grade_vf if video_cfg.color_drift_correction else None
         has_any_xfade = use_xfade and len(clips) > 1 and any(ov > 0 for _, _, ov in clips[:-1])
         pieces = (
-            _transition_pieces(clips, work, manifest.fps, xfade_name)
+            _transition_pieces(
+                clips,
+                work,
+                manifest.fps,
+                xfade_name,
+                encode_args=encode_args,
+                workers=workers,
+            )
             if has_any_xfade and xfade_name is not None
             else [clip_path for _, clip_path, _ in clips]
         )
         entries = [f"file '{piece.name}'" for piece in pieces]
         concat_list = work / "clips.txt"
         concat_list.write_text("\n".join(entries) + "\n", encoding="utf-8")
-        concat_codec = ["-vf", post_grade_vf, *_ENCODE] if post_grade_vf else ["-c", "copy"]
+        concat_codec = ["-vf", post_grade_vf, *encode_args] if post_grade_vf else ["-c", "copy"]
         media.run(
             [
                 "ffmpeg",

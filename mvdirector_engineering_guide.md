@@ -875,7 +875,7 @@ mvd schema schemas            # after any change to models.py
 
 * **Cost scales with retries.** Each vision call sends up to six images, and every retry adds GPU time and API usage. `retry.max_generations_per_run` caps one run.
 
-* **Sequential generation.** One ComfyUI server works through one queue.
+* **Dependency-wave parallelism.** Independent `CUT` shots run concurrently up to `comfy.max_concurrency` across one or more leased ComfyUI endpoints, while `CONTINUE`/`REFRAME` chains remain ordered.
 
 * **`mvd plan --overwrite` discards generation history.** Edit `manifest.json` by hand to change direction for individual shots.
 

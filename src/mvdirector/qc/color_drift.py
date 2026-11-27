@@ -19,6 +19,7 @@ Credits & Attribution:
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -145,6 +146,78 @@ def fit_color_drift_affine(
     clamped_matrix = identity + np.clip(
         matrix - identity, -max_matrix_deviation, max_matrix_deviation
     )
+    clamped_bias = np.clip(bias, -max_bias, max_bias)
+    if not (np.all(np.isfinite(clamped_matrix)) and np.all(np.isfinite(clamped_bias))):
+        return ColorAffine.identity()
+    return ColorAffine(matrix=clamped_matrix, bias=clamped_bias)
+
+
+def _spd_matrix_power(mat: np.ndarray, power: float, eps: float = 1e-6) -> np.ndarray:
+    """Compute ``mat ** power`` for a 3x3 symmetric positive-definite matrix via eigendecomp."""
+    sym = 0.5 * (mat + mat.T)
+    eigvals, eigvecs = np.linalg.eigh(sym)
+    clamped = np.maximum(eigvals, eps)
+    return (eigvecs * (clamped**power)) @ eigvecs.T
+
+
+def fit_optimal_transport_color_match(
+    source_frames: Sequence[np.ndarray],
+    target_frames: Sequence[np.ndarray],
+    *,
+    regularization: float = _DEFAULT_RIDGE_LAMBDA,
+    max_matrix_deviation: float = 0.25,
+    max_bias: float = 0.15,
+) -> ColorAffine:
+    """Match 3D RGB color distributions via Monge-Kantorovich Gaussian optimal transport.
+
+    Unlike pixel-aligned regression (:func:`fit_color_drift_affine`), optimal transport matches
+    color statistics across different camera angles or shots sharing the same set (for example,
+    reconciling cloud-burst hero shots with self-hosted I2V shots in the same location).
+    """
+    for param_name, param_val in (
+        ("regularization", regularization),
+        ("max_matrix_deviation", max_matrix_deviation),
+        ("max_bias", max_bias),
+    ):
+        val = float(param_val)
+        if not math.isfinite(val) or val < 0.0:
+            raise ValueError(f"{param_name} must be finite and non-negative, got {param_val!r}.")
+
+    if not source_frames or not target_frames:
+        return ColorAffine.identity()
+
+    src_pixels = np.concatenate([_downscale_rgb(f).reshape(-1, 3) for f in source_frames], axis=0)
+    tgt_pixels = np.concatenate([_downscale_rgb(f).reshape(-1, 3) for f in target_frames], axis=0)
+    if src_pixels.shape[0] < 16 or tgt_pixels.shape[0] < 16:
+        return ColorAffine.identity()
+
+    reg = max(1e-5, float(regularization))
+    mu_s = np.mean(src_pixels, axis=0)
+    mu_t = np.mean(tgt_pixels, axis=0)
+    cov_s = np.cov(src_pixels, rowvar=False) + reg * np.eye(3, dtype=np.float64)
+    cov_t = np.cov(tgt_pixels, rowvar=False) + reg * np.eye(3, dtype=np.float64)
+    if not (
+        np.all(np.isfinite(mu_s))
+        and np.all(np.isfinite(mu_t))
+        and np.all(np.isfinite(cov_s))
+        and np.all(np.isfinite(cov_t))
+    ):
+        return ColorAffine.identity()
+
+    # T = Sigma_s^{-1/2} (Sigma_s^{1/2} Sigma_t Sigma_s^{1/2})^{1/2} Sigma_s^{-1/2}
+    try:
+        s_half = _spd_matrix_power(cov_s, 0.5)
+        s_inv_half = _spd_matrix_power(cov_s, -0.5)
+        inner = s_half @ cov_t @ s_half
+        transform = s_inv_half @ _spd_matrix_power(inner, 0.5) @ s_inv_half
+    except np.linalg.LinAlgError:
+        return ColorAffine.identity()
+
+    identity = np.eye(3, dtype=np.float64)
+    clamped_matrix = identity + np.clip(
+        transform - identity, -max_matrix_deviation, max_matrix_deviation
+    )
+    bias = mu_t - clamped_matrix @ mu_s
     clamped_bias = np.clip(bias, -max_bias, max_bias)
     if not (np.all(np.isfinite(clamped_matrix)) and np.all(np.isfinite(clamped_bias))):
         return ColorAffine.identity()

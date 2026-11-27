@@ -274,11 +274,14 @@ def _intercut_run(
         return originals
 
     cursors = [max(0.0, p.head_handle + p.sync_delay) for p in originals]
-    # Keep a small tail-drift margin when generous tail handle exists, while never dipping below
-    # the clip's own frame budget.
+    # Use the actual generated clip frame budget (shot.num_frames minus in-point and a small
+    # tail-drift margin) while never dipping below the clip's own frame count.
     remaining_frames = [
-        p.frames + max(0, round((p.tail_handle - min(0.10, p.tail_handle)) * fps))
-        for p in originals
+        max(
+            p.frames + max(0, round((p.tail_handle - min(0.10, p.tail_handle)) * fps)),
+            s.num_frames - round(c * fps) - 2,
+        )
+        for (s, p), c in zip(run, cursors)
     ]
 
     sub_plans: list[ClipPlan] = []

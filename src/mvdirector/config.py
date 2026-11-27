@@ -296,6 +296,15 @@ class VideoConfig(_Section):
     )
     max_clip_seconds: float = Field(default=8.0, gt=0.0, allow_inf_nan=False)
     min_clip_seconds: float = Field(default=2.5, gt=0.0, allow_inf_nan=False)
+    broll_min_clip_seconds: float | None = Field(
+        default=None,
+        gt=0.0,
+        allow_inf_nan=False,
+        description=(
+            "Optional shorter minimum clip duration for high-intensity non-vocal / B-roll "
+            "passages while keeping sung lip-sync shots at >= min_clip_seconds."
+        ),
+    )
     handle_seconds: float = Field(
         default=0.25,
         ge=0.0,
@@ -461,6 +470,32 @@ class VideoConfig(_Section):
             "Parallel ffmpeg workers for independent clip conforms and transitions during assembly."
         ),
     )
+    assembly_intercut: bool = Field(
+        default=False,
+        description=(
+            "Beat-lock intercut contiguous high-intensity non-lipsync video shots at assembly "
+            "time (zero extra GPU renders), keeping lip-sync shots and calm holds intact."
+        ),
+    )
+    assembly_intercut_min_intensity: float = Field(
+        default=0.70,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+        description=(
+            "Minimum section intensity (0-1) required before assembly_intercut sub-cuts "
+            "contiguous non-lipsync shots on beat boundaries."
+        ),
+    )
+    assembly_intercut_anticipation_frames: int = Field(
+        default=1,
+        ge=0,
+        le=3,
+        description=(
+            "Frames before the detected beat to place assembly_intercut cuts (1-2 frames early "
+            "prevents on-the-beat cuts from feeling perceptually late)."
+        ),
+    )
 
     @model_validator(mode="after")
     def _check_draft_dimensions(self) -> VideoConfig:
@@ -470,6 +505,14 @@ class VideoConfig(_Section):
             raise ValueError(
                 f"video.min_clip_seconds ({self.min_clip_seconds}) must not exceed "
                 f"video.max_clip_seconds ({self.max_clip_seconds})."
+            )
+        if (
+            self.broll_min_clip_seconds is not None
+            and self.broll_min_clip_seconds > self.min_clip_seconds
+        ):
+            raise ValueError(
+                f"video.broll_min_clip_seconds ({self.broll_min_clip_seconds}) must not exceed "
+                f"video.min_clip_seconds ({self.min_clip_seconds})."
             )
         for label, val in (
             ("video.width", self.width),

@@ -24,7 +24,15 @@ from mvdirector import media
 from mvdirector.audio import broadcast_qa as broadcast_qa_mod
 from mvdirector.audio import foley as foley_mod
 from mvdirector.errors import ConfigError, MVDError
-from mvdirector.models import Attempt, ContinuityMode, Manifest, RetryStrategy, Shot, ShotType
+from mvdirector.models import (
+    Analysis,
+    Attempt,
+    ContinuityMode,
+    Manifest,
+    RetryStrategy,
+    Shot,
+    ShotType,
+)
 from mvdirector.project import Project, require_safe_id
 from mvdirector.qc.color_drift import fit_color_drift_affine
 from mvdirector.review.policy import is_ready, refresh_reviews
@@ -196,6 +204,213 @@ def plan_clips(
         else:  # draft: black placeholder
             plans.append(ClipPlan(shot_id, frames, None, False, 0.0))
     return plans
+
+
+def _intercut_run(
+    run: list[tuple[Shot, ClipPlan]],
+    beats: list[float],
+    fps: int,
+    *,
+    tempo_bpm: float | None = None,
+    min_intensity: float,
+    anticipation_frames: int,
+) -> list[ClipPlan]:
+    """Beat-lock intercut one contiguous non-lipsync video run, preserving exact frame count."""
+    originals = [p for _, p in run]
+    if len(run) < 2 or fps <= 0:
+        return originals
+
+    total_frames = sum(p.frames for p in originals)
+    if total_frames <= 0:
+        return originals
+
+    weighted_intensity = sum(s.intensity * p.frames for s, p in run) / total_frames
+    if weighted_intensity < min_intensity:
+        return originals
+
+    run_start = run[0][0].start
+    run_start_frame = round(run_start * fps)
+    run_end_frame = run_start_frame + total_frames
+    run_end = run_end_frame / fps
+
+    run_beats = [b for b in beats if run_start + 1e-3 < b < run_end - 1e-3]
+    if len(run_beats) < 2 and tempo_bpm is not None and 50.0 <= tempo_bpm <= 220.0:
+        step_s = 60.0 / tempo_bpm
+        k = 1
+        synth: list[float] = []
+        while run_start + k * step_s < run_end - 1e-3:
+            synth.append(run_start + k * step_s)
+            k += 1
+        run_beats = synth
+    if len(run_beats) < 2:
+        return originals
+
+    beat_step_s = float(np.median(np.diff(run_beats)))
+    min_sub_frames = max(10, round(0.42 * fps))
+    step_pattern: tuple[int, ...]
+    if weighted_intensity >= 0.85 and beat_step_s >= 0.42:
+        step_pattern = (2, 2, 1, 1)
+    elif beat_step_s >= 0.70:
+        step_pattern = (1,)
+    else:
+        step_pattern = (2,)
+
+    frame_edges = [run_start_frame]
+    pat_idx = 0
+    beat_idx = step_pattern[0] - 1
+    while beat_idx < len(run_beats):
+        cut_frame = round(run_beats[beat_idx] * fps) - anticipation_frames
+        if (
+            cut_frame - frame_edges[-1] >= min_sub_frames
+            and run_end_frame - cut_frame >= min_sub_frames
+        ):
+            frame_edges.append(cut_frame)
+            pat_idx += 1
+            beat_idx += step_pattern[pat_idx % len(step_pattern)]
+        else:
+            beat_idx += 1
+    frame_edges.append(run_end_frame)
+    if len(frame_edges) <= 2:
+        return originals
+
+    cursors = [max(0.0, p.head_handle + p.sync_delay) for p in originals]
+    # Keep a small tail-drift margin when generous tail handle exists, while never dipping below
+    # the clip's own frame budget.
+    remaining_frames = [
+        p.frames + max(0, round((p.tail_handle - min(0.10, p.tail_handle)) * fps))
+        for p in originals
+    ]
+
+    sub_plans: list[ClipPlan] = []
+    prev_src = -1
+
+    def _emit(src_idx: int, frames: int) -> None:
+        nonlocal prev_src
+        src_plan = originals[src_idx]
+        sub_dur = frames / fps
+        sub_plans.append(
+            ClipPlan(
+                shot_id=f"{src_plan.shot_id}_ic{len(sub_plans):02d}",
+                frames=frames,
+                source=src_plan.source,
+                is_video=True,
+                head_handle=round(cursors[src_idx], 4),
+                sync_delay=0.0,
+                drop_first_frame=False,
+                continuity=ContinuityMode.CUT,
+                tail_handle=round(max(0.0, (remaining_frames[src_idx] - frames) / fps), 4),
+            )
+        )
+        cursors[src_idx] += sub_dur
+        remaining_frames[src_idx] -= frames
+        prev_src = src_idx
+
+    for f_a, f_b in zip(frame_edges[:-1], frame_edges[1:]):
+        need = f_b - f_a
+        while need > 0:
+            full = [
+                idx
+                for idx in range(len(originals))
+                if idx != prev_src and remaining_frames[idx] >= need
+            ]
+            if full:
+                chosen = max(full, key=lambda idx: (remaining_frames[idx], -idx))
+                _emit(chosen, need)
+                need = 0
+                break
+            # If the remaining slice exceeds any single source's remaining footage (e.g. final
+            # boundary), split cleanly across two distinct sources rather than aborting the run.
+            partial = [
+                idx
+                for idx in range(len(originals))
+                if idx != prev_src and remaining_frames[idx] >= min(need, min_sub_frames)
+            ]
+            if not partial:
+                # If no alternate source has enough safe frames left for a final sliver, extend
+                # the previous sub-clip continuously using its own remaining frames (no jump cut).
+                if sub_plans and prev_src >= 0 and remaining_frames[prev_src] >= need:
+                    prev_plan = sub_plans[-1]
+                    sub_plans[-1] = ClipPlan(
+                        shot_id=prev_plan.shot_id,
+                        frames=prev_plan.frames + need,
+                        source=prev_plan.source,
+                        is_video=prev_plan.is_video,
+                        head_handle=prev_plan.head_handle,
+                        sync_delay=prev_plan.sync_delay,
+                        drop_first_frame=prev_plan.drop_first_frame,
+                        continuity=prev_plan.continuity,
+                        tail_handle=round(max(0.0, (remaining_frames[prev_src] - need) / fps), 4),
+                    )
+                    cursors[prev_src] += need / fps
+                    remaining_frames[prev_src] -= need
+                    need = 0
+                    break
+                return originals
+            chosen = max(partial, key=lambda idx: (remaining_frames[idx], -idx))
+            take = min(need, remaining_frames[chosen])
+            if need - take > 0 and need - take < min_sub_frames:
+                take = need - min_sub_frames
+                if take < min_sub_frames or take > remaining_frames[chosen]:
+                    return originals
+            _emit(chosen, take)
+            need -= take
+
+    return sub_plans
+
+
+def intercut_plans(
+    plans: list[ClipPlan],
+    manifest: Manifest,
+    analysis: Analysis | None,
+    *,
+    min_intensity: float = 0.70,
+    anticipation_frames: int = 1,
+) -> list[ClipPlan]:
+    """Beat-lock intercut high-intensity contiguous non-lipsync video runs at assembly time.
+
+    Lip-sync shots, calm sections (< ``min_intensity``), still holds, and ``CONTINUE`` chains
+    are preserved untouched. Total frame count is conserved identically for every run.
+    """
+    if analysis is None or len(plans) != len(manifest.shots) or len(plans) < 2:
+        return list(plans)
+
+    result: list[ClipPlan] = []
+    run: list[tuple[Shot, ClipPlan]] = []
+
+    def _flush() -> None:
+        if not run:
+            return
+        result.extend(
+            _intercut_run(
+                run,
+                analysis.beats,
+                manifest.fps,
+                tempo_bpm=analysis.tempo_bpm,
+                min_intensity=min_intensity,
+                anticipation_frames=anticipation_frames,
+            )
+        )
+        run.clear()
+
+    for idx, (shot, plan) in enumerate(zip(manifest.shots, plans)):
+        next_is_continue = (
+            idx + 1 < len(plans) and plans[idx + 1].continuity is ContinuityMode.CONTINUE
+        )
+        eligible = (
+            shot.type is not ShotType.LIPSYNC
+            and plan.is_video
+            and plan.source is not None
+            and plan.continuity is ContinuityMode.CUT
+            and not next_is_continue
+            and plan.frames > 0
+        )
+        if eligible:
+            run.append((shot, plan))
+        else:
+            _flush()
+            result.append(plan)
+    _flush()
+    return result
 
 
 def clip_command(
@@ -427,10 +642,30 @@ def assemble(
     out_w, out_h = _resolve_output_size(project, draft=draft, width=width, height=height)
     refresh_reviews(manifest, project.config)
     plans = plan_clips(project, manifest, force, draft=draft)
+    video_cfg = project.config.video
+    if video_cfg.assembly_intercut and project.analysis_path.is_file():
+        try:
+            analysis = project.load_analysis()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Skipping assembly intercut: could not load analysis (%s)", exc)
+        else:
+            before_count = len(plans)
+            plans = intercut_plans(
+                plans,
+                manifest,
+                analysis,
+                min_intensity=video_cfg.assembly_intercut_min_intensity,
+                anticipation_frames=video_cfg.assembly_intercut_anticipation_frames,
+            )
+            if len(plans) != before_count:
+                log.info(
+                    "Assembly intercut expanded %d shot(s) into %d beat-locked clip(s).",
+                    before_count,
+                    len(plans),
+                )
     mix = project.input_path(project.config.inputs.mix, "mix")
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    video_cfg = project.config.video
     grade_vf = color_grade_filter(video_cfg.color_grade, video_cfg.film_grain)
     xfade_name = _XFADE_MAP.get(video_cfg.transition)
     use_xfade = xfade_name is not None and video_cfg.transition_seconds > 0.0

@@ -225,7 +225,8 @@ def test_broll_people_guard_and_missing_shot_uses_bible_setting():
     )
     planner._apply_creative(shot_broll, bad_broll, bible, characters=chars)
     assert "Anya" not in shot_broll.still_prompt
-    assert "no people" in shot_broll.still_prompt.lower()
+    assert "uninhabited" in shot_broll.still_prompt.lower()
+    assert "no people" not in shot_broll.still_prompt.lower()
 
 
 def test_ollama_chat_sends_think_false_and_falls_back_if_unsupported():
@@ -717,8 +718,9 @@ def test_rule_based_broll_avoids_duplicate_the_article():
         audio_slice=AudioSlice(path="assets/audio/s019.wav", start=0.0, end=4.0, head_handle=0.0),
     )
     planner._apply_rule_based(shot)
-    assert "of the The " not in shot.still_prompt
-    assert "of The Circular Stage" in shot.still_prompt
+    assert "the The " not in shot.still_prompt
+    assert "uninhabited The " not in shot.still_prompt
+    assert "uninhabited Circular Stage" in shot.still_prompt
 
 
 def test_rear_view_panel_routing_prefers_back_then_profile_and_avoids_face(tmp_path):

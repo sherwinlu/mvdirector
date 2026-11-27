@@ -115,6 +115,10 @@ planning:
   allow_multicut_shots: false    # allow the planner to emit multi-angle montage cuts (allow_cuts)
   max_lipsync_share: 0.45        # cap on screen time the singer sings to camera: 0.7 performance,
                                  #   0.45 hybrid, 0.2 narrative; the rest becomes cutaways (null = no cap)
+  audio_listen: auto             # auto | always | never: run a 1-call Gemini MP3 listen when planner is text-only
+  # audio_llm:                   # optional audio-capable LLM for native MP3 listen (defaults to qc.llm if Gemini)
+  #   provider: gemini
+  #   model: gemini-3.8-flash
 
 reference:
   layout: row                    # row (1x4) | grid (2x2) | columns (headshots + front/back body)
@@ -135,6 +139,12 @@ props:
 qc:
   pass_score: 0.70
   vision_enabled: true
+  # llm:                         # optional separate LLM for Vision QC (e.g. fast/cheap Gemini while planning with Claude)
+  #   provider: gemini
+  #   model: gemini-3.8-flash
+  # vision_spec: 0.71            # shorthand hard min for both qc.image and qc.video (calibrated for gemini-3.8-flash)
+  # vision_artifacts: 0.72
+  # vision_character: 0.71
   face_backend: mediapipe        # mediapipe (Apache-2.0, commercial-safe) | insightface (non-commercial research)
   lipsync_backend: mediapipe     # mediapipe (Apache-2.0, CPU) | stable_syncnet (LatentSync OpenRAIL++ + MediaPipe)
   on_missing_dependency: fail    # fail (recommended) | skip

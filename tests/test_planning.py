@@ -289,7 +289,8 @@ def test_broll_guard_blocks_named_cast_but_keeps_anonymous_crowd_silhouettes():
     )
     assert broll_cast.type is ShotType.BROLL
     assert "Anya" not in broll_cast.still_prompt
-    assert "no people" in broll_cast.still_prompt.lower()
+    assert "uninhabited" in broll_cast.still_prompt.lower()
+    assert "no people" not in broll_cast.still_prompt.lower()
 
     # 2. Raw snake_case character ID in a broll slot -> also caught.
     broll_id = _make_shot(ShotType.BROLL)
@@ -374,6 +375,108 @@ def test_segment_suppresses_lipsync_on_instrumental_bleed_when_lyrics_aligned():
     # Unaligned / no-lyrics fallback keeps vocal_windows behavior unchanged
     unaligned = analysis.model_copy(update={"lyric_lines": []})
     assert all(s.type is ShotType.LIPSYNC for s in segment(unaligned, video))
+
+
+def test_broll_fallback_preserves_hero_props_and_uses_affirmative_staging():
+    from mvdirector.models import AudioSlice, Character, PropDesign, SetDesign, Shot, VisualBible
+    from mvdirector.planning.planner import ShotCreative, _apply_creative, _is_empty_scene_prompt
+    from mvdirector.planning.prompts import extract_negative_exclusions
+
+    bible = VisualBible(
+        style="Gothic 35mm",
+        palette="Slate blue and warm oil lamp",
+        lighting="Low-key chiaroscuro",
+        settings=[SetDesign(name="The Lamplit Cabin", description="Weathered timber cabin.")],
+        props=[
+            PropDesign(
+                id="music_box",
+                name="Antique cylinder music box",
+                description="Dark walnut box with brass cylinder.",
+            )
+        ],
+    )
+    chars = {"singer_1": Character(name="Tobias, the late groom", appearance="Wool coat")}
+    shot = Shot(
+        id="s020",
+        index=19,
+        start=50.0,
+        end=52.6,
+        intensity=0.45,
+        audio_slice=AudioSlice(path="audio.wav", start=50.0, end=52.6, head_handle=0.0),
+        num_frames=65,
+        type=ShotType.BROLL,
+    )
+    _apply_creative(
+        shot,
+        ShotCreative(
+            id="s020",
+            type=ShotType.BROLL,
+            framing=Framing.CLOSE_UP,
+            setting="The Lamplit Cabin",
+            props=["music_box", "nonexistent_prop"],
+            still_prompt="Close-up of Tobias reaching for the antique cylinder music box.",
+            motion_prompt="Tobias turns the brass key.",
+        ),
+        bible,
+        characters=chars,
+    )
+    assert shot.type is ShotType.BROLL
+    assert shot.props == ["music_box"]
+    assert shot.framing is Framing.CLOSE_UP
+    assert "Tobias" not in shot.still_prompt
+    assert "Antique cylinder music box" in shot.still_prompt
+    assert "uninhabited Lamplit Cabin" in shot.still_prompt
+    assert "the the " not in shot.still_prompt.lower()
+    assert extract_negative_exclusions(shot.still_prompt) == []
+    assert "no people" not in shot.still_prompt.lower()
+    assert "no people" not in shot.motion_prompt.lower()
+    assert "uninhabited space" in shot.motion_prompt.lower()
+    assert _is_empty_scene_prompt(shot.still_prompt)
+
+
+def test_broll_allows_inanimate_figurines_and_anonymous_hands_only_inserts():
+    from mvdirector.models import Character
+    from mvdirector.planning.planner import _broll_mentions_people
+
+    chars = {"singer_1": Character(name="Anya", appearance="Leather jacket")}
+    allowed = [
+        (
+            "Close-up of a man's weathered gloved hands winding the walnut music box.",
+            Framing.CLOSE_UP,
+        ),
+        (
+            "Close-up of a woman's pale grey shawl draped over an empty wooden pew.",
+            Framing.CLOSE_UP,
+        ),
+        (
+            "Close-up of two carved wooden figures turning inside the brass music box.",
+            Framing.CLOSE_UP,
+        ),
+        (
+            "Medium close-up of a frost-covered porcelain angel figurine on the sill.",
+            Framing.MEDIUM_CLOSE,
+        ),
+        ("Close-up of an antique sugar figurine beneath a cracked glass dome.", Framing.CLOSE_UP),
+        (
+            "Close-up of the empty chapel hallway, empty of human presence, zero people.",
+            Framing.CLOSE_UP,
+        ),
+    ]
+    for prompt, framing in allowed:
+        assert not _broll_mentions_people(prompt, chars, framing=framing), prompt
+
+    rejected = [
+        ("Close-up of a man's face in flickering candlelight.", Framing.CLOSE_UP),
+        ("Close-up of a woman's eyes reflecting falling snow.", Framing.CLOSE_UP),
+        ("Close-up of Anya's gloved hands holding the music box.", Framing.CLOSE_UP),
+        (
+            "A medium close-up of a single, shadowy 'angel' figure, silhouetted against fire.",
+            Framing.MEDIUM_CLOSE,
+        ),
+        ("Two figures stand in purple light looking at camera.", Framing.WIDE),
+    ]
+    for prompt, framing in rejected:
+        assert _broll_mentions_people(prompt, chars, framing=framing), prompt
 
 
 def test_close_and_medium_close_framing_notes_discourage_stiff_mugshot_pose():

@@ -80,14 +80,14 @@ _PACE_MOTION = {
     "high": "Brisk movement in the frame and a firm, smooth push-in. Camera stays stable.",
 }
 _BROLL_PACE_MOTION = {
-    "calm": "Light, dust and shadow drift slowly through the frame. No people. Steady camera.",
+    "calm": "Light, dust and shadow drift slowly through the uninhabited space. Steady camera.",
     "moderate": (
-        "Light and shadow shift steadily across the frame with natural movement. "
-        "No people. Gentle push-in."
+        "Light and shadow shift steadily across the empty, uninhabited space with natural "
+        "movement. Gentle push-in."
     ),
     "high": (
-        "Brisk movement of light and environmental elements across the frame. "
-        "No people. Firm, smooth push-in. Camera stays stable."
+        "Brisk movement of light and environmental elements across the empty, uninhabited space. "
+        "Firm, smooth push-in. Camera stays stable."
     ),
 }
 _SCALE = {Framing.WIDE: 0, Framing.MEDIUM: 1, Framing.MEDIUM_CLOSE: 2, Framing.CLOSE_UP: 3}
@@ -205,6 +205,47 @@ def _none_to_list(value: object) -> object:
     if isinstance(value, list):
         return [item for item in value if item is not None]
     return value
+
+
+class AudioListeningNotes(_Reply):
+    """Structured musical-feel observations heard directly from the track's MP3 audio."""
+
+    meter_and_groove: str = ""
+    instrumentation_and_texture: str = ""
+    vocal_character: str = ""
+    atmosphere_and_subtext: str = ""
+    key_musical_turns: list[str] = Field(default_factory=list)
+
+    @field_validator(
+        "meter_and_groove",
+        "instrumentation_and_texture",
+        "vocal_character",
+        "atmosphere_and_subtext",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_listen_text(cls, value: object) -> object:
+        return _coerce_text(value)
+
+    @field_validator("key_musical_turns", mode="before")
+    @classmethod
+    def _coerce_listen_turns(cls, value: object) -> object:
+        return _none_to_list(value)
+
+    def format_for_prompt(self) -> str:
+        lines: list[str] = []
+        if self.meter_and_groove.strip():
+            lines.append(f"Meter & groove: {self.meter_and_groove.strip()}")
+        if self.instrumentation_and_texture.strip():
+            lines.append(f"Instrumentation & texture: {self.instrumentation_and_texture.strip()}")
+        if self.vocal_character.strip():
+            lines.append(f"Vocal character: {self.vocal_character.strip()}")
+        if self.atmosphere_and_subtext.strip():
+            lines.append(f"Sonic atmosphere & subtext: {self.atmosphere_and_subtext.strip()}")
+        turns = [t.strip() for t in self.key_musical_turns if t.strip()]
+        if turns:
+            lines.append("Key musical turns:\n" + "\n".join(f"- {t}" for t in turns))
+        return "\n".join(lines)
 
 
 class SectionBeatReply(_Reply):
@@ -350,6 +391,7 @@ def build_manifest(
     llm: LLMClient | None,
     *,
     mix_path: Path | None = None,
+    audio_llm: LLMClient | None = None,
     exclusions: Sequence[str] | None = None,
 ) -> Manifest:
     config, tuned_adjustments = tuning_mod.tune_config_for_planning(
@@ -390,6 +432,21 @@ def build_manifest(
             VisualBible(style=" ".join(style_text.split()), exclusions=merged_exclusions)
         )
     else:
+        listening_notes: AudioListeningNotes | None = None
+        if (
+            config.planning.audio_listen != "never"
+            and mix_path is not None
+            and mix_path.is_file()
+            and not getattr(llm, "supports_audio", False)
+            and audio_llm is not None
+            and getattr(audio_llm, "supports_audio", False)
+        ):
+            listening_notes = _listen_to_audio(
+                audio_llm,
+                mix_path,
+                lyrics_text=lyrics_text,
+                analysis=analysis,
+            )
         _write_bible(
             manifest,
             lyrics_text,
@@ -397,6 +454,7 @@ def build_manifest(
             llm,
             analysis=analysis,
             mix_path=mix_path,
+            audio_notes=listening_notes,
             video_style=video_style,
             exclusions=merged_exclusions,
         )
@@ -456,6 +514,41 @@ def _build_interpretation(raw: SongInterpretationReply | None) -> SongInterpreta
     )
 
 
+def _listen_to_audio(
+    audio_llm: LLMClient,
+    mix_path: Path,
+    *,
+    lyrics_text: str = "",
+    analysis: Analysis | None = None,
+) -> AudioListeningNotes | None:
+    """Run one native MP3 listening pass to supply meter, timbre, and mood to a text planner."""
+    parts = [
+        "Listen carefully to the attached audio track and describe its exact meter/groove, "
+        "instrumentation, vocal delivery, sonic atmosphere, and structural turning points."
+    ]
+    if analysis is not None and analysis.tempo_bpm > 0:
+        parts.append(
+            f"Measured tempo/duration: ~{analysis.tempo_bpm:.0f} BPM, {analysis.duration:.0f}s."
+        )
+    section_list = "\n".join(f"- {name}" for name in _section_order(lyrics_text))
+    if section_list:
+        parts.append(f"Song sections:\n{section_list}")
+    try:
+        notes = complete_json_with_optional_audio(
+            audio_llm,
+            system=prompts.AUDIO_LISTEN_SYSTEM,
+            text="\n\n".join(parts),
+            schema=AudioListeningNotes,
+            audio_path=mix_path,
+        )
+        if notes.format_for_prompt():
+            log.info("Attached native audio listening notes to planning brief.")
+            return notes
+    except LLMError as exc:
+        log.warning("Native audio listening pass failed (%s); continuing with text cues.", exc)
+    return None
+
+
 def _write_bible(
     manifest: Manifest,
     lyrics_text: str,
@@ -464,6 +557,7 @@ def _write_bible(
     *,
     analysis: Analysis | None = None,
     mix_path: Path | None = None,
+    audio_notes: AudioListeningNotes | None = None,
     video_style: VideoStyle = VideoStyle.LIPSYNC,
     exclusions: Sequence[str] = (),
 ) -> None:
@@ -485,6 +579,8 @@ def _write_bible(
         reg_summary = describe_vocal_register(analysis.vocal_turns)
         if reg_summary:
             parts.append(f"VOCAL REGISTER:\n{reg_summary}")
+    if audio_notes is not None and (notes_text := audio_notes.format_for_prompt()):
+        parts.append(f"NATIVE AUDIO LISTENING NOTES (HEARD DIRECTLY FROM THE TRACK):\n{notes_text}")
     if exclusions:
         parts.append(
             "GLOBAL EXCLUSIONS (NEVER SHOW IN ANY SHOT):\n"
@@ -979,8 +1075,35 @@ _PERFORMER_CUE_RE = re.compile(
 
 
 _NEGATED_PEOPLE_RE = re.compile(
-    r"\b(?:no|without|empty\s+of|free\s+of|devoid\s+of)\s+"
-    r"(?:people|persons?|faces?|figures?|performers?|singers?|dancers?|crowds?|humans?|silhouettes?)\b",
+    r"\b(?:no|zero|without|empty\s+of|free\s+of|devoid\s+of|uninhabited\s+by)\s+"
+    r"(?:(?:human|living|visible|other)\s+)?"
+    r"(?:people|persons?|faces?|figures?|performers?|singers?|dancers?|crowds?|humans?|"
+    r"silhouettes?|presence)\b",
+    re.IGNORECASE,
+)
+_INANIMATE_MATERIAL = (
+    r"(?:carved|painted|porcelain|ceramic|wooden|brass|bronze|stone|marble|glass|"
+    r"sugar-glass|sugar|clockwork|miniature|tin|wax|plaster|clay|sculpted|etched|"
+    r"engraved|inanimate|toy|music-box|stained-glass|woodcut|gilded)"
+)
+_INANIMATE_FIGURE_RE = re.compile(
+    rf"\b(?:"
+    rf"(?:(?:two|three|small|tiny)\s+)?{_INANIMATE_MATERIAL}\s+(?:{_INANIMATE_MATERIAL}\s+)?"
+    rf"(?:figures?|figurines?|statues?|statuettes?|angels?|silhouettes?|dancers?|couple|"
+    rf"man|woman|boy|girl)"
+    rf"|"
+    rf"(?:(?:two|three|small|tiny)\s+)?(?:angel|man|woman|boy|girl|couple|dancer|human|sugar)\s+"
+    rf"(?:figurines?|statues?|statuettes?|carvings?|busts?|sculptures?|mannequins?|dolls?|"
+    rf"ornaments?|reliefs?|portraits?|engravings?|etchings?)"
+    rf")\b",
+    re.IGNORECASE,
+)
+_ANONYMOUS_POSSESSIVE_DETAIL_RE = re.compile(
+    r"\b(?:(?:a|the)\s+)?(?:man|woman|girl|boy|person|human)['\u2019]s\s+"
+    r"(?:[a-z]+(?:-[a-z]+)?\s+){0,2}"
+    r"(?:hands?|fingers?|fingertips?|wrists?|palms?|knuckles?|gloves?|coat|hat|fedora|shawl|"
+    r"dress|jacket|scarf|boots?|shoes?|watch|wristwatch|ring|cuff|sleeve|pocket|cloak|"
+    r"umbrella|footprints?|bootprints?|shadow)\b",
     re.IGNORECASE,
 )
 _BROLL_PEOPLE_RE = re.compile(
@@ -1011,11 +1134,12 @@ def _broll_mentions_people(
         return False
     if characters and _characters_in_text(cleaned, characters, proper_noun_only=True):
         return True
-    if _BROLL_PEOPLE_RE.search(cleaned):
+    subject_text = _ANONYMOUS_POSSESSIVE_DETAIL_RE.sub("", _INANIMATE_FIGURE_RE.sub("", cleaned))
+    if _BROLL_PEOPLE_RE.search(subject_text):
         return True
     return bool(
         framing in (Framing.CLOSE_UP, Framing.MEDIUM_CLOSE)
-        and _BROLL_TIGHT_FIGURE_RE.search(cleaned)
+        and _BROLL_TIGHT_FIGURE_RE.search(subject_text)
     )
 
 
@@ -1804,12 +1928,21 @@ def _ask_for_batch(
     return {item.id: item for item in reply.shots}
 
 
-def _apply_rule_based_with_set(shot: Shot, bible: VisualBible, raw_setting: str) -> None:
-    """Apply rule-based direction while keeping a valid set from the visual bible."""
+def _apply_rule_based_with_set(
+    shot: Shot,
+    bible: VisualBible,
+    raw_setting: str,
+    *,
+    raw_props: Sequence[str] = (),
+    raw_framing: Framing | None = None,
+) -> None:
+    """Apply rule-based direction while keeping a valid set (and b-roll props) from the bible."""
     shot.setting = _resolve_set(bible, raw_setting, shot.id)
     shot.allow_cuts = False
-    shot.props = []
-    _apply_rule_based(shot)
+    shot.props = (
+        _resolve_props(bible, list(raw_props), shot.id) if shot.type is ShotType.BROLL else []
+    )
+    _apply_rule_based(shot, bible=bible, preferred_framing=raw_framing)
 
 
 def _broll_mentions_cast(text: str, characters: dict[str, Character] | None) -> list[str]:
@@ -1880,7 +2013,9 @@ def _apply_creative(
             shot.id,
             creative.type.value,
         )
-        _apply_rule_based_with_set(shot, bible, creative.setting)
+        _apply_rule_based_with_set(
+            shot, bible, creative.setting, raw_props=creative.props, raw_framing=creative.framing
+        )
         return
     if shot.type is ShotType.BROLL and _broll_mentions_people(
         creative.still_prompt, characters, framing=creative.framing or shot.framing
@@ -1889,7 +2024,9 @@ def _apply_creative(
             "%s: broll still_prompt puts people/characters on camera; using rule-based cutaway",
             shot.id,
         )
-        _apply_rule_based_with_set(shot, bible, creative.setting)
+        _apply_rule_based_with_set(
+            shot, bible, creative.setting, raw_props=creative.props, raw_framing=creative.framing
+        )
         return
     if shot.type is ShotType.BROLL:
         leaked_cast = _broll_mentions_cast(creative.still_prompt, characters)
@@ -1899,7 +2036,13 @@ def _apply_creative(
                 shot.id,
                 ", ".join(leaked_cast),
             )
-            _apply_rule_based_with_set(shot, bible, creative.setting)
+            _apply_rule_based_with_set(
+                shot,
+                bible,
+                creative.setting,
+                raw_props=creative.props,
+                raw_framing=creative.framing,
+            )
             return
     if shot.type is ShotType.PERFORMANCE and creative.type is not ShotType.LIPSYNC:
         effective_type = creative.type
@@ -2010,7 +2153,12 @@ def _default_framing(shot: Shot) -> Framing:
     return _PACE_FRAMING[pace]
 
 
-def _apply_rule_based(shot: Shot) -> None:
+def _apply_rule_based(
+    shot: Shot,
+    *,
+    bible: VisualBible | None = None,
+    preferred_framing: Framing | None = None,
+) -> None:
     pace = pace_label(shot.intensity)
     energy = "high-energy" if pace == "high" else "restrained"
     shot.setting = shot.setting or "performance stage"
@@ -2025,13 +2173,28 @@ def _apply_rule_based(shot: Shot) -> None:
         )
         return
     if shot.type is ShotType.BROLL:
-        setting_ref = (
-            shot.setting if shot.setting.lower().startswith("the ") else f"the {shot.setting}"
-        )
-        shot.still_prompt = (
-            f"{_FRAMING_PHRASE[shot.framing]} of an object or corner of {setting_ref} that "
-            f"echoes the song, no people, {energy} mood."
-        )
+        setting_clean = shot.setting.strip()
+        setting_bare = (
+            setting_clean[4:].strip() if setting_clean.lower().startswith("the ") else setting_clean
+        ) or "room"
+        prop = bible.find_prop(shot.props[0]) if (bible is not None and shot.props) else None
+        if prop is not None:
+            shot.framing = (
+                preferred_framing
+                if preferred_framing in (Framing.CLOSE_UP, Framing.MEDIUM_CLOSE)
+                else Framing.CLOSE_UP
+            )
+            prop_clean = prop.name.strip()
+            prop_ref = prop_clean if prop_clean.lower().startswith("the ") else f"the {prop_clean}"
+            shot.still_prompt = (
+                f"{_FRAMING_PHRASE[shot.framing]} of {prop_ref} resting inside the uninhabited "
+                f"{setting_bare}, empty architectural space, {energy} mood."
+            )
+        else:
+            shot.still_prompt = (
+                f"{_FRAMING_PHRASE[shot.framing]} of an atmospheric architectural detail inside "
+                f"the uninhabited {setting_bare}, empty space, {energy} mood."
+            )
         shot.motion_prompt = _BROLL_PACE_MOTION[pace]
         return
     shot.still_prompt = (

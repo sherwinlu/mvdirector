@@ -94,6 +94,18 @@ api.generate(project, kinds, comfy_provider=MyCloudComfyRouter())
 Every `api` function accepts a `Project` in place of a folder path. A `review_mode=` override
 applies to that call only; the `Project` you pass in is never modified.
 
+### Entry-point plugins (`plugins`)
+
+Optional downstream extensions can register Python entry points in four groups without modifying
+`mvdirector`:
+
+- `mvdirector.qc_checks` (`plugins.qc_checks`) — extra video QC checks `(frames, fps, shot, manifest, audio_slice) -> list[CheckResult]`.
+- `mvdirector.audio_conditioners` (`plugins.audio_conditioner`) — conditioning-only vocal DSP for `LIPSYNC` shots (QC still scores the raw slice).
+- `mvdirector.pacing` (`plugins.pacing`) — post-processing of cut timestamps, re-validated against min/max clip rules with fallback on error.
+- `mvdirector.clip_selectors` (`plugins.clip_selector`) — selects `Attempt.optimal_in_offset` within handle slack on non-lip-sync shots.
+
+Config refers to plugins by registered allowlisted name (`^[a-z][a-z0-9_]{0,63}$`), never by import path.
+
 ## Hosted use
 
 The default config trusts the person running the CLI: endpoints, workflow files and `${ENV}`

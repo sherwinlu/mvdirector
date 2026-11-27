@@ -4,6 +4,8 @@ How the lip-synced music video pipeline works, how its code is organized, and ho
 
 Version 1.0.0 (First Stable Release, Manifest Schema v1). Updated November 2026\.
 
+> **See also:** [Running Locally: Cloudless Mode & Cloud Mode](docs/local-quickstart.md) for local and cloud setup recipes, and [Architecture, System Internals & Development](docs/architecture.md) for the up-to-date `v1.0.0` layered architecture, Split-LLM routing, MCP server, Mix Mode, and `mvd bench` overview.
+
 # **Summary**
 
 mvdirector (CLI command `mvd`) is a command-line application and Python library that turns any song (a single audio track, DAW stems, or a Suno export, plus lyrics and a style brief) into a lip-synced, narrative, or visual music video (or a long-form continuous mix). It runs on macOS, Linux, or Windows and coordinates three outside systems in a setup-, model-, and ComfyUI-version-agnostic way. ComfyUI—running locally on the same machine, on another computer in your home network (LAN / Tailscale), on a remote cloud GPU server, or as a lightweight CPU instance driving paid cloud API nodes—executes all image and video workflows (any open-weight or cloud API model you wire via `.api.json` + `.bindings.json`, such as Qwen, Z-Image, Flux, Krea, Nano Banana, Seedream, or Grok for stills, and LTX, Wan, HunyuanVideo, MOSS, Seedance, Kling, or P-H3 / MiniMax for video). Any configured language model (local or remote Ollama, any OpenAI-compatible server, Claude, OpenAI, or Gemini) plans the shots, judges visual quality, and rewrites failed prompts. ffmpeg slices audio and assembles the final cut.
@@ -728,7 +730,7 @@ Configuration lives in `project.yaml` and is validated by pydantic models in `co
 | `title`, `seed` | `Untitled`, `1234` | Project name. Base for deterministic seeds and review sampling. |
 | `inputs.*` | `inputs/mix.wav`, `vocals.wav`, `lyrics.txt`, `style.md` | Input files. `drums` and `word_timestamps` default to `null`. |
 | `video.width`, `height`, `fps` | `1280`, `720`, `24` | Output size and frame rate. |
-| `video.max_clip_seconds`, `min_clip_seconds` | `8.0`, `1.5` | Longest and shortest shot. |
+| `video.max_clip_seconds`, `min_clip_seconds` | `8.0`, `2.5` | Longest and shortest shot. |
 | `video.handle_seconds` | `0.25` | Extra audio and video on each side of a shot. |
 | `video.frame_multiple`, `frame_offset` | `8`, `1` | Frame count rule: `multiple * n + offset` (LTX `8, 1`; Wan/Hunyuan `4, 1`; MiniMax/exact `1, 0`). |
 | `video.beats_per_bar` | `4` | Bar length in beats. |
@@ -741,9 +743,9 @@ Configuration lives in `project.yaml` and is validated by pydantic models in `co
 | `comfy.request_timeout`, `job_timeout`, `poll_interval` | `60`, `1800`, `3` (seconds) | HTTP timeout, maximum job time, history polling interval. |
 | `comfy.workflows_dir`, `workflows` | `workflows`, `t2i` / `still` / `lipsync` / `i2v` | Workflows directory and logical workflow name to bindings file. |
 | `llm.enabled` | `true` | Turn off for rule-based planning, no vision checks and no prompt rewrites. |
-| `llm.provider`, `model` | `anthropic`, `claude-sonnet-5-5` | Provider (`anthropic`, `openai`, `gemini`, `ollama`, `openai_compatible`) and model name. |
+| `llm.provider`, `model` | `ollama`, `gemma3:12b` | Provider (`ollama`, `anthropic`, `openai`, `gemini`, `openai_compatible`) and model name. Optional `qc.llm` and `planning.audio_llm` override the model for Vision QC and native MP3 listening. |
 | `llm.base_url`, `api_key_env` | `null`, `null` | Server URL (required for `openai_compatible`) and optional key env var override. |
-| `llm.max_tokens`, `shots_per_request`, `timeout_seconds` | `8000`, `20`, `180` | Response limit, shots per direction call, and HTTP request timeout. |
+| `llm.max_tokens`, `shots_per_request`, `timeout_seconds` | `8000`, `20`, `600` | Response limit, shots per direction call, and HTTP request timeout. |
 | `llm.json_mode`, `context_tokens` | `auto`, `null` | JSON request format (`auto`, `off`, `object`, `schema`) and Ollama context window (default 16384). |
 | `planning.wardrobe_monotonic` | `true` | Costume changes are one-way. |
 | `reference.layout`, `width`, `height` | `row`, `null`, `null` | Four-panel sheet layout (`row` 2048x896 or `grid` 1536x1536). |
@@ -752,7 +754,7 @@ Configuration lives in `project.yaml` and is validated by pydantic models in `co
 | `qc.pass_score` | `0.70` | Minimum weighted score to pass. |
 | `qc.vision_enabled` | `true` | Run the vision checks. |
 | `qc.face_backend` | `mediapipe` | `mediapipe` (Apache-2.0, commercial-safe) or `insightface` (non-commercial research weights). |
-| `qc.on_missing_dependency` | `skip` | `skip` records the check as skipped. `fail` stops the run. |
+| `qc.on_missing_dependency` | `fail` | `fail` stops the run when required QC extras are missing; `skip` records the check as skipped. |
 | `qc.weights` | See Scoring | Weight per check name. |
 | `qc.image.*`, `qc.video.*` | See the check tables | Thresholds for every check. |
 | `retry.max_attempts` | `4` | Attempts allowed per asset. |
@@ -863,7 +865,7 @@ mvd schema schemas            # after any change to models.py
 
 # **Known limitations and risks**
 
-* **Beta release — calibrate QC thresholds per model.** While the full pipeline has been tested end-to-end both locally and with remote ComfyUI, default QC thresholds are starting values and vary across image/video models and vision LLMs. Calibrate on 20–30 labelled clips with `mvd calibrate`, and note that the default advisory MediaPipe lip-sync measure is a filter for obvious failures and is weaker on fast, mumbled, or heavily processed vocals.
+* **Calibrate QC thresholds per model.** While the full pipeline has been tested end-to-end both locally and with remote ComfyUI, default QC thresholds are starting values and vary across image/video models and vision LLMs. Calibrate on 20–30 labelled clips with `mvd calibrate`, and note that the default advisory MediaPipe lip-sync measure is a filter for obvious failures and is weaker on fast, mumbled, or heavily processed vocals.
 
 * **Bar phase and shot length.** Bars assume the first beat is a downbeat. With `video.dynamic_pacing: false`, shots are a fixed number of bars; with `video.dynamic_pacing: true`, shot length scales with bar intensity and snaps to section labels, but cuts still land on bar lines rather than mid-bar lyric phrases. If cuts feel a beat off, edit `bars` in `analysis.json` and run `mvd plan --overwrite`.
 

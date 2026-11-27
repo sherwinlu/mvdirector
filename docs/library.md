@@ -26,7 +26,7 @@ phase, attempt, pass and exhaustion. That stream is what a service should persis
 
 ## Public surface
 
-Semver applies. While the version is 0.x, a minor release may still change these names, and the changelog lists every such change. These names are public:
+Semver applies (`v1.0.0+`). Breaking changes to these public names require a major release, and the changelog lists every change. These names are public:
 
 | Name | Purpose |
 | --- | --- |

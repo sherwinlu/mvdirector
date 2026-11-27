@@ -110,13 +110,14 @@ mvd assemble                                              # output/<title>.mp4
 
 ## Documentation
 
-- [Quickstart Guide (Local & Remote ComfyUI)](docs/local-quickstart.md) — Step-by-step walkthrough for running everything locally (Apple Silicon Mac, Linux/Windows GPU) or with ComfyUI on a separate home-LAN or cloud server, including `mvd setup`, workflow exports, and your first 2-shot `--draft` render.
-- [Installation, Docker & Language Models](docs/setup.md) — Supported topologies (local, home LAN, cloud), Python extras, commercial licensing (`mediapipe` vs `insightface`), Docker Compose profiles & all-in-one GPU image, Apple Silicon setup, and configuring/testing LLM providers (`anthropic`, `openai`, `gemini`, `ollama`, `openai_compatible`).
+- [Running Locally: Cloudless Mode & Cloud Mode](docs/local-quickstart.md) — Step-by-step walkthrough for running on your laptop in **Cloudless Mode** (100% local Ollama + ComfyUI, rule-based no-LLM, or zero-GPU `pytest` mock harness) or **Cloud Mode** (Anthropic/Gemini/OpenAI + Split-LLM + remote cloud GPU via HTTPS/SSH tunnel or paid ComfyUI API nodes).
+- [Installation, Docker & Language Models](docs/setup.md) — Supported topologies (local, home LAN, cloud), Python extras, commercial licensing (`mediapipe` vs `insightface`), Docker Compose profiles & all-in-one GPU image, Apple Silicon setup, and configuring/splitting LLM providers (`anthropic`, `openai`, `gemini`, `ollama`, `openai_compatible`, `qc.llm`, `planning.audio_llm`).
 - [ComfyUI Workflows, Model Bindings & Version Compatibility](docs/workflows.md) — Mapping `.api.json` + `.bindings.json` for any open-weight or cloud API model, ComfyUI version-agnostic HTTP compatibility, `reference_notation` (`prose` vs `tags`), `audio_video` black-screen wrapper, model-family `video:` settings table, and `${ENV}` allowlist.
 - [Pipeline, Assets, Quality Checks & Review](docs/pipeline-and-qc.md) — Project layout, `mvd prepare`, `mvd brief`, track auto-tuning (`mvd tune`), visual bible & deterministic rules, reference sheets & turnaround videos, derived/embedded set plates & hero props, 3D blocking previz, `--draft` & `mvd upscale`, `allow_cuts` montage, QC gates, retry ladder, calibration, `light`/`strict` review, and Long-Form Mix Mode (`mode: mix`).
 - [Using mvdirector as a library](docs/library.md) — `mvdirector.api`, the public surface, and the `StateStore`, `AssetStorage` and `ComfyEndpointProvider` extension points.
 - [MCP Server & Agent Integration](docs/mcp.md) — Driving `mvdirector` from Claude Code, Cursor, Antigravity, or a remote GPU workstation via `mvd mcp` (`stdio` + Streamable HTTP, async jobs, and the bundled `mvdirector://skill` guide).
-- [Architecture, Development & Limitations](docs/architecture.md) — Source code map, manifest & event-stream conventions, dev commands (`pytest`, `ruff`, `mypy`, `mvd schema`), extension points, and known limitations.
+- [Architecture, System Internals & Development](docs/architecture.md) — Layered architecture, end-to-end data flow, subsystem internals (state/locking, audio/diarization, Split-LLM, ComfyUI binding/pruning/cache, dependency-wave `ShotRunner`, QC/retry loop, assembly/mix mode, `mvd bench`), source code map, cloudless test harness, and extension points.
+- [Engineering Guide](mvdirector_engineering_guide.md) — Deep-dive reference on data models, algorithms, error handling, and configuration defaults.
 - [Changelog](CHANGELOG.md) — Versioned release notes and upgrade history.
 
 ## License

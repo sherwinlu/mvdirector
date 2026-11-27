@@ -58,6 +58,11 @@ sketch_app = typer.Typer(
     no_args_is_help=True, help="Attach or clear rough framing guide sketches on shots."
 )
 app.add_typer(sketch_app, name="sketch")
+bench_app = typer.Typer(
+    no_args_is_help=True,
+    help="Run multi-model A/B/C benchmarks for planning (Track 1) and Vision QC (Track 2).",
+)
+app.add_typer(bench_app, name="bench")
 
 log = logging.getLogger("mvdirector")
 
@@ -1151,6 +1156,22 @@ def llm_check(
     )
     if not outcome.vision_needed:
         _yellow("[skip] Image input not tested: qc.vision_enabled is false.")
+    elif outcome.qc_result is not None:
+        typer.echo(f"Vision QC LLM:   Provider: {outcome.qc_provider}   Model: {outcome.qc_model}")
+        qr = outcome.qc_result
+        line(
+            qr.json_ok,
+            f"QC JSON output ({qr.json_seconds:.1f} s)"
+            + (f": {qr.json_detail}" if qr.json_detail else ""),
+        )
+        if outcome.tested_images and qr.vision != "skipped":
+            detail = f": {qr.vision_detail}" if qr.vision_detail else ""
+            line(not outcome.vision_failed, f"Image input ({qr.vision_seconds:.1f} s){detail}")
+            if qr.vision in ("unsupported", "wrong"):
+                _yellow(
+                    "Without image input the vision checks cannot run. Choose a model that "
+                    "accepts images, or set qc.vision_enabled: false in project.yaml."
+                )
     elif outcome.tested_images and result.vision != "skipped":
         detail = f": {result.vision_detail}" if result.vision_detail else ""
         line(not outcome.vision_failed, f"Image input ({result.vision_seconds:.1f} s){detail}")
@@ -2058,6 +2079,238 @@ def draft_grid_cmd(
         typer.echo(
             f"{res.sheet_id} ({res.layout}, {len(res.shot_ids)} shot(s)): {res.sheet_path}{extra}"
         )
+
+
+@bench_app.command("init-config")
+def bench_init_config(
+    output: Path = typer.Option(
+        Path("benchmarks/bench.yaml"),
+        "--output",
+        "-o",
+        help="Destination path for the editable benchmark matrix YAML.",
+    ),
+    overwrite: bool = typer.Option(False, "--overwrite", help="Replace an existing config file."),
+) -> None:
+    """Write a starter bench.yaml with the 6-model + 1-control matrix and token pricing."""
+    from mvdirector.bench import write_default_benchmark_config
+
+    try:
+        written = write_default_benchmark_config(output, overwrite=overwrite)
+    except MVDError as exc:
+        raise _fail(exc) from exc
+    typer.echo(f"Wrote benchmark config: {written}")
+
+
+@bench_app.command("plan")
+def bench_plan(
+    projects: list[Path] = typer.Option(
+        ...,
+        "--project",
+        "-p",
+        help="Frozen project folder with analysis.json, lyrics, and style brief (repeatable).",
+    ),
+    out_dir: Path = typer.Option(
+        Path("benchmarks/run"),
+        "--out",
+        "-o",
+        help="Output folder for isolated per-arm plans, metrics, and blind HTML viewer.",
+    ),
+    config_path: Path | None = typer.Option(
+        None, "--config", "-c", help="Optional bench.yaml overriding arms/models/pricing."
+    ),
+    arm: list[str] | None = typer.Option(
+        None, "--arm", "-a", help="Limit to specific arm ids (repeatable, e.g. -a A -a B -a B2)."
+    ),
+    include_controls: bool = typer.Option(
+        False, "--include-controls", help="Also run optional control arms (e.g. Arm B2 text-only)."
+    ),
+    overwrite: bool = typer.Option(
+        False, "--overwrite", help="Re-run arms even if cached outputs already exist."
+    ),
+    budget_usd: float | None = typer.Option(
+        None,
+        "--budget-usd",
+        min=0.0,
+        help="Optional spend ceiling ($); stop before starting another uncached arm once reached.",
+    ),
+    seed: int | None = typer.Option(
+        None, "--seed", help="Optional RNG seed for blind viewer director ordering."
+    ),
+) -> None:
+    """Track 1: Run mvd plan across multiple models and generate a blind HTML comparison viewer."""
+    from mvdirector.bench import (
+        generate_blind_viewer,
+        load_benchmark_config,
+        load_planning_results,
+        render_planning_markdown,
+        run_planning_benchmark,
+    )
+
+    try:
+        cfg = load_benchmark_config(config_path)
+        run_planning_benchmark(
+            projects,
+            cfg,
+            out_dir,
+            arm_ids=arm,
+            include_controls=include_controls,
+            overwrite=overwrite,
+            max_budget_usd=budget_usd,
+            on_progress=typer.echo,
+        )
+        all_results = load_planning_results(out_dir / "planning")
+        typer.echo("")
+        typer.echo(render_planning_markdown(all_results))
+        if any(r.status == "ok" for r in all_results):
+            viewer_html, key_json = generate_blind_viewer(
+                all_results, out_dir / "planning" / "blind_review.html", seed=seed
+            )
+            typer.echo(f"Blind comparison viewer: {viewer_html}")
+            typer.echo(f"Unblinding key:          {key_json}")
+    except MVDError as exc:
+        raise _fail(exc) from exc
+
+
+@bench_app.command("viewer")
+def bench_viewer(
+    out_dir: Path = typer.Option(
+        Path("benchmarks/run"), "--out", "-o", help="Benchmark root containing planning/ results."
+    ),
+    output_html: Path | None = typer.Option(
+        None, "--html", help="Destination HTML path (default: <out>/planning/blind_review.html)."
+    ),
+    seed: int | None = typer.Option(
+        None, "--seed", help="Optional RNG seed for director anonymization order."
+    ),
+    max_shots: int = typer.Option(
+        10, "--max-shots", min=1, max=30, help="Maximum matched shots shown per track."
+    ),
+) -> None:
+    """Regenerate the static blind HTML comparison viewer from saved Track 1 outputs."""
+    from mvdirector.bench import generate_blind_viewer, load_planning_results
+
+    try:
+        results = load_planning_results(out_dir / "planning")
+        target = output_html or (out_dir / "planning" / "blind_review.html")
+        viewer_html, key_json = generate_blind_viewer(
+            results, target, seed=seed, max_shots=max_shots
+        )
+    except MVDError as exc:
+        raise _fail(exc) from exc
+    typer.echo(f"Blind comparison viewer: {viewer_html}")
+    typer.echo(f"Unblinding key:          {key_json}")
+
+
+@bench_app.command("init-qc-dataset")
+def bench_init_qc_dataset(
+    projects: list[Path] = typer.Option(
+        ..., "--project", "-p", help="Project folder with generated stills to sample (repeatable)."
+    ),
+    output: Path = typer.Option(
+        Path("benchmarks/qc_labels.csv"),
+        "--output",
+        "-o",
+        help="Destination CSV or JSON file for manual pass/fail + tag labeling.",
+    ),
+    size: int = typer.Option(
+        40, "--size", "-n", min=2, max=500, help="Target number of stratified stills to sample."
+    ),
+    overwrite: bool = typer.Option(False, "--overwrite", help="Replace an existing labels file."),
+) -> None:
+    """Scaffold a stratified 30-50 still starter dataset from existing project(s) for Track 2."""
+    from mvdirector.bench import scaffold_qc_dataset
+
+    try:
+        items = scaffold_qc_dataset(projects, output, target_size=size, overwrite=overwrite)
+    except MVDError as exc:
+        raise _fail(exc) from exc
+    good = sum(1 for i in items if i.good)
+    bad = len(items) - good
+    typer.echo(
+        f"Wrote {len(items)} stills ({good} pass / {bad} fail) to {output}. "
+        "Review and refine labels/tags (spec, artifact, character) before running `mvd bench qc`."
+    )
+
+
+@bench_app.command("qc")
+def bench_qc(
+    labels: Path = typer.Option(
+        ..., "--labels", "-l", help="CSV or JSON labeled still dataset (pass/fail + tags)."
+    ),
+    out_dir: Path = typer.Option(
+        Path("benchmarks/run"), "--out", "-o", help="Output folder for Vision QC replay reports."
+    ),
+    default_project: Path | None = typer.Option(
+        None, "--project", "-p", help="Default project folder when rows omit 'project'."
+    ),
+    config_path: Path | None = typer.Option(
+        None, "--config", "-c", help="Optional bench.yaml overriding arms/models/pricing/GPU costs."
+    ),
+    arm: list[str] | None = typer.Option(
+        None, "--arm", "-a", help="Limit to specific arm ids (repeatable, e.g. -a A -a B -a C)."
+    ),
+    include_controls: bool = typer.Option(
+        False, "--include-controls", help="Also run optional control arms."
+    ),
+    blind_observer: bool = typer.Option(
+        False, "--blind-observer", help="Use two-pass Blind-Observer / Split-Auditor Vision QC."
+    ),
+    include_plates: bool = typer.Option(
+        False, "--include-plates", help="Also attach locked set plates alongside character sheets."
+    ),
+    still_gpu_cost: float | None = typer.Option(
+        None, "--still-gpu-cost", min=0.0, help="Override GPU cost ($) per wasted still retry (FP)."
+    ),
+    video_gpu_cost: float | None = typer.Option(
+        None,
+        "--video-gpu-cost",
+        min=0.0,
+        help="Override GPU cost ($) per wasted video render (FN).",
+    ),
+    overwrite: bool = typer.Option(
+        False, "--overwrite", help="Re-evaluate stills even if cached verdicts exist."
+    ),
+    budget_usd: float | None = typer.Option(
+        None,
+        "--budget-usd",
+        min=0.0,
+        help="Optional spend ceiling ($); stop before starting another uncached arm once reached.",
+    ),
+) -> None:
+    """Track 2: Replay labeled stills through Vision QC across models and compute effective cost."""
+    from mvdirector.bench import (
+        load_benchmark_config,
+        load_qc_dataset,
+        render_vision_qc_markdown,
+        run_vision_qc_benchmark,
+    )
+    from mvdirector.bench.vision_qc import load_vision_qc_results
+
+    try:
+        cfg = load_benchmark_config(config_path)
+        if still_gpu_cost is not None:
+            cfg.gpu_costs.still_usd = still_gpu_cost
+        if video_gpu_cost is not None:
+            cfg.gpu_costs.video_usd = video_gpu_cost
+        dataset = load_qc_dataset(labels, default_project=default_project)
+        run_vision_qc_benchmark(
+            dataset,
+            cfg,
+            out_dir,
+            arm_ids=arm,
+            include_controls=include_controls,
+            blind_observer=blind_observer,
+            include_plates=include_plates,
+            overwrite=overwrite,
+            max_budget_usd=budget_usd,
+            on_progress=typer.echo,
+        )
+        all_results = load_vision_qc_results(out_dir / "vision_qc")
+        typer.echo("")
+        typer.echo(render_vision_qc_markdown(all_results))
+        typer.echo(f"Detailed reports written to {out_dir / 'vision_qc'}")
+    except MVDError as exc:
+        raise _fail(exc) from exc
 
 
 @app.command()

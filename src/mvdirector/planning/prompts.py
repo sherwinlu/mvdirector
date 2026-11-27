@@ -431,7 +431,10 @@ Rules:
   (no hands, microphones, hair or foreground objects across the mouth). In still_prompt for
   'lipsync' shots, keep the singer's mouth relaxed, softly closed, or barely parted (never
   wide-open mid-scream) so audio-driven lip-sync models animate naturally from the vocal track
-  and performance fallbacks stay consistent.
+  and performance fallbacks stay consistent. Vary framing (alternate close_up and medium_close),
+  off-center rule-of-thirds placement, head angle (slight three-quarter vs frontal), posture, and
+  lighting depth across consecutive lipsync shots—never repeat the same dead-center symmetrical
+  passport mugshot.
 - Character close_up framing: frame from the chin to the collarbone so the face fills at least a
   third of the frame height, with both eyes and mouth clearly inside the frame. Never write
   "from the chest up" or "upper chest up" for close_up; that is medium_close. Never ask for
@@ -452,7 +455,9 @@ Rules:
   suitcase by the door, not a giant hourglass), using objects, architecture, light, weather, props,
   inanimate figurines, or—when the setting genuinely calls
   for atmosphere (such as a club or concert)—anonymous distant backlit silhouettes, blurred
-  background crowd motion, or hands-only detail inserts with no recognizable faces. Keep the main
+  background crowd motion, or hands-only detail inserts with no recognizable faces. Vary b-roll
+  subjects across architecture, weather, light, reflections, and hands/footsteps—never reuse the
+  same hero prop in more than two cutaways unless the lyrics explicitly return to it. Keep the main
   subject sharply in focus (never ask for a completely out-of-focus or blurry whole frame). Still
   give every shot a framing (close_up, medium_close, medium or wide): never null, even on a
   cutaway.
@@ -906,11 +911,17 @@ CAMERA_PLACEMENT_NOTE = (
     "or occluding the subject."
 )
 _FRAMING_SCALE_NOTE = {
-    Framing.CLOSE_UP: CAMERA_PLACEMENT_NOTE,
+    Framing.CLOSE_UP: (
+        "Camera positioned in open floor space at human eye height; tight head-and-shoulders "
+        "close-up with candid off-center framing, natural head angle, and organic in-scene "
+        "posture (do not copy the stiff centered frontal pose of the reference portrait), "
+        "with no solid furniture intersecting or occluding the subject."
+    ),
     Framing.MEDIUM_CLOSE: (
         "Camera positioned in open floor space at human eye height; chest-up medium close-up "
-        "with natural head-to-shoulder proportions and no solid furniture intersecting or "
-        "occluding the subject."
+        "with natural head-to-shoulder proportions, candid off-center blocking, and relaxed "
+        "in-scene posture (do not copy the stiff centered frontal pose of the reference "
+        "portrait), with no solid furniture intersecting or occluding the subject."
     ),
     Framing.MEDIUM: (
         "Camera positioned in open floor space at human eye height; waist-up or knee-up medium "

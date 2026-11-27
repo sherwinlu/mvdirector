@@ -10,14 +10,18 @@ lines and the shots always cover the whole song.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 
 import numpy as np
 
+from mvdirector import plugins
 from mvdirector.audio.lyrics import section_singers
 from mvdirector.config import VideoConfig
 from mvdirector.models import BOTH_VOICES, Analysis, ShotType, TimeSpan, VocalTurn
+
+log = logging.getLogger(__name__)
 
 _VALID_BAR_STEPS = (16, 8, 4, 2, 1)
 _HIGH_INTENSITY_THRESHOLD = 0.80
@@ -350,8 +354,39 @@ def _phrase_points(analysis: Analysis, bars: list[float]) -> list[float]:
     return sorted(snapped)
 
 
+def _validate_pacing_cuts(
+    candidate: object, duration: float, video: VideoConfig
+) -> list[float] | None:
+    """Validate plugin cut points are finite, increasing, cover [0, duration], and obey bounds."""
+    if not isinstance(candidate, list) or len(candidate) < 2:
+        return None
+    pts: list[float] = []
+    for raw in candidate:
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return None
+        val = float(raw)
+        if not math.isfinite(val):
+            return None
+        pts.append(round(val, 3))
+    if abs(pts[0] - 0.0) > 1e-3 or abs(pts[-1] - duration) > 1e-2:
+        return None
+    pts[0] = 0.0
+    pts[-1] = round(duration, 3)
+    max_clip = max(0.1, video.max_clip_seconds)
+    min_clip = min(video.min_clip_seconds, duration)
+    for prev, nxt in zip(pts[:-1], pts[1:]):
+        span = nxt - prev
+        if span <= 0.0 or span < min_clip - 1e-2 or span > max_clip + 1e-2:
+            return None
+    return pts
+
+
 def cut_points(
-    analysis: Analysis, video: VideoConfig, *, snap_sections: bool = False
+    analysis: Analysis,
+    video: VideoConfig,
+    *,
+    snap_sections: bool = False,
+    pacing_plugin: str | None = None,
 ) -> list[float]:
     """Shot boundaries from 0 to the song's end, on bar lines or phrase boundaries.
 
@@ -467,6 +502,21 @@ def cut_points(
     cuts = [round(p, 3) for p in final]
     if video.prefer_vocal_onset and analysis.vocal_windows and not handoff_cuts:
         cuts = shift_to_vocal_onset(cuts, analysis.vocal_windows, video)
+    if pacing_plugin:
+        try:
+            fn = plugins.load_plugin(plugins.PACING_GROUP, pacing_plugin)
+            proposed = fn(list(cuts), analysis, video)
+            validated = _validate_pacing_cuts(proposed, duration, video)
+            if validated is not None:
+                return validated
+            log.warning(
+                "Pacing plugin %r returned invalid cut points; falling back to default cuts.",
+                pacing_plugin,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "Pacing plugin %r failed (%s); falling back to default cuts.", pacing_plugin, exc
+            )
     return cuts
 
 
@@ -541,9 +591,13 @@ def _section_between(
 
 
 def segment(
-    analysis: Analysis, video: VideoConfig, *, snap_sections: bool = False
+    analysis: Analysis,
+    video: VideoConfig,
+    *,
+    snap_sections: bool = False,
+    pacing_plugin: str | None = None,
 ) -> list[Segment]:
-    points = cut_points(analysis, video, snap_sections=snap_sections)
+    points = cut_points(analysis, video, snap_sections=snap_sections, pacing_plugin=pacing_plugin)
     timeline = section_timeline(analysis)
     segments = []
     for start, end in zip(points[:-1], points[1:]):

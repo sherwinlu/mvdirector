@@ -599,12 +599,33 @@ def segment(
 ) -> list[Segment]:
     points = cut_points(analysis, video, snap_sections=snap_sections, pacing_plugin=pacing_plugin)
     timeline = section_timeline(analysis)
+    # When Whisper/forced alignment succeeded on at least one lyric line, guard against Demucs
+    # instrumental bleed (e.g. lead synths leaking into vocals.wav during an intro) by not
+    # scheduling LIPSYNC on segments that have negligible overlap with any timed lyric line.
+    has_aligned_lyrics = any(
+        ln.timing_source == "aligned" and ln.start is not None and ln.end is not None
+        for ln in analysis.lyric_lines
+    )
+    lyric_spans = (
+        [
+            TimeSpan(start=ln.start, end=ln.end)
+            for ln in analysis.lyric_lines
+            if ln.start is not None and ln.end is not None and ln.end > ln.start
+        ]
+        if has_aligned_lyrics
+        else []
+    )
     segments = []
     for start, end in zip(points[:-1], points[1:]):
         if end <= start:
             continue
+        duration = end - start
         sung = sum(window.overlap(start, end) for window in analysis.vocal_windows)
-        is_lipsync = sung / (end - start) >= video.lipsync_min_vocal_fraction
+        is_lipsync = sung / duration >= video.lipsync_min_vocal_fraction
+        if is_lipsync and lyric_spans:
+            lyric_overlap = sum(span.overlap(start, end) for span in lyric_spans)
+            if lyric_overlap < min(0.25, duration * 0.25):
+                is_lipsync = False
         segments.append(
             Segment(
                 start=start,

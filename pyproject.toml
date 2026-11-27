@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mvdirector"
-version = "0.8.0b4"
+version = "1.0.0"
 description = "Manifest-driven pipeline that plans, generates, quality-checks and assembles lip-synced music videos with ComfyUI."
 readme = "README.md"
 license = { file = "LICENSE" }
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)",
 ]
 requires-python = ">=3.11"

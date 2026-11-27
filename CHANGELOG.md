@@ -2,9 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/). While the version is 0.x, a minor release may still change the public API; every such change is listed here.
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/). From `1.0.0` on, a breaking change to the public API (the `mvd` CLI, `mvdirector.api`, `project.yaml`, or the manifest schema) needs a new major version.
 
 ## [Unreleased]
+
+## [1.0.0] - 2026-11-27
+
+First **stable** release. It adds a pre-spend reference coverage lint (`mvd assets --lint`), generic N-slot reference binding for props and secondary faces, opening-hook priority, rejection-aware attempt statistics, age-based cleanup retention and ComfyUI interrupts, together with QA fixes to cleanup symlink handling, still restarts after video exhaustion, and durable rejection counts. Manifests from `0.8.x` load unchanged (`schema_version` `1`).
 
 ### Added
 - **Pre-spend reference coverage lint & generic N-slot reference binding:** Added zero-LLM `lint_reference_coverage` (`mvdirector.generation.preflight`, `mvdirector.api.lint_assets`, `mvd assets --lint`; a word counts as a noun only once some prompt uses it in a closed noun phrase; undeclared nouns must recur in at least 3 shots across at least 3 song sections; undeclared findings tell you to declare the prop or set before generating it), configurable `planning.max_props` (default `3`, `0..30`), priority-ordered generic N-slot binding (`lead > set > secondaries > props` across `prop_image_N` and `reference_image_K_face`) with optional workflow-node pruning and `@imageN` prompt tag alignment.

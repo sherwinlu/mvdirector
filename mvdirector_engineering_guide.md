@@ -2,7 +2,7 @@
 
 How the lip-synced music video pipeline works, how its code is organized, and how to change it.
 
-Version 0.8.0b1 (First Beta Release, Manifest Schema v1). Updated November 2026\.
+Version 1.0.0 (First Stable Release, Manifest Schema v1). Updated November 2026\.
 
 # **Summary**
 
@@ -20,7 +20,7 @@ Four design decisions shape the rest of the system:
 
 ## **Verification status**
 
-`mvdirector` `v0.8.0b1` is the **first Beta release**. Everything in the pipeline has been tested end-to-end **both locally** (orchestrator, ComfyUI, and local LLM on one machine) **and on a remote ComfyUI setup** (orchestrator running locally against a remote ComfyUI server over HTTP/HTTPS—the same path used for another computer on your home LAN/Tailscale or a cloud GPU host), covering analysis, planning, reference sheet and plate locking, still and video generation, automated QC, review, and final `mvd assemble`.
+`mvdirector` `v1.0.0` is the **first stable release**. Everything in the pipeline has been tested end-to-end **both locally** (orchestrator, ComfyUI, and local LLM on one machine) **and on a remote ComfyUI setup** (orchestrator running locally against a remote ComfyUI server over HTTP/HTTPS—the same path used for another computer on your home LAN/Tailscale or a cloud GPU host), covering analysis, planning, reference sheet and plate locking, still and video generation, automated QC, review, and final `mvd assemble`.
 
 In addition, the repository includes an extensive automated test suite (`pytest`, `ruff`, `mypy`, JSON Schema checks, and security/QA regressions) covering full-pipeline execution against a fake ComfyUI server with real `ffmpeg`, socket-level tests against a fake multi-protocol LLM server (OpenAI, Ollama, Gemini), MCP server transport and security boundaries, and ComfyUI version-agnostic HTTP/workflow parsing. Default QC thresholds remain starting points that should be calibrated on your own labelled clips (`mvd calibrate`), and singing lip-sync quality depends on the ComfyUI video/lip-sync model you choose (for tight singing mouth sync, pair your workflow with a dedicated lip-sync model such as InfiniteTalk, LatentSync, or Seedance).
 

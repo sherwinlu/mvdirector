@@ -1,6 +1,6 @@
 # Quickstart Guide (Local & Remote ComfyUI)
 
-This guide walks you from a clean machine to your first rendered draft music video on **`mvdirector` `v0.8.0b1` (First Beta)** — either running **100% locally** with no cloud API keys required, or with **ComfyUI running remotely** (on another computer in your home network or in the cloud). Both local and remote-ComfyUI setups have been verified end-to-end.
+This guide walks you from a clean machine to your first rendered draft music video on **`mvdirector` `v1.0.0`** — either running **100% locally** with no cloud API keys required, or with **ComfyUI running remotely** (on another computer in your home network or in the cloud). Both local and remote-ComfyUI setups have been verified end-to-end.
 
 `mvdirector` is **setup-, model-, and ComfyUI-version-agnostic** — choose any models and hosting layout that fit your hardware:
 - **`mvdirector` (`mvd`)**: Python orchestrator, audio analysis, quality checks, and FFmpeg assembly.

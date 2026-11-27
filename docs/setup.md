@@ -4,7 +4,7 @@
 
 ## Supported Topologies (Setup- & Model-Neutral)
 
-`mvdirector` (`v0.8.0b1` Beta) has been tested end-to-end **both fully locally and with ComfyUI running on a remote host**. Both ComfyUI and the LLM can run wherever works best for your hardware, using whichever models you choose:
+`mvdirector` (`v1.0.0`) has been tested end-to-end **both fully locally and with ComfyUI running on a remote host**. Both ComfyUI and the LLM can run wherever works best for your hardware, using whichever models you choose:
 
 | Topology | Where ComfyUI runs | Where `mvd` & LLM run | Example `COMFY_URL` |
 |---|---|---|---|

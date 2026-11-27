@@ -31,7 +31,7 @@ from mvdirector.dotenv import (
     merged_project_environ,
     write_project_dotenv_var,
 )
-from mvdirector.errors import MVDError
+from mvdirector.errors import ConfigError, MVDError
 from mvdirector.generation.runner import RunEvent
 from mvdirector.llm.check import LLMCheckResult
 from mvdirector.llm.http import redact_url
@@ -1753,6 +1753,8 @@ def qc_report(
     ),
 ) -> None:
     """Count, per check, how many attempts passed, failed or were skipped, and why."""
+    if json_output and markdown:
+        raise _fail(ConfigError("--json and --markdown cannot be combined; choose one format."))
     try:
         if json_output:
             import json

@@ -742,12 +742,7 @@ def _timed_shots(
         num_frames = frames_for(
             slice_end - slice_start, video.fps, video.frame_multiple, video.frame_offset
         )
-        extra_attempts = (
-            config.retry.opening_extra_attempts
-            if config.planning.opening_seconds > 0.0 and seg.start < config.planning.opening_seconds
-            else 0
-        )
-        shot_attempts = config.retry.max_attempts + extra_attempts
+        shot_attempts = config.attempt_budget(seg.start)
         shots.append(
             Shot(
                 id=shot_id,

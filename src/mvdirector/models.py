@@ -25,6 +25,7 @@ from pydantic import (
     ConfigDict,
     Field,
     SerializerFunctionWrapHandler,
+    ValidationInfo,
     field_validator,
     model_serializer,
     model_validator,
@@ -968,11 +969,20 @@ class Shot(StrictModel):
         ),
     )
 
-    @field_validator("rejection_count", mode="before")
+    still_restarts: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Times this shot restarted from a new still after its video used up its attempts "
+            "(retry.keep_still_on_video_fail false), capped by retry.max_still_restarts."
+        ),
+    )
+
+    @field_validator("rejection_count", "still_restarts", mode="before")
     @classmethod
-    def _reject_bool_rejection_count(cls, value: Any) -> Any:
+    def _reject_bool_counts(cls, value: Any, info: ValidationInfo) -> Any:
         if isinstance(value, bool):
-            raise ValueError("rejection_count must be an integer, not a boolean.")
+            raise ValueError(f"{info.field_name} must be an integer, not a boolean.")
         return value
 
     @field_validator("id")

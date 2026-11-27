@@ -206,7 +206,7 @@ class AttemptBucketStats:
     passed_attempts: int = 0
     mean_attempts_per_passed: float = 0.0
     p90_attempts: float = 0.0
-    p90_multiplier: float = 0.0
+    p90_multiplier: float = 0.0  # p90_attempts / mean_attempts_per_passed
 
 
 @dataclass
@@ -278,9 +278,12 @@ class _BucketAcc:
                 self.stats.passed_attempts / self.stats.settled_count, 4
             )
             ordered = sorted(self.passed_attempt_counts)
-            p90 = round(_percentile(ordered, 90.0), 4)
-            self.stats.p90_attempts = p90
-            self.stats.p90_multiplier = p90
+            p90 = _percentile(ordered, 90.0)
+            self.stats.p90_attempts = round(p90, 4)
+            # How much a slow (p90) asset costs relative to the average passed one: 1.0 means
+            # attempts are uniform, 2.0 means the slowest tenth take twice the mean.
+            mean = self.stats.passed_attempts / self.stats.settled_count
+            self.stats.p90_multiplier = round(p90 / mean, 4)
         return self.stats
 
 
@@ -352,7 +355,7 @@ def render_attempt_stats(stats: AttemptStatsSummary, markdown: bool = False) -> 
         f"Settled assets: {stats.settled_count} "
         f"(exhausted: {stats.exhausted_count}, pending: {stats.pending_count}). "
         f"Mean attempts/passed: {stats.mean_attempts_per_passed:.2f}, "
-        f"p90: {stats.p90_attempts:.2f}. "
+        f"p90: {stats.p90_attempts:.2f} ({stats.p90_multiplier:.2f}x the mean). "
         f"Human reject rate: {stats.human_reject_rate:.1%} "
         f"({stats.rejected_count}/{stats.reviewed_count} reviewed shots rejected, "
         f"{stats.total_rejections} rejection(s) in total)."

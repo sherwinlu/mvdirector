@@ -196,7 +196,7 @@ def reject(
     """
     note = _checked_note(note)
     shot = manifest.shot(shot_id)
-    extra = config.retry.max_attempts
+    extra = config.attempt_budget(shot.start)
     if target is AssetKind.STILL:
         shot.still.reset(extra, note)
         shot.video.reset(extra)

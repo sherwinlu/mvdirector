@@ -1208,8 +1208,9 @@ def attach_shot_sketch(
             shot.sketch_image = None
             shot.sketch_guidance = ""
             if reset_still:
-                shot.still.reset(project.config.retry.max_attempts)
-                shot.video.reset(project.config.retry.max_attempts)
+                budget = project.config.attempt_budget(shot.start)
+                shot.still.reset(budget)
+                shot.video.reset(budget)
         return None
     if image is None:
         raise ConfigError("Provide a sketch image path or pass clear=True.")
@@ -1235,8 +1236,9 @@ def attach_shot_sketch(
             # The old guidance described the replaced sketch, not this one.
             shot.sketch_guidance = ""
         if reset_still:
-            shot.still.reset(project.config.retry.max_attempts)
-            shot.video.reset(project.config.retry.max_attempts)
+            budget = project.config.attempt_budget(shot.start)
+            shot.still.reset(budget)
+            shot.video.reset(budget)
     return dst
 
 
@@ -1595,7 +1597,11 @@ def regenerate_still(
                     target_shot.still.repair_instruction = cleaned_instruction or None
                     target_shot.still.repair_source_attempt = source_number
                 else:
-                    extra = attempts if attempts is not None else project.config.retry.max_attempts
+                    extra = (
+                        attempts
+                        if attempts is not None
+                        else project.config.attempt_budget(target_shot.start)
+                    )
                     target_shot.still.reset(extra, note=cleaned_instruction or None)
                     target_shot.still.prompt_override = None
                     target_shot.still.param_overrides = {}
@@ -1606,7 +1612,7 @@ def regenerate_still(
                     )
                 if prompt_override is not None and prompt_override.strip():
                     target_shot.still_prompt = prompt_override.strip()
-                target_shot.video.reset(project.config.retry.max_attempts)
+                target_shot.video.reset(project.config.attempt_budget(target_shot.start))
                 target_shot.review = Review()
                 comfy.ping()
                 runner = ShotRunner(
@@ -2008,11 +2014,22 @@ def audio_qc(project_dir: ProjectRef, audio_path: Path | None = None) -> Broadca
 
 
 def lint_assets(
-    project_dir: ProjectRef, *, min_shots: int = 3, min_sections: int = 2
+    project_dir: ProjectRef,
+    *,
+    min_shots: int = 3,
+    min_sections: int = 2,
+    undeclared_min_shots: int = 3,
+    undeclared_min_sections: int = 3,
 ) -> list[CoverageFinding]:
     """Detect recurring objects, places, or performers in shot prompts lacking a locked asset."""
     manifest = open_project(project_dir, pull=False).load_manifest()
-    return lint_reference_coverage(manifest, min_shots=min_shots, min_sections=min_sections)
+    return lint_reference_coverage(
+        manifest,
+        min_shots=min_shots,
+        min_sections=min_sections,
+        undeclared_min_shots=undeclared_min_shots,
+        undeclared_min_sections=undeclared_min_sections,
+    )
 
 
 def attempt_stats(source: ProjectRef | Manifest) -> AttemptStatsSummary:

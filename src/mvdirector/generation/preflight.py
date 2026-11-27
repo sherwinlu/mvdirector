@@ -1501,18 +1501,27 @@ def lint_reference_coverage(
     *,
     min_shots: int = 3,
     min_sections: int = 2,
+    undeclared_min_shots: int = 3,
+    undeclared_min_sections: int = 3,
 ) -> list[CoverageFinding]:
     """Flag recurring objects, places, or performers lacking a locked visual reference.
 
-    Zero-LLM deterministic check over shot prompts and visual-bible metadata. Any candidate
-    noun phrase (or declared-but-unlocked entity) appearing in at least ``min_shots`` shots
-    or across at least ``min_sections`` distinct song sections without a locked reference is
-    reported with its shot IDs and a suggested ``mvd props`` / ``mvd plates`` command.
+    Zero-LLM deterministic check over shot prompts and visual-bible metadata, reported with
+    shot IDs and a suggested ``mvd props`` / ``mvd plates`` command.
+
+    A declared-but-unlocked character, set or prop is reported once it appears in at least
+    ``min_shots`` shots *or* across at least ``min_sections`` distinct song sections. An
+    undeclared noun phrase is only a guess at a hero object, so it must recur more: in at least
+    ``undeclared_min_shots`` shots *and* across at least ``undeclared_min_sections`` sections.
     """
-    if isinstance(min_shots, bool) or min_shots < 1:
-        raise ConfigError(f"min_shots must be a positive integer, got {min_shots!r}.")
-    if isinstance(min_sections, bool) or min_sections < 1:
-        raise ConfigError(f"min_sections must be a positive integer, got {min_sections!r}.")
+    for name, value in (
+        ("min_shots", min_shots),
+        ("min_sections", min_sections),
+        ("undeclared_min_shots", undeclared_min_shots),
+        ("undeclared_min_sections", undeclared_min_sections),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ConfigError(f"{name} must be a positive integer, got {value!r}.")
 
     shots, entities = _extract_inputs(manifest)
     if not shots:
@@ -1611,7 +1620,8 @@ def lint_reference_coverage(
     qualifying_nouns = {
         cand: sids
         for cand, sids in noun_shots.items()
-        if len(sids) >= min_shots or len(noun_sections.get(cand, [])) >= min_sections
+        if len(sids) >= undeclared_min_shots
+        and len(noun_sections.get(cand, [])) >= undeclared_min_sections
     }
     # Suppress single-word head nouns when a 2-word modifier+noun phrase already covers the same
     # or a superset of shots (e.g. "brass lantern" suppresses redundant "lantern").

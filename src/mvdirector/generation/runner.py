@@ -1882,7 +1882,7 @@ class ShotRunner:
                 "Light and shadow shift steadily across the frame with natural movement. "
                 "No people. Gentle push-in."
             )
-            shot.still.reset(self._project.config.retry.max_attempts)
+            shot.still.reset(self._project.config.attempt_budget(shot.start))
             shot.still.prompt_override = None
             shot.still.param_overrides = {}
 
@@ -1911,7 +1911,7 @@ class ShotRunner:
             _restore()
             return False
         with self._manifest_lock:
-            state.reset(self._project.config.retry.max_attempts)
+            state.reset(self._project.config.attempt_budget(shot.start))
             state.prompt_override = None
             state.param_overrides = {}
             shot.review = Review()
@@ -1961,7 +1961,7 @@ class ShotRunner:
             shot.fallback_from, shot.type = shot.type, ShotType.PERFORMANCE
             shot.singers = []
             shot.motion_prompt = prompts.PERFORMANCE_MOTION
-            state.reset(self._project.config.retry.max_attempts)
+            state.reset(self._project.config.attempt_budget(shot.start))
             state.prompt_override = None
             state.param_overrides = {}
             shot.review = Review()
@@ -1980,16 +1980,18 @@ class ShotRunner:
             state.status = AssetStatus.EXHAUSTED
             state.selected_attempt = best.number if best else None
             state.clear_pending_overrides()
-            restart_from_still = (
-                kind is AssetKind.VIDEO and not self._project.config.retry.keep_still_on_video_fail
-            )
+            retry = self._project.config.retry
+            wants_restart = kind is AssetKind.VIDEO and not retry.keep_still_on_video_fail
+            restart_from_still = wants_restart and shot.still_restarts < retry.max_still_restarts
             if restart_from_still:
                 # Re-render the still from scratch. The clips made from the old still no longer
                 # match it, so the video goes back to pending as well and follows once the new
                 # still passes; left EXHAUSTED, it would never be rendered from the new still.
-                max_attempts = self._project.config.retry.max_attempts
-                shot.still.reset(max_attempts)
-                state.reset(max_attempts)
+                # Capped, so a shot that keeps failing goes to review instead of cycling.
+                shot.still_restarts += 1
+                budget = self._project.config.attempt_budget(shot.start)
+                shot.still.reset(budget)
+                state.reset(budget)
             self._project.save_manifest(self._manifest)
         self._emit(
             RunEvent(
@@ -2002,6 +2004,11 @@ class ShotRunner:
         )
         if restart_from_still:
             outcome = "regenerating the still, then the video (retry.keep_still_on_video_fail)"
+        elif wants_restart and best:
+            outcome = (
+                f"retry.max_still_restarts ({retry.max_still_restarts}) reached; "
+                f"keeping attempt {best.number} for review"
+            )
         elif best:
             outcome = f"keeping attempt {best.number} for review"
         else:

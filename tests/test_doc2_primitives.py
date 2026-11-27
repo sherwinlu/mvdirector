@@ -325,3 +325,77 @@ def test_rejection_count_is_backward_compatible_and_validated(project, analysis)
         raw["shots"][0]["rejection_count"] = bad
         with pytest.raises(ValidationError):
             Manifest.model_validate(raw)
+
+
+def test_resets_grant_the_opening_bonus_like_planning(project, analysis) -> None:
+    """Opening-window shots keep retry.opening_extra_attempts when a reviewer resets them."""
+    cfg = project.config
+    cfg.retry.max_attempts, cfg.retry.opening_extra_attempts = 4, 2
+    cfg.planning.opening_seconds = 8.0
+    assert cfg.attempt_budget(0.0) == 6
+    assert cfg.attempt_budget(7.99) == 6
+    assert cfg.attempt_budget(8.0) == 4
+    cfg.planning.opening_seconds = 0.0  # disabled
+    assert cfg.attempt_budget(0.0) == 4
+    cfg.planning.opening_seconds = 8.0
+
+    manifest = build_manifest(cfg, analysis, "lyrics", "style", llm=None)
+    opening = next(s for s in manifest.shots if s.start < 8.0)
+    later = next(s for s in manifest.shots if s.start >= 8.0)
+    assert opening.still.attempts_allowed == 6 and later.still.attempts_allowed == 4
+
+    for shot in (opening, later):
+        review.reject(manifest, shot.id, "again", AssetKind.STILL, cfg)
+    assert opening.still.attempts_allowed == 6 and opening.video.attempts_allowed == 6
+    assert later.still.attempts_allowed == 4 and later.video.attempts_allowed == 4
+
+
+def test_still_restarts_are_capped_then_the_shot_goes_to_review(
+    project, analysis, sample_png, sample_mp4
+) -> None:
+    """With keep_still_on_video_fail false, a video that keeps failing restarts from a new
+    still at most retry.max_still_restarts times, then stays EXHAUSTED for review."""
+    project.config.retry.keep_still_on_video_fail = False
+    project.config.retry.max_attempts = 1
+    project.config.retry.opening_extra_attempts = 0
+    project.config.retry.max_still_restarts = 1
+    manifest = build_manifest(project.config, analysis, "lyrics", "style", llm=None)
+    shot = manifest.shots[0]
+    shot.type = ShotType.BROLL
+    fake = FakeComfy(png=sample_png, mp4=sample_mp4)
+
+    def _run() -> None:
+        ShotRunner(
+            project,
+            manifest,
+            ComfyClient(project.config.comfy, transport=fake.transport(), sleep=lambda _: None),
+            QualityGates(
+                image=ScriptedGate([True] * 4), video=ScriptedGate([False] * 4), face_analyzer=None
+            ),
+            RetryPolicy(project.config.retry, project.config.seed, llm=None),
+            load_templates(project, ["t2i", "still", "lipsync", "i2v"]),
+            RunBudget(10),
+        ).run([AssetKind.STILL, AssetKind.VIDEO], shot_ids=[shot.id])
+
+    _run()  # first exhaustion: restart from a new still
+    assert shot.still_restarts == 1
+    assert shot.still.status is AssetStatus.PENDING
+    assert shot.video.status is AssetStatus.PENDING
+
+    _run()  # second exhaustion: the cap is reached, so it is kept for review
+    assert shot.still_restarts == 1
+    assert shot.still.status is AssetStatus.PASSED
+    assert shot.video.status is AssetStatus.EXHAUSTED
+    assert shot.video.selected_attempt is not None
+    assert review.review_reasons(shot, manifest, project.config) == [review.ReviewReason.EXHAUSTED]
+
+    attempts_before = len(shot.still.attempts) + len(shot.video.attempts)
+    _run()  # nothing left to do: no further spend
+    assert len(shot.still.attempts) + len(shot.video.attempts) == attempts_before
+
+    project.config.retry.max_still_restarts = 0  # 0 disables restarts entirely
+    other = manifest.shots[1]
+    other.type = ShotType.BROLL
+    shot = other
+    _run()
+    assert other.still_restarts == 0 and other.video.status is AssetStatus.EXHAUSTED

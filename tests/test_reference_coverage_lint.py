@@ -76,7 +76,7 @@ def test_lint_flags_recurring_undeclared_prop_across_three_shots_and_singularize
             _shot(4, section="Verse 1", still_prompt="A single violin rests in shadow."),
         ],
     )
-    findings = lint_reference_coverage(manifest)
+    findings = lint_reference_coverage(manifest, undeclared_min_sections=1)
     by_noun = {f.noun: f for f in findings}
     assert "brass lantern" in by_noun
     # Suppresses redundant single-word "lantern" when "brass lantern" covers the same shots.
@@ -104,7 +104,7 @@ def test_lint_flags_recurring_noun_across_two_sections_and_classifies_sets() -> 
             _shot(2, section="Chorus", still_prompt="Light pours across the cathedral arches."),
         ],
     )
-    findings = lint_reference_coverage(manifest)
+    findings = lint_reference_coverage(manifest, undeclared_min_shots=2, undeclared_min_sections=2)
     by_noun = {f.noun: f for f in findings}
     assert "cathedral" in by_noun
     cathedral = by_noun["cathedral"]
@@ -219,13 +219,20 @@ def test_lint_accepts_raw_mapping_inputs_and_validates_thresholds() -> None:
             },
         ],
     }
-    findings = lint_reference_coverage(raw_manifest)
+    findings = lint_reference_coverage(
+        raw_manifest, undeclared_min_shots=2, undeclared_min_sections=2
+    )
     assert [f.noun for f in findings] == ["hourglass"]
 
     with pytest.raises(ConfigError):
         lint_reference_coverage(raw_manifest, min_shots=0)
     with pytest.raises(ConfigError):
         lint_reference_coverage(raw_manifest, min_sections=True)
+    for bad in (0, True, 1.5):
+        with pytest.raises(ConfigError):
+            lint_reference_coverage(raw_manifest, undeclared_min_sections=bad)
+        with pytest.raises(ConfigError):
+            lint_reference_coverage(raw_manifest, undeclared_min_shots=bad)
 
 
 def test_api_lint_assets_and_cli_assets_lint(project) -> None:
@@ -394,7 +401,7 @@ def test_lint_chunk_re_skips_articles_after_prepositions_and_detects_three_lette
             ),
         ],
     )
-    by_noun = {f.noun: f for f in lint_reference_coverage(manifest)}
+    by_noun = {f.noun: f for f in lint_reference_coverage(manifest, undeclared_min_sections=1)}
     assert "brass compass" in by_noun
     assert by_noun["brass compass"].count == 3
     assert "compass" not in by_noun
@@ -458,3 +465,32 @@ def test_cli_lint_tells_you_to_declare_undeclared_entities_before_generating(pro
     ) in res.output
     # A declared-but-unlocked set is directly actionable, so no declare step is suggested.
     assert "suggest: mvd plates generate --set 'Neon Alley'" in res.output
+
+
+def test_undeclared_nouns_need_three_shots_across_three_sections_by_default() -> None:
+    """Undeclared words are guesses, so they must recur more than declared entities."""
+
+    def manifest_for(sections: list[str]) -> Manifest:
+        return Manifest(
+            title="t",
+            duration=4.0 * len(sections),
+            fps=24,
+            visual_bible=VisualBible(props=[PropDesign(id="mask", name="Mask", description="")]),
+            shots=[
+                _shot(i + 1, section=sec, still_prompt="She lifts the mask beside a lantern.")
+                for i, sec in enumerate(sections)
+            ],
+        )
+
+    # Two sections: the declared-but-unlocked mask is reported, the undeclared lantern is not.
+    two = {f.noun: f for f in lint_reference_coverage(manifest_for(["Verse", "Chorus"]))}
+    assert "Mask" in two and two["Mask"].declared
+    assert "lantern" not in two
+    # Many shots in a single section still is not enough for an undeclared word.
+    one = {f.noun for f in lint_reference_coverage(manifest_for(["Verse"] * 6))}
+    assert "lantern" not in one
+    # Three shots across three sections is.
+    three = {
+        f.noun: f for f in lint_reference_coverage(manifest_for(["Verse", "Chorus", "Bridge"]))
+    }
+    assert three["lantern"].count == 3 and not three["lantern"].declared

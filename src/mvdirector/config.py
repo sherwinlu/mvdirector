@@ -1271,6 +1271,15 @@ class RetryConfig(_Section):
             "so video-only retries do not regenerate the still."
         ),
     )
+    max_still_restarts: int = Field(
+        default=1,
+        ge=0,
+        le=10,
+        description=(
+            "With keep_still_on_video_fail false, how many times a shot whose video used up its "
+            "attempts restarts from a new still before it is queued for review instead."
+        ),
+    )
     strategies: list[RetryStrategy] = Field(
         default_factory=lambda: [
             RetryStrategy.NEW_SEED,
@@ -1324,7 +1333,7 @@ class RetryConfig(_Section):
         default_factory=lambda: {"still": {"steps": 40}, "video": {"steps": 40}}
     )
 
-    @field_validator("opening_extra_attempts", mode="before")
+    @field_validator("opening_extra_attempts", "max_still_restarts", mode="before")
     @classmethod
     def _reject_bool_for_retry_number(cls, value: Any, info: ValidationInfo) -> Any:
         if isinstance(value, bool):
@@ -1517,6 +1526,17 @@ class ProjectConfig(_Section):
     retry: RetryConfig = Field(default_factory=RetryConfig)
     review: ReviewConfig = Field(default_factory=ReviewConfig)
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)
+
+    def attempt_budget(self, start: float) -> int:
+        """Attempts granted to a shot starting at ``start``: retry.max_attempts, plus
+        retry.opening_extra_attempts inside the planning.opening_seconds hook window.
+
+        Used when a shot is planned and whenever an asset is reset for regeneration, so a
+        rejected opening shot keeps its bonus.
+        """
+        opening = self.planning.opening_seconds
+        in_opening = opening > 0.0 and start < opening
+        return self.retry.max_attempts + (self.retry.opening_extra_attempts if in_opening else 0)
 
 
 def expand_env(value: Any, *, environ: Mapping[str, str] | None = None) -> Any:

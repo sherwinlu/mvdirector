@@ -188,7 +188,8 @@ def test_attempt_stats_splits_by_kind_shot_type_and_human_reject_rate(project) -
     assert stats.by_kind["still"].mean_attempts_per_passed == 1.0
     assert stats.by_kind["video"].mean_attempts_per_passed == 2.5
     assert stats.by_kind["video"].p90_attempts == 2.9
-    assert stats.by_kind["video"].p90_multiplier == 2.9
+    # p90 relative to the mean: 2.9 / 2.5
+    assert stats.by_kind["video"].p90_multiplier == 1.16
     assert stats.by_shot_type["singing"].mean_attempts_per_passed == 2.0
     assert stats.by_shot_type["broll"].mean_attempts_per_passed == 1.0
     assert stats.by_shot_type["chained"].mean_attempts_per_passed == 1.5
@@ -204,6 +205,10 @@ def test_attempt_stats_splits_by_kind_shot_type_and_human_reject_rate(project) -
     assert md.exit_code == 0
     assert "## Stills" in md.output
     assert "## Attempt & Rejection Stats" in md.output
+
+    both = runner.invoke(app, ["qc-report", "--json", "--markdown", "-p", str(project.root)])
+    assert both.exit_code == 1
+    assert "--json and --markdown cannot be combined" in both.output
 
     js = runner.invoke(app, ["qc-report", "--json", "-p", str(project.root)])
     assert js.exit_code == 0

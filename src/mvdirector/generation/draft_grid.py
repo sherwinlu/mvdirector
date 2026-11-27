@@ -555,7 +555,7 @@ def generate_section_sheet(
                     else:
                         shot.still.status = AssetStatus.PENDING
                     if shot.video.selected_attempt is not None:
-                        shot.video.reset(project.config.retry.max_attempts)
+                        shot.video.reset(project.config.attempt_budget(shot.start))
 
         video_path: Path | None = None
         if mode in ("r2v", "both"):

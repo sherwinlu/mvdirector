@@ -235,7 +235,7 @@ def test_reject_video_resets_it_and_escalates_shot_type(config, manifest):
 
     review.reject(manifest, rejected.id, "eyes look wrong", AssetKind.VIDEO, config)
     assert rejected.video.status is AssetStatus.PENDING
-    assert rejected.video.attempts_allowed == 1 + config.retry.max_attempts
+    assert rejected.video.attempts_allowed == 1 + config.attempt_budget(rejected.start)
     assert rejected.video.director_note == "eyes look wrong"
     assert rejected.still.status is AssetStatus.PASSED
     assert not review.is_ready(rejected)

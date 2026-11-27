@@ -158,6 +158,7 @@ retry:
   max_attempts: 4
   opening_extra_attempts: 2
   keep_still_on_video_fail: true
+  max_still_restarts: 1
   strategies: [new_seed, rewrite_prompt, adjust_params]
   max_generations_per_run: 300
   adjust_params:

@@ -321,42 +321,47 @@ def _intercut_run(
                 _emit(chosen, need)
                 need = 0
                 break
-            # If the remaining slice exceeds any single source's remaining footage (e.g. final
-            # boundary), split cleanly across two distinct sources rather than aborting the run.
+            # If the remaining slice exceeds any single alternate source's remaining footage,
+            # either split cleanly across two sources (>= min_sub_frames each) or extend the
+            # previous sub-clip continuously using its own remaining frames (zero jump cut).
             partial = [
                 idx
                 for idx in range(len(originals))
                 if idx != prev_src and remaining_frames[idx] >= min(need, min_sub_frames)
             ]
-            if not partial:
-                # If no alternate source has enough safe frames left for a final sliver, extend
-                # the previous sub-clip continuously using its own remaining frames (no jump cut).
-                if sub_plans and prev_src >= 0 and remaining_frames[prev_src] >= need:
-                    prev_plan = sub_plans[-1]
-                    sub_plans[-1] = ClipPlan(
-                        shot_id=prev_plan.shot_id,
-                        frames=prev_plan.frames + need,
-                        source=prev_plan.source,
-                        is_video=prev_plan.is_video,
-                        head_handle=prev_plan.head_handle,
-                        sync_delay=prev_plan.sync_delay,
-                        drop_first_frame=prev_plan.drop_first_frame,
-                        continuity=prev_plan.continuity,
-                        tail_handle=round(max(0.0, (remaining_frames[prev_src] - need) / fps), 4),
-                    )
-                    cursors[prev_src] += need / fps
-                    remaining_frames[prev_src] -= need
-                    need = 0
-                    break
-                return originals
-            chosen = max(partial, key=lambda idx: (remaining_frames[idx], -idx))
-            take = min(need, remaining_frames[chosen])
-            if need - take > 0 and need - take < min_sub_frames:
-                take = need - min_sub_frames
-                if take < min_sub_frames or take > remaining_frames[chosen]:
-                    return originals
-            _emit(chosen, take)
-            need -= take
+            split_chosen: tuple[int, int] | None = None
+            if partial:
+                chosen = max(partial, key=lambda idx: (remaining_frames[idx], -idx))
+                take = min(need, remaining_frames[chosen])
+                if need - take == 0 or need - take >= min_sub_frames:
+                    split_chosen = (chosen, take)
+                elif (
+                    need >= 2 * min_sub_frames
+                    and remaining_frames[chosen] >= need - min_sub_frames
+                ):
+                    split_chosen = (chosen, need - min_sub_frames)
+            if split_chosen is not None:
+                _emit(split_chosen[0], split_chosen[1])
+                need -= split_chosen[1]
+                continue
+            if sub_plans and prev_src >= 0 and remaining_frames[prev_src] >= need:
+                prev_plan = sub_plans[-1]
+                sub_plans[-1] = ClipPlan(
+                    shot_id=prev_plan.shot_id,
+                    frames=prev_plan.frames + need,
+                    source=prev_plan.source,
+                    is_video=prev_plan.is_video,
+                    head_handle=prev_plan.head_handle,
+                    sync_delay=prev_plan.sync_delay,
+                    drop_first_frame=prev_plan.drop_first_frame,
+                    continuity=prev_plan.continuity,
+                    tail_handle=round(max(0.0, (remaining_frames[prev_src] - need) / fps), 4),
+                )
+                cursors[prev_src] += need / fps
+                remaining_frames[prev_src] -= need
+                need = 0
+                break
+            return originals
 
     return sub_plans
 

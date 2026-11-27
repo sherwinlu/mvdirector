@@ -466,6 +466,10 @@ class VideoConfig(_Section):
     def _check_draft_dimensions(self) -> VideoConfig:
         if (self.draft_width is None) != (self.draft_height is None):
             raise ValueError("Set both video.draft_width and video.draft_height together.")
+        if self.i2v_fps is not None and self.i2v_fps >= self.fps:
+            raise ValueError(
+                f"video.i2v_fps ({self.i2v_fps}) must be less than video.fps ({self.fps})."
+            )
         if self.min_clip_seconds > self.max_clip_seconds:
             raise ValueError(
                 f"video.min_clip_seconds ({self.min_clip_seconds}) must not exceed "
@@ -1209,7 +1213,18 @@ class PluginsConfig(_Section):
     def _validate_qc_checks(cls, value: list[str]) -> list[str]:
         from mvdirector.plugins import validate_plugin_name
 
-        return [validate_plugin_name(name, label="qc_checks plugin") for name in value]
+        validated: list[str] = []
+        seen: set[str] = set()
+        for name in value:
+            try:
+                clean = validate_plugin_name(name, label="qc_checks plugin")
+            except ConfigError as exc:
+                raise ValueError(str(exc)) from exc
+            if clean in seen:
+                raise ValueError(f"Duplicate plugin name {clean!r} in plugins.qc_checks.")
+            seen.add(clean)
+            validated.append(clean)
+        return validated
 
     @field_validator("audio_conditioner", "pacing", "clip_selector")
     @classmethod
@@ -1218,7 +1233,10 @@ class PluginsConfig(_Section):
             return None
         from mvdirector.plugins import validate_plugin_name
 
-        return validate_plugin_name(value)
+        try:
+            return validate_plugin_name(value)
+        except ConfigError as exc:
+            raise ValueError(str(exc)) from exc
 
 
 class ProjectConfig(_Section):

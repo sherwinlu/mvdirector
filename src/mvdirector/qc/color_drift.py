@@ -19,6 +19,7 @@ Credits & Attribution:
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -173,6 +174,15 @@ def fit_optimal_transport_color_match(
     color statistics across different camera angles or shots sharing the same set (for example,
     reconciling cloud-burst hero shots with self-hosted I2V shots in the same location).
     """
+    for param_name, param_val in (
+        ("regularization", regularization),
+        ("max_matrix_deviation", max_matrix_deviation),
+        ("max_bias", max_bias),
+    ):
+        val = float(param_val)
+        if not math.isfinite(val) or val < 0.0:
+            raise ValueError(f"{param_name} must be finite and non-negative, got {param_val!r}.")
+
     if not source_frames or not target_frames:
         return ColorAffine.identity()
 
@@ -186,18 +196,28 @@ def fit_optimal_transport_color_match(
     mu_t = np.mean(tgt_pixels, axis=0)
     cov_s = np.cov(src_pixels, rowvar=False) + reg * np.eye(3, dtype=np.float64)
     cov_t = np.cov(tgt_pixels, rowvar=False) + reg * np.eye(3, dtype=np.float64)
+    if not (
+        np.all(np.isfinite(mu_s))
+        and np.all(np.isfinite(mu_t))
+        and np.all(np.isfinite(cov_s))
+        and np.all(np.isfinite(cov_t))
+    ):
+        return ColorAffine.identity()
 
     # T = Sigma_s^{-1/2} (Sigma_s^{1/2} Sigma_t Sigma_s^{1/2})^{1/2} Sigma_s^{-1/2}
-    s_half = _spd_matrix_power(cov_s, 0.5)
-    s_inv_half = _spd_matrix_power(cov_s, -0.5)
-    inner = s_half @ cov_t @ s_half
-    transform = s_inv_half @ _spd_matrix_power(inner, 0.5) @ s_inv_half
-    bias = mu_t - transform @ mu_s
+    try:
+        s_half = _spd_matrix_power(cov_s, 0.5)
+        s_inv_half = _spd_matrix_power(cov_s, -0.5)
+        inner = s_half @ cov_t @ s_half
+        transform = s_inv_half @ _spd_matrix_power(inner, 0.5) @ s_inv_half
+    except np.linalg.LinAlgError:
+        return ColorAffine.identity()
 
     identity = np.eye(3, dtype=np.float64)
     clamped_matrix = identity + np.clip(
         transform - identity, -max_matrix_deviation, max_matrix_deviation
     )
+    bias = mu_t - clamped_matrix @ mu_s
     clamped_bias = np.clip(bias, -max_bias, max_bias)
     if not (np.all(np.isfinite(clamped_matrix)) and np.all(np.isfinite(clamped_bias))):
         return ColorAffine.identity()

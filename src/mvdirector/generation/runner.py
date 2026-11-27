@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import sys
 import threading
 import weakref
@@ -29,7 +30,7 @@ from mvdirector.comfy.cache import ComfyRenderCache, canonical_graph_key, file_s
 from mvdirector.comfy.client import ComfyClient
 from mvdirector.comfy.provider import ComfyEndpointProvider, StaticComfyProvider
 from mvdirector.comfy.workflow import OutputSpec, WorkflowTemplate
-from mvdirector.config import validate_max_concurrency
+from mvdirector.config import VideoConfig, validate_max_concurrency
 from mvdirector.errors import BudgetExceeded, ComfyJobError, ConfigError, MediaToolError
 from mvdirector.generation import plates
 from mvdirector.generation.candidates import ensure_upload_audio_track
@@ -49,6 +50,7 @@ from mvdirector.models import (
     ShotType,
 )
 from mvdirector.planning import prompts
+from mvdirector.planning.segmenter import frames_for
 from mvdirector.project import Project, require_safe_id
 from mvdirector.qc.faces import IdentityReference
 from mvdirector.qc.factory import QualityGates
@@ -241,7 +243,7 @@ class ShotRunner:
                     previous_kind = kind
                     self._emit(RunEvent("phase_started", asset=kind.value))
                     ordered = (
-                        self._sort_for_cache(wave_shots, kind)
+                        self._sort_for_cache(wave_shots, kind, video=self._project.config.video)
                         if (self._project.config.comfy.sort_batch_for_cache and wave_idx == 0)
                         else wave_shots
                     )
@@ -375,13 +377,30 @@ class ShotRunner:
         return [waves[d] for d in sorted(waves)]
 
     @staticmethod
+    def _effective_video_grid(shot: Shot, video: VideoConfig) -> tuple[int, int]:
+        """Return ``(fps, num_frames)`` used for ``shot``'s video generation."""
+        if (
+            shot.type is not ShotType.LIPSYNC
+            and video.i2v_fps is not None
+            and video.i2v_fps < video.fps
+        ):
+            clip_duration = max(0.0, shot.audio_slice.end - shot.audio_slice.start)
+            return (
+                video.i2v_fps,
+                frames_for(clip_duration, video.i2v_fps, video.frame_multiple, video.frame_offset),
+            )
+        return (video.fps, shot.num_frames)
+
+    @staticmethod
     def _video_frame_bucket(num_frames: int) -> int:
         """Round ``num_frames`` to a 16-frame shape bucket to keep torch.compile caches warm."""
         clamped = max(1, int(num_frames))
         return ((clamped + 15) // 16) * 16
 
     @staticmethod
-    def _sort_for_cache(shots: list[Shot], kind: AssetKind) -> list[Shot]:
+    def _sort_for_cache(
+        shots: list[Shot], kind: AssetKind, *, video: VideoConfig | None = None
+    ) -> list[Shot]:
         """Group independent shots by workflow/shape-bucket/setting to keep ComfyUI caches warm.
 
         Inspired by ``tysonfarrington-cmyk/xenoform`` (``final_tier.py``) and
@@ -403,7 +422,11 @@ class ShotRunner:
             shots,
             key=lambda s: (
                 0 if s.type is ShotType.LIPSYNC else 1,
-                ShotRunner._video_frame_bucket(s.num_frames),
+                ShotRunner._video_frame_bucket(
+                    ShotRunner._effective_video_grid(s, video)[1]
+                    if video is not None
+                    else s.num_frames
+                ),
                 s.setting,
                 s.motion_prompt[:48],
                 s.index,
@@ -981,7 +1004,11 @@ class ShotRunner:
                 attempt.qc = self._check(shot, kind, destination)
             if kind is AssetKind.VIDEO and attempt.qc is not None:
                 attempt.sync_delay_seconds = self._extract_sync_delay(shot, attempt.qc)
-                if attempt.qc.passed and shot.type is not ShotType.LIPSYNC:
+                if (
+                    attempt.qc.passed
+                    and shot.type is not ShotType.LIPSYNC
+                    and shot.continuity is not ContinuityMode.CONTINUE
+                ):
                     attempt.optimal_in_offset = self._select_optimal_in_offset(shot, destination)
         except (ComfyJobError, MediaToolError) as exc:
             # The job itself failed. Record it and let the loop try again.
@@ -1015,7 +1042,11 @@ class ShotRunner:
     def _select_optimal_in_offset(self, shot: Shot, video_path: Path) -> float:
         """Run optional clip_selector plugin on non-lipsync videos, clamped to handles."""
         selector_name = self._project.config.plugins.clip_selector
-        if not selector_name or shot.type is ShotType.LIPSYNC:
+        if (
+            not selector_name
+            or shot.type is ShotType.LIPSYNC
+            or shot.continuity is ContinuityMode.CONTINUE
+        ):
             return 0.0
         head = max(0.0, shot.audio_slice.head_handle)
         tail = max(0.0, shot.audio_slice.end - shot.end)
@@ -1355,18 +1386,7 @@ class ShotRunner:
         still_path = self._project.path(still.path)
         clip_duration = round(shot.audio_slice.end - shot.audio_slice.start, 3)
         template = self._video_template(shot)
-        gen_fps = (
-            video.i2v_fps
-            if (
-                shot.type is not ShotType.LIPSYNC
-                and video.i2v_fps is not None
-                and video.i2v_fps < video.fps
-            )
-            else video.fps
-        )
-        gen_frames = (
-            max(1, int(round(clip_duration * gen_fps))) if gen_fps != video.fps else shot.num_frames
-        )
+        gen_fps, gen_frames = self._effective_video_grid(shot, video)
         neg_prompt = prompts.merge_negative_prompt(
             self._manifest.visual_bible.negative_prompt,
             self._manifest.visual_bible.exclusions,
@@ -1909,6 +1929,8 @@ class ShotRunner:
             )
             return raw_path
         cond_path = raw_path.with_name(f"{raw_path.stem}.cond{raw_path.suffix}")
+        project_root = self._project.root.resolve()
+        cond_resolved = cond_path.resolve()
         raw_stat = raw_path.stat()
         stamp: dict[str, Any] = {
             "raw_size": raw_stat.st_size,
@@ -1917,17 +1939,41 @@ class ShotRunner:
             "version": plugins.plugin_version(fn),
         }
         marker = cond_path.with_name(f"{cond_path.name}.json")
-        if cond_path.is_file() and _read_stamp(marker) == stamp:
+        if (
+            cond_resolved.is_relative_to(project_root)
+            and cond_resolved.is_file()
+            and cond_resolved.stat().st_size > 0
+            and _read_stamp(marker) == stamp
+        ):
             return cond_path
         try:
+            if cond_path.is_symlink() and not cond_resolved.is_relative_to(project_root):
+                raise ValueError(f"Conditioned audio path escapes project root: {cond_path}")
             analysis = None
             with suppress(Exception):
                 analysis = self._project.load_analysis()
             out = fn(raw_path, cond_path, shot, analysis)
-            resolved = Path(out) if out is not None else cond_path
+            if out is None:
+                candidate = cond_path
+            elif isinstance(out, (str, os.PathLike)):
+                candidate = Path(out)
+            else:
+                raise TypeError(
+                    f"audio_conditioner {plugin_name!r} returned invalid path type "
+                    f"{type(out).__name__}"
+                )
+            resolved = candidate.resolve()
+            if not resolved.is_relative_to(project_root):
+                raise ValueError(
+                    f"audio_conditioner {plugin_name!r} returned path outside project root: "
+                    f"{candidate}"
+                )
             if not resolved.is_file() or resolved.stat().st_size <= 0:
                 raise OSError(f"audio_conditioner {plugin_name!r} did not write a non-empty file")
-            atomic_write(marker, json.dumps(stamp))
+            if resolved == cond_path.resolve():
+                atomic_write(marker, json.dumps(stamp))
+                return cond_path
+            marker.unlink(missing_ok=True)
             return resolved
         except Exception as exc:  # noqa: BLE001
             log.warning(

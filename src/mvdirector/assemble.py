@@ -129,17 +129,19 @@ def clip_timing(
     """Timing of ``shot``'s clip ``video`` as assembly will play it."""
     head = shot.audio_slice.head_handle
     tail = max(0.0, shot.audio_slice.end - shot.end)
-    if shot.type is ShotType.LIPSYNC:
-        raw_offset = video.sync_delay_seconds if sync_delay_compensation else 0.0
-    else:
-        raw_offset = video.optimal_in_offset
-    delay = round(max(-head, min(tail, raw_offset)), 4)
     used_handoff = (
         shot.index > 0
         and shot.continuity is ContinuityMode.CONTINUE
         and still is not None
         and still.strategy is RetryStrategy.HANDOFF
     )
+    if used_handoff:
+        raw_offset = 0.0
+    elif shot.type is ShotType.LIPSYNC:
+        raw_offset = video.sync_delay_seconds if sync_delay_compensation else 0.0
+    else:
+        raw_offset = video.optimal_in_offset
+    delay = round(max(-head, min(tail, raw_offset)), 4)
     continuity = shot.continuity
     if continuity is ContinuityMode.CONTINUE and not used_handoff:
         # A fresh (non-handoff) still makes the join a plain cut: no seam treatment applies.

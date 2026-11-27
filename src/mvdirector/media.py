@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -27,13 +28,15 @@ from mvdirector.errors import MediaToolError
 log = logging.getLogger(__name__)
 
 _HW_ENCODERS = ("h264_nvenc", "h264_videotoolbox")
+_ENCODERS_LOCK = threading.Lock()
 _ENCODERS_CACHE: frozenset[str] | None = None
 
 
 def clear_encoder_cache() -> None:
     """Clear the cached encoder probe result (intended for tests)."""
     global _ENCODERS_CACHE
-    _ENCODERS_CACHE = None
+    with _ENCODERS_LOCK:
+        _ENCODERS_CACHE = None
 
 
 def _probe_encoder_works(encoder: str) -> bool:
@@ -51,8 +54,7 @@ def _probe_encoder_works(encoder: str) -> bool:
                 "color=c=black:s=64x64:d=0.04",
                 "-frames:v",
                 "1",
-                "-c:v",
-                encoder,
+                *encode_args_for(encoder),
                 "-f",
                 "null",
                 "-",
@@ -70,28 +72,32 @@ def _probe_encoder_works(encoder: str) -> bool:
 def available_encoders() -> frozenset[str]:
     """Return verified H.264 encoders usable on this host (cached)."""
     global _ENCODERS_CACHE
-    if _ENCODERS_CACHE is not None:
+    cached = _ENCODERS_CACHE
+    if cached is not None:
+        return cached
+    with _ENCODERS_LOCK:
+        if _ENCODERS_CACHE is not None:
+            return _ENCODERS_CACHE
+        found: set[str] = set()
+        try:
+            out = run(["ffmpeg", "-hide_banner", "-encoders"], timeout=10).stdout
+        except MediaToolError:
+            _ENCODERS_CACHE = frozenset({"libx264"})
+            return _ENCODERS_CACHE
+        listed: set[str] = set()
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[0].startswith("V"):
+                listed.add(parts[1])
+        if "libx264" in listed:
+            found.add("libx264")
+        for hw in _HW_ENCODERS:
+            if hw in listed and _probe_encoder_works(hw):
+                found.add(hw)
+        if not found:
+            found.add("libx264")
+        _ENCODERS_CACHE = frozenset(found)
         return _ENCODERS_CACHE
-    found: set[str] = set()
-    try:
-        out = run(["ffmpeg", "-hide_banner", "-encoders"], timeout=10).stdout
-    except MediaToolError:
-        _ENCODERS_CACHE = frozenset({"libx264"})
-        return _ENCODERS_CACHE
-    listed: set[str] = set()
-    for line in out.splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and parts[0].startswith("V"):
-            listed.add(parts[1])
-    if "libx264" in listed:
-        found.add("libx264")
-    for hw in _HW_ENCODERS:
-        if hw in listed and _probe_encoder_works(hw):
-            found.add(hw)
-    if not found:
-        found.add("libx264")
-    _ENCODERS_CACHE = frozenset(found)
-    return _ENCODERS_CACHE
 
 
 def resolve_video_encoder(requested: str) -> str:

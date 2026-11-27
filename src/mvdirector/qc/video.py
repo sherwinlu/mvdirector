@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -107,7 +108,7 @@ class VideoQC:
         self._mouth = mouth_tracker
         self._vision = vision
         self._lipsync_scorer = lipsync_scorer
-        self._qc_check_plugins = tuple(qc_check_plugins)
+        self._qc_check_plugins = tuple(dict.fromkeys(qc_check_plugins))
 
     def evaluate(
         self,
@@ -171,10 +172,28 @@ class VideoQC:
         for name in self._qc_check_plugins:
             try:
                 fn = plugins.load_plugin(plugins.QC_CHECKS_GROUP, name)
-                out = fn(frames, fps, shot, manifest, audio_slice)
+                out = fn(list(frames), fps, shot, manifest, audio_slice)
                 if not isinstance(out, list) or not all(isinstance(c, CheckResult) for c in out):
                     raise TypeError(f"plugin {name!r} must return list[CheckResult]")
-                results.extend(out)
+                sanitized: list[CheckResult] = []
+                for check in out:
+                    updates: dict[str, float] = {}
+                    if check.score is not None:
+                        if not math.isfinite(check.score):
+                            raise ValueError(
+                                f"plugin {name!r} returned non-finite score for {check.name!r}"
+                            )
+                        clamped_score = min(1.0, max(0.0, float(check.score)))
+                        if clamped_score != check.score:
+                            updates["score"] = clamped_score
+                    if not math.isfinite(check.weight):
+                        raise ValueError(
+                            f"plugin {name!r} returned non-finite weight for {check.name!r}"
+                        )
+                    if check.weight < 0.0:
+                        updates["weight"] = 0.0
+                    sanitized.append(check.model_copy(update=updates) if updates else check)
+                results.extend(sanitized)
             except Exception as exc:  # noqa: BLE001
                 log.warning("QC plugin %r failed on %s: %s", name, shot.id, exc)
                 if fail_hard:

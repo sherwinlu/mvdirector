@@ -343,3 +343,32 @@ def test_broll_guard_blocks_named_cast_but_keeps_anonymous_crowd_silhouettes():
     )
     assert perf_slot.type is ShotType.PERFORMANCE
     assert "Anya" in perf_slot.still_prompt
+
+
+def test_close_and_medium_close_framing_notes_discourage_stiff_mugshot_pose():
+    from mvdirector.models import AudioSlice, Manifest, Shot, VisualBible
+    from mvdirector.planning.prompts import compose_still_prompt
+
+    manifest = Manifest(
+        title="Test",
+        duration=10.0,
+        fps=24,
+        visual_bible=VisualBible(concept="c", style="s", palette="p", lighting="l"),
+    )
+    for framing in (Framing.CLOSE_UP, Framing.MEDIUM_CLOSE):
+        shot = Shot(
+            id="s001",
+            index=0,
+            start=0.0,
+            end=4.0,
+            type=ShotType.LIPSYNC,
+            framing=framing,
+            still_prompt="Singer in alley.",
+            motion_prompt="Sings.",
+            audio_slice=AudioSlice(
+                path="assets/audio_slices/s001.wav", start=0.0, end=4.0, head_handle=0.0
+            ),
+            num_frames=97,
+        )
+        composed = compose_still_prompt(manifest, shot)
+        assert "do not copy the stiff centered frontal pose" in composed

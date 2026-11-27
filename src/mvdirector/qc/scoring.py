@@ -23,6 +23,19 @@ def linear_score(value: float, bad: float, good: float) -> float:
     return float(min(1.0, max(0.0, (value - bad) / (good - bad))))
 
 
+def floor_passing_score(value: float, minimum: float, good: float, pass_floor: float) -> float:
+    """Map a passing metric in ``[minimum, good]`` onto ``[pass_floor, 1.0]``.
+
+    Prevents a heavily weighted passing check right above its threshold from pulling an
+    otherwise-passing asset below ``pass_score`` and causing avoidable retry renders.
+    """
+    if not all(math.isfinite(x) for x in (value, minimum, good, pass_floor)):
+        return 0.0
+    clamped_floor = min(1.0, max(0.0, pass_floor))
+    progress = 1.0 if good <= minimum else linear_score(value, minimum, good)
+    return float(clamped_floor + (1.0 - clamped_floor) * progress)
+
+
 def skipped(name: str, reason: str) -> CheckResult:
     return CheckResult(name=name, status=CheckStatus.SKIPPED, detail=reason)
 

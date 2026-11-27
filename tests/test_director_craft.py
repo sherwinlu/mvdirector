@@ -318,6 +318,26 @@ def test_the_direction_prompt_carries_the_section_arc_and_cutaway_rules():
     assert "three distinct looks" in text
 
 
+def test_direction_prompts_steer_away_from_literal_and_unreliable_shots():
+    shots = " ".join(prompts.SHOTS_SYSTEM.split())
+    bible = " ".join(prompts.BIBLE_SYSTEM.split())
+    # Subtext over literal lyric illustration, in the bible concept and on cutaways.
+    assert "Show what the lyric is about" not in shots
+    assert "feeling or subtext behind the lyric" in shots
+    assert "wordless story or metaphor thread" in bible
+    assert "color temperature shift" in bible
+    # Feasibility: one action, one camera move, and known failure subjects avoided.
+    assert "one primary subject action and at most one camera move" in shots
+    assert "never an orbit, crane, whip pan, or zoom" in shots
+    for hazard in ("mirrors or reflections", "readable text", "full-body spins"):
+        assert hazard in shots
+    assert "clock hands" not in shots and "screen content" not in shots
+    # Editing grammar: eye trace, a striking opening, and contrast into the drop.
+    assert "Eye trace:" in shots
+    assert "Open on a striking, specific image in the very first shot" in shots
+    assert "most striking, open frame" in shots
+
+
 def test_pace_follows_intensity_and_shifts_are_flagged_across_batches():
     assert [planner.pace_label(v) for v in (0.1, 0.5, 0.9)] == ["calm", "moderate", "high"]
     quiet, loud = _shot(0, "Verse 1", 0.2, ShotType.PERFORMANCE), _shot(1, "Chorus", 0.9)

@@ -27,14 +27,52 @@ from mvdirector.models import (
 )
 from mvdirector.qc import continuity as continuity_mod
 from mvdirector.qc import lipsync
-from mvdirector.qc.common import dimensions_check, identity_check, vision_checks
-from mvdirector.qc.faces import FaceAnalyzer, IdentityReference, MouthTracker
-from mvdirector.qc.scoring import aggregate, linear_score, skipped
+from mvdirector.qc.common import (
+    dimensions_check,
+    identity_check,
+    vision_checks,
+    vision_identity_check,
+)
+from mvdirector.qc.faces import Face, FaceAnalyzer, IdentityReference, MouthTracker
+from mvdirector.qc.scoring import aggregate, floor_passing_score, linear_score, skipped
 from mvdirector.qc.vision import VisionJudge
 
 log = logging.getLogger(__name__)
 
 _MOTION_SIDE = 64
+_STATIC_DETAIL = "clip is almost static"
+
+
+def _waive_static_for_passing_lipsync(checks: list[CheckResult]) -> list[CheckResult]:
+    """Accept a near-static singing clip when its lip-sync check passed.
+
+    In a lip-sync close-up the mouth is most of the motion, so whole-frame motion sits right at
+    ``static_max_motion``; clips with strong lip-sync (correlation 0.8) were retried as "almost
+    static". A truly frozen clip still fails, because a frozen mouth fails the lip-sync check.
+    """
+    sync = next((c for c in checks if c.name == "lipsync"), None)
+    if sync is None or sync.status is not CheckStatus.PASSED:
+        return checks
+    waived: list[CheckResult] = []
+    for check in checks:
+        if (
+            check.name == "temporal"
+            and check.status is CheckStatus.FAILED
+            and check.detail == _STATIC_DETAIL
+        ):
+            waived.append(
+                CheckResult(
+                    name="temporal",
+                    status=CheckStatus.PASSED,
+                    hard=False,
+                    score=None,
+                    detail="near-static framing accepted: the mouth movement passed lip-sync",
+                    metrics={**check.metrics, "static_waived": 1.0},
+                )
+            )
+        else:
+            waived.append(check)
+    return waived
 
 
 def frame_differences(frames: list[np.ndarray]) -> np.ndarray:
@@ -97,6 +135,7 @@ class VideoQC:
             checks.append(self._beat_motion_check(frames, fps, beat_times))
         if shot.type is ShotType.LIPSYNC:
             checks += self._lipsync_checks(frames, fps, shot, manifest, audio_slice)
+            checks = _waive_static_for_passing_lipsync(checks)
         if shot.type.shows_singer:
             checks.append(self._identity_check(frames, fps, reference))
         checks += vision_checks(
@@ -218,18 +257,6 @@ class VideoQC:
         }
         if allow_cuts:
             metrics["cut_count"] = float(cut_count)
-        if median < self._cfg.static_max_motion:
-            return [
-                CheckResult(
-                    name="temporal",
-                    status=CheckStatus.FAILED,
-                    hard=True,
-                    score=0.0,
-                    detail="clip is almost static",
-                    metrics=metrics,
-                    fix_hint="Describe clear, continuous motion of the singer and the camera.",
-                )
-            ]
         max_montage_cuts = max(3, differences.size // 4)
         if cut_count > 0 and (not allow_cuts or cut_count > max_montage_cuts or not non_cut.size):
             detail = (
@@ -254,26 +281,40 @@ class VideoQC:
                 )
             ]
         unstable = flicker > self._cfg.flicker_bad
+        if unstable:
+            return [
+                CheckResult(
+                    name="temporal",
+                    status=CheckStatus.FAILED,
+                    score=0.0,
+                    detail="heavy flicker or erratic motion",
+                    fix_hint="Ask for smooth, stable motion and a steady camera.",
+                    metrics=metrics,
+                )
+            ]
+        if median < self._cfg.static_max_motion:
+            return [
+                CheckResult(
+                    name="temporal",
+                    status=CheckStatus.FAILED,
+                    hard=True,
+                    score=0.0,
+                    detail=_STATIC_DETAIL,
+                    metrics=metrics,
+                    fix_hint="Describe clear, continuous motion of the singer and the camera.",
+                )
+            ]
         # Measure erratic spikes above steady continuous motion (p95 - median) so smooth camera
         # moves or steady environmental motion (water, embers, snow) are not penalized as flicker,
-        # while still failing hard when raw p95 exceeds flicker_bad (strobe / heavy flicker).
-        score = (
-            0.0
-            if unstable
-            else linear_score(flicker_excess, self._cfg.flicker_bad, self._cfg.flicker_good)
-        )
-        detail = (
-            "heavy flicker or erratic motion"
-            if unstable
-            else (f"multi-cut montage ({cut_count} cut(s))" if allow_cuts and cut_count else "")
-        )
+        # while raw p95 > flicker_bad is already rejected above.
+        score = linear_score(flicker_excess, self._cfg.flicker_bad, self._cfg.flicker_good)
+        detail = f"multi-cut montage ({cut_count} cut(s))" if allow_cuts and cut_count else ""
         return [
             CheckResult(
                 name="temporal",
-                status=CheckStatus.FAILED if unstable else CheckStatus.PASSED,
+                status=CheckStatus.PASSED,
                 score=score,
                 detail=detail,
-                fix_hint="Ask for smooth, stable motion and a steady camera." if unstable else None,
                 metrics=metrics,
             )
         ]
@@ -449,14 +490,27 @@ class VideoQC:
                 "Keep the face frontal with the mouth unobstructed, and simplify body and "
                 "camera movement so the mouth can follow the vocal."
             )
+        if in_sync:
+            # A passing lip-sync check must score at least pass_score so its heavy weight cannot
+            # drag an otherwise-passing clip below the overall pass mark and waste retry renders.
+            sync_score: float | None = floor_passing_score(
+                result.correlation,
+                self._cfg.lipsync_min,
+                self._cfg.lipsync_good,
+                self._qc.pass_score,
+            )
+        elif blocking:
+            sync_score = linear_score(
+                result.correlation, self._cfg.lipsync_bad, self._cfg.lipsync_good
+            )
+        else:
+            # A weak advisory result carries no score, so it cannot pull a clip below the pass mark.
+            sync_score = None
         sync = CheckResult(
             name="lipsync",
             status=CheckStatus.PASSED if in_sync else CheckStatus.FAILED,
             hard=blocking,
-            # A weak advisory result carries no score, so it cannot pull a clip below the pass mark.
-            score=linear_score(result.correlation, self._cfg.lipsync_bad, self._cfg.lipsync_good)
-            if blocking or in_sync
-            else None,
+            score=sync_score,
             detail=sync_detail,
             fix_hint=sync_hint,
             metrics=sync_metrics,
@@ -468,6 +522,20 @@ class VideoQC:
     ) -> CheckResult:
         if self._faces is None or reference is None:
             return skipped("identity", "face analysis or reference portrait unavailable")
+        if self._qc.face_backend != "insightface" and self._qc.vision_identity:
+            samples = self._vision_identity_samples(frames)
+            has_embeddings = any(f.embedding is not None for _, faces in samples for f in faces)
+            if not has_embeddings:
+                # No embeddings (MediaPipe): the vision model compares face crops from a few frames.
+                return vision_identity_check(
+                    self._vision,
+                    samples,
+                    reference,
+                    min_face_px=self._cfg.vision_identity_min_face_px,
+                    hard_min=self._cfg.vision_identity_hard_min,
+                    good=self._cfg.vision_identity_good,
+                    pass_score=self._qc.pass_score,
+                )
         step = max(1, round(self._cfg.identity_sample_seconds * fps))
         similarities = []
         for frame in frames[::step]:
@@ -479,6 +547,24 @@ class VideoQC:
         # The median tolerates a few turned-away frames but catches real identity drift.
         similarity = float(np.median(similarities)) if similarities else None
         return identity_check(similarity, self._cfg.identity_hard_min, self._cfg.identity_good)
+
+    def _vision_identity_samples(
+        self, frames: list[np.ndarray]
+    ) -> list[tuple[np.ndarray, list[Face]]]:
+        """Evenly spaced frames (away from the very first and last) that contain a face."""
+        if self._faces is None or not frames:
+            return []
+        count = self._cfg.vision_identity_frames
+        if len(frames) > 2:
+            positions = np.linspace(0, len(frames) - 1, num=count + 2)[1:-1]
+        else:
+            positions = np.array([0.0])
+        samples: list[tuple[np.ndarray, list[Face]]] = []
+        for index in sorted({int(round(float(p))) for p in positions}):
+            faces = self._faces.faces(frames[index])
+            if faces:
+                samples.append((frames[index], faces))
+        return samples
 
     @staticmethod
     def _sample(frames: list[np.ndarray], count: int) -> list[Path | np.ndarray]:

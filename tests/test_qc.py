@@ -823,6 +823,89 @@ def test_weak_lipsync_blocks_when_configured(tmp_path, monkeypatch):
     assert sync.hard and report.has_hard_failure and not report.passed
 
 
+def test_borderline_passing_lipsync_is_not_pulled_below_pass_score(tmp_path, monkeypatch):
+    import wave
+
+    from mvdirector import media
+    from mvdirector.models import CheckStatus
+    from mvdirector.qc.lipsync import SyncMeasurement
+    from mvdirector.qc.video import VideoQC
+    from mvdirector.qc.vision import VisionVerdict
+
+    audio_path = tmp_path / "slice.wav"
+    t = np.linspace(0.0, 4.0, 64000, endpoint=False)
+    tone = (12000.0 * np.sin(2.0 * np.pi * 440.0 * t)).astype(np.int16)
+    with wave.open(str(audio_path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(tone.tobytes())
+
+    monkeypatch.setattr(
+        media,
+        "probe",
+        lambda p: media.MediaInfo(width=896, height=512, fps=24.0, duration=4.0, has_audio=True),
+    )
+    frames = [np.full((64, 64, 3), 80 + i, dtype=np.uint8) for i in range(96)]
+    monkeypatch.setattr(media, "extract_frames", lambda p, width: frames)
+
+    class FixedScorer:
+        def __init__(self, corr: float) -> None:
+            self.corr = corr
+
+        def score(self, *args, **kwargs):
+            return SyncMeasurement(correlation=self.corr, lag_frames=-1, face_presence=1.0)
+
+    class SteadyVision:
+        disabled_reason = None
+
+        def judge(self, *args, **kwargs):
+            return VisionVerdict(
+                spec_match=0.72,
+                artifact_free=0.73,
+                character_match=0.74,
+                issues=[],
+            )
+
+    config = ProjectConfig()
+    config.qc.video.lipsync_blocking = True
+    shot = _shot(ShotType.LIPSYNC, Framing.MEDIUM_CLOSE)
+    manifest = Manifest(title="Solo", duration=4.0, fps=24, shots=[shot])
+    video_path = tmp_path / "clip.mp4"
+    video_path.write_bytes(b"fake")
+
+    borderline_gate = VideoQC(
+        config.qc,
+        config.video,
+        None,
+        None,
+        SteadyVision(),
+        lipsync_scorer=FixedScorer(0.41),
+    )
+    borderline = borderline_gate.evaluate(
+        video_path, shot, manifest, audio_path, None, expected_size=(896, 512)
+    )
+    sync_low = next(c for c in borderline.checks if c.name == "lipsync")
+    assert sync_low.status is CheckStatus.PASSED
+    assert sync_low.score is not None and sync_low.score >= config.qc.pass_score
+    assert borderline.passed
+
+    strong_gate = VideoQC(
+        config.qc,
+        config.video,
+        None,
+        None,
+        SteadyVision(),
+        lipsync_scorer=FixedScorer(0.65),
+    )
+    strong = strong_gate.evaluate(
+        video_path, shot, manifest, audio_path, None, expected_size=(896, 512)
+    )
+    sync_hi = next(c for c in strong.checks if c.name == "lipsync")
+    assert sync_hi.score is not None and sync_hi.score > sync_low.score
+    assert strong.score > borderline.score
+
+
 def test_oversized_or_squashed_face_in_wide_shot_is_a_hard_failure(still_path):
     # Matches the 0.1172 BlazeFace measurement from a vertically squashed figure in a wide shot.
     squashed = [Face(0.1172, np.array([1.0, 0.0]))]

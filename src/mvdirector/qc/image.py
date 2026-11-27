@@ -29,7 +29,12 @@ from mvdirector.planning.prompts import (
     is_rear_view_prompt,
     is_silhouette_prompt,
 )
-from mvdirector.qc.common import dimensions_check, identity_check, vision_checks
+from mvdirector.qc.common import (
+    dimensions_check,
+    identity_check,
+    vision_checks,
+    vision_identity_check,
+)
 from mvdirector.qc.faces import FaceAnalyzer, IdentityReference, load_rgb
 from mvdirector.qc.scoring import aggregate, linear_score, skipped
 from mvdirector.qc.vision import VisionJudge
@@ -328,5 +333,24 @@ class ImageQC:
             status=CheckStatus.PASSED,
             hard=True,
         )
-        identity = identity_check(similarity, self._cfg.identity_hard_min, self._cfg.identity_good)
+        if (
+            similarity is None
+            and reference is not None
+            and self._qc.vision_identity
+            and self._qc.face_backend != "insightface"
+        ):
+            # No embeddings (MediaPipe): let the vision model compare face crops instead.
+            identity = vision_identity_check(
+                self._vision,
+                [(image, faces)],
+                reference,
+                min_face_px=self._cfg.vision_identity_min_face_px,
+                hard_min=self._cfg.vision_identity_hard_min,
+                good=self._cfg.vision_identity_good,
+                pass_score=self._qc.pass_score,
+            )
+        else:
+            identity = identity_check(
+                similarity, self._cfg.identity_hard_min, self._cfg.identity_good
+            )
         return [present, framing, identity]

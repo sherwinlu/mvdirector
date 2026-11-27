@@ -322,7 +322,7 @@ def test_tight_framing_scrubs_lower_body_wardrobe_and_prepends_framing_anchor():
         ],
     )
     composed = prompts.compose_still_prompt(manifest, manifest.shots[0])
-    assert composed.startswith("Tight head-and-shoulders close-up portrait")
+    assert composed.startswith(prompts.CLOSE_UP_SIZE_ANCHOR)
     assert "Oversized charcoal hoodie" in composed
     assert "cargo pants" not in composed
     assert "sneakers" not in composed

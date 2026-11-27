@@ -170,6 +170,11 @@ class IdentityReference:
         self._embedding: np.ndarray | None = None
 
     @property
+    def paths(self) -> list[Path]:
+        """Reference images, most reliable identity anchor first (face, front, three-quarter)."""
+        return list(self._paths)
+
+    @property
     def embedding(self) -> np.ndarray:
         if self._embedding is None:
             vectors = []

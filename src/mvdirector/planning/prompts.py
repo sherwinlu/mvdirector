@@ -321,10 +321,16 @@ as id='sakura' with name='さくら').
     under SONG SECTIONS (do not invent or rename sections), each with:
     - section: exact section name from SONG SECTIONS.
     - emotion: the emotional state or shift in this section.
-    - visual_beat: what happens visually or narratively here to express the lyrics and music.
+    - visual_beat: what happens visually or narratively here to express the lyrics and music,
+      including how light, contrast, and color temperature shift with the section's energy.
     - camera_energy: how shot scale, pacing, and performance intensity should feel here.
 - concept: two to four sentences on the visual idea that ties the video together, grounded directly
-  in 'interpretation' (meaning, tone, music_feel, and visual_motifs).
+  in 'interpretation' (meaning, tone, music_feel, and visual_motifs). Weave three threads through
+  the video rather than illustrating it lyric by lyric: a grounded performance anchor (the
+  performers in one or two primary performance spaces alongside the remaining story/cutaway sets),
+  a wordless story or metaphor thread with its own physical cause and effect that carries the
+  song's emotional subtext, and tactile sensory cutaways (texture, light, hands, weather) used as
+  rhythmic punctuation.
 - characters: every distinct singer, vocalist, or on-camera band/group member indicated by the
   style brief, section headers, or lyrics (one entry for a solo track; two for a duet; one per
   member or named character for a band, group, or theatrical piece). Match every character's gender
@@ -425,13 +431,18 @@ Rules:
   (no hands, microphones, hair or foreground objects across the mouth). In still_prompt for
   'lipsync' shots, keep the singer's mouth relaxed, softly closed, or barely parted (never
   wide-open mid-scream) so audio-driven lip-sync models animate naturally from the vocal track
-  and performance fallbacks stay consistent.
-- Character close_up framing: frame head-and-shoulders or the full face (forehead to chin) with
-  both eyes and mouth clearly inside the frame. Never ask for extreme mouth-only or eye-only
-  macros on character shots, which crop off the head and break face framing checks. On close_up
-  and medium_close shots, describe ONLY face, neck, shoulders, upper torso, and raised hands—never
-  mention boots, shoes, feet, legs, lower skirt hems, or ground/floor at their feet, and never
-  write 'waist up' or 'medium shot' for a medium_close shot.
+  and performance fallbacks stay consistent. Vary framing (alternate close_up and medium_close),
+  off-center rule-of-thirds placement, head angle (slight three-quarter vs frontal), posture, and
+  lighting depth across consecutive lipsync shots—never repeat the same dead-center symmetrical
+  passport mugshot.
+- Character close_up framing: frame from just above the head to the collarbone so the face fills
+  at least a third of the frame height, with both eyes and mouth clearly inside the frame. Never
+  write
+  "from the chest up" or "upper chest up" for close_up; that is medium_close. Never ask for
+  extreme mouth-only or eye-only macros on character shots, which crop off the head and break
+  face framing checks. On close_up and medium_close shots, describe ONLY face, neck, shoulders,
+  upper torso, and raised hands—never mention boots, shoes, feet, legs, lower skirt hems, or
+  ground/floor at their feet, and never write 'waist up' or 'medium shot' for a medium_close shot.
 - Shots given as 'performance' have no vocals. Keep them as 'performance' (performer visibly on
   camera, not singing) or change them to 'broll' (no performer) where a cutaway serves the song,
   without putting more than two 'broll' shots in a row. Never leave type as 'performance' if
@@ -440,18 +451,28 @@ Rules:
 - Shots given as 'broll' are cutaways: the vocal plays over them and no singer is shown. Keep
   them 'broll', with character and wardrobe null. NEVER place any named cast member, singer, or
   recognizable close-up human face in a 'broll' shot (any shot featuring a named character or
-  prominent person MUST be 'performance', not 'broll'). Show what the lyric is about: objects,
-  architecture, light, weather, props, inanimate figurines, or—when the setting genuinely calls
+  prominent person MUST be 'performance', not 'broll'). Show the feeling or subtext behind the
+  lyric rather than its literal nouns (a lyric about time running out becomes a half-packed
+  suitcase by the door, not a giant hourglass), using objects, architecture, light, weather, props,
+  inanimate figurines, or—when the setting genuinely calls
   for atmosphere (such as a club or concert)—anonymous distant backlit silhouettes, blurred
-  background crowd motion, or hands-only detail inserts with no recognizable faces. Keep the main
+  background crowd motion, or hands-only detail inserts with no recognizable faces. Vary b-roll
+  subjects across architecture, weather, light, reflections, and hands/footsteps—never reuse the
+  same hero prop in more than two cutaways unless the lyrics explicitly return to it. Keep the main
   subject sharply in focus (never ask for a completely out-of-focus or blurry whole frame). Still
   give every shot a framing (close_up, medium_close, medium or wide): never null, even on a
   cutaway.
 - Match detail to shot size on BOTH singer shots and 'broll' cutaways. Small details (identifying
-  marks, jewelry, cuffs, clock hands, inscriptions, small props, screen content) belong in
-  close_up or medium_close shots only; never ask for tiny altered object parts in a wide shot. In
+  marks, jewelry, cuffs, fabric texture, small props) belong in close_up or medium_close shots
+  only; never ask for tiny altered object parts in a wide shot. In
   medium and wide shots, describe pose, silhouette, scale against architecture, and action, not
   fine detail.
+- Keep every shot within what AI video models render reliably: one primary subject action and at
+  most one camera move per shot. On close_up shots keep the camera static or on a slow push-in or
+  pull-back (never an orbit, crane, whip pan, or zoom). Unless the song specifically needs them,
+  avoid mirrors or reflections of performers, readable text (signs, screens, clock faces, pages),
+  objects passed from hand to hand, full-body spins, and people or objects crossing in front of
+  the singer's face.
 - State absences affirmatively: image models often draw nouns named after 'no' (e.g. 'no minute
   hand' draws a minute hand). Whenever a part is missing or excluded, describe what IS visibly
   present in its place (e.g. 'clock dial displaying only a single short hour hand on a bare brass
@@ -467,9 +488,17 @@ Rules:
   rather than literally illustrating isolated lyric words.
 - Use the position in the song and the section to shape energy: build tension toward
   choruses, release in them, hold still where the song is stripped back. Match energy to
-  intensity (0 calm to 1 peak).
+  intensity (0 calm to 1 peak). In the last shots before a chorus or drop, tighten the framing and
+  add movement in the frame; land the first shot of the chorus or drop on the section's most
+  striking, open frame.
 - Vary framing between neighbouring shots, and stay consistent with the shots already directed.
-- Shape the video like the song. First verse: restrained, one look. First chorus: the first
+- Eye trace: across short neighbouring shots (under about 2.5 seconds), keep the main subject in
+  roughly the same part of the frame while changing shot scale, so the eye lands without
+  searching. When cutting on movement, keep the direction of movement or camera travel the same
+  across the cut.
+- Shape the video like the song. Open on a striking, specific image in the very first shot (a
+  strong silhouette, a face in dramatic light, a telling detail) rather than a slow empty
+  establishing pan. First verse: restrained, one look. First chorus: the first
   escalation, so change the set, the framing or the light from the verse. Second verse: never a
   repeat of the first; add a complication (a new angle, set, prop or costume beat). Bridge: break
   the pattern of the shots before it (a different set, light or pace). Final chorus: the payoff,
@@ -872,16 +901,28 @@ PLATE_NOTE = (
     "reference image shows the location: place the singer in that location and match its layout, "
     "lighting and color grade exactly."
 )
+#: Prepended to every close-up still of a singer. Sized to clear qc.image.min_face_fraction
+#: for close_up (0.30) with margin.
+CLOSE_UP_SIZE_ANCHOR = (
+    "Tight close-up portrait: the face fills at least a third of the frame height, framed from "
+    "just above the head to the collarbone (not chest-up)."
+)
 CAMERA_PLACEMENT_NOTE = (
     "Camera positioned in open floor space at human eye height; no solid furniture intersecting "
     "or occluding the subject."
 )
 _FRAMING_SCALE_NOTE = {
-    Framing.CLOSE_UP: CAMERA_PLACEMENT_NOTE,
+    Framing.CLOSE_UP: (
+        "Camera positioned in open floor space at human eye height; tight head-and-shoulders "
+        "close-up with candid off-center framing, natural head angle, and organic in-scene "
+        "posture (do not copy the stiff centered frontal pose of the reference portrait), "
+        "with no solid furniture intersecting or occluding the subject."
+    ),
     Framing.MEDIUM_CLOSE: (
         "Camera positioned in open floor space at human eye height; chest-up medium close-up "
-        "with natural head-to-shoulder proportions and no solid furniture intersecting or "
-        "occluding the subject."
+        "with natural head-to-shoulder proportions, candid off-center blocking, and relaxed "
+        "in-scene posture (do not copy the stiff centered frontal pose of the reference "
+        "portrait), with no solid furniture intersecting or occluding the subject."
     ),
     Framing.MEDIUM: (
         "Camera positioned in open floor space at human eye height; waist-up or knee-up medium "
@@ -1486,12 +1527,25 @@ def compose_still_prompt(
     """
     bible = manifest.visual_bible
     raw_still = (shot.still.prompt_override or shot.still_prompt).strip()
+    non_portrait_performance = shot.type is ShotType.PERFORMANCE and (
+        is_rear_view_prompt(raw_still)
+        or is_silhouette_prompt(raw_still)
+        or is_hands_detail_prompt(raw_still)
+    )
     parts: list[str] = []
-    if shot.type.shows_singer and not _EXPLICIT_TIGHT_FRAMING_RE.search(raw_still):
-        if shot.framing is Framing.CLOSE_UP:
-            parts.append("Tight head-and-shoulders close-up portrait (face large in frame).")
-        elif shot.framing is Framing.MEDIUM_CLOSE:
-            parts.append("Chest-up medium close-up shot (head and upper chest fill frame).")
+    if shot.type.shows_singer and shot.framing is Framing.CLOSE_UP and not non_portrait_performance:
+        # Always, even when the planner's prompt already says "close-up": image models read a
+        # bare "close-up" (often "from the upper chest up") as chest-up, and the face lands at
+        # ~26% of frame height against face_framing's 30% minimum. A concrete size cue fixed
+        # every such failure when the retry rewrite added it, so put it in the first take.
+        parts.append(CLOSE_UP_SIZE_ANCHOR)
+    elif (
+        shot.type.shows_singer
+        and shot.framing is Framing.MEDIUM_CLOSE
+        and not non_portrait_performance
+        and not _EXPLICIT_TIGHT_FRAMING_RE.search(raw_still)
+    ):
+        parts.append("Chest-up medium close-up shot (head and upper chest fill frame).")
     parts.append(raw_still)
     scene = bible.find_set(shot.setting)
     ref_note = _still_reference_note(plate_attached, reference_notation, bound_references)
@@ -1562,9 +1616,12 @@ def compose_still_prompt(
         else:
             parts.append("Face clearly visible, mouth unobstructed.")
     if shot.type.shows_singer:
-        parts.append(_FRAMING_SCALE_NOTE.get(shot.framing, CAMERA_PLACEMENT_NOTE))
-        raw_still_text = shot.still.prompt_override or shot.still_prompt
-        rear_view = shot.type is not ShotType.LIPSYNC and is_rear_view_prompt(raw_still_text)
+        parts.append(
+            CAMERA_PLACEMENT_NOTE
+            if (non_portrait_performance and shot.framing is not Framing.WIDE)
+            else _FRAMING_SCALE_NOTE.get(shot.framing, CAMERA_PLACEMENT_NOTE)
+        )
+        rear_view = shot.type is not ShotType.LIPSYNC and is_rear_view_prompt(raw_still)
         if rear_view:
             parts.append(
                 "Camera behind subject (rear view): show only the back of the head and back of "

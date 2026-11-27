@@ -6,10 +6,12 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
+from typing import Any
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mvdirector.llm import LLMClient, image_block, text_block
 from mvdirector.models import AssetKind, Framing, Manifest, Shot, ShotType
@@ -185,6 +187,47 @@ class VisionVerdict(BaseModel):
     fix: str = ""
 
 
+_MAX_IDENTITY_REASON_CHARS = 500
+
+
+class FaceIdentityVerdict(BaseModel):
+    """A face-only identity comparison: is the cropped face the reference person?"""
+
+    model_config = ConfigDict(extra="ignore")
+    same_person: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    reason: str = ""
+
+    @field_validator("same_person", mode="before")
+    @classmethod
+    def _reject_bool_score(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("same_person must be a number in [0, 1], not a boolean")
+        return value
+
+    @field_validator("reason", mode="after")
+    @classmethod
+    def _truncate_reason(cls, value: str) -> str:
+        cleaned = " ".join(value.split())
+        if len(cleaned) <= _MAX_IDENTITY_REASON_CHARS:
+            return cleaned
+        return cleaned[: _MAX_IDENTITY_REASON_CHARS - 1].rstrip() + "…"
+
+
+_FACE_IDENTITY_SYSTEM = """\
+You compare faces for identity only, like a casting director checking continuity.
+
+You get one or more REFERENCE images of a character's face, then one FACE TO CHECK cropped from a
+generated image. Decide whether the face to check is the same person as the reference.
+
+Judge only stable facial structure: overall face shape, eye shape and spacing, brow line, nose
+shape, lips, jaw and chin, cheekbones, and permanent marks such as freckles or moles. Ignore
+everything that can change between shots: clothing, hair styling, makeup intensity, lighting,
+color grade, expression, mouth shape (the person may be singing), head angle, and image quality.
+
+Return same_person from 0 to 1: 1.0 = clearly the same person, 0.5 = cannot tell, 0.0 = clearly a
+different person. Give a one-sentence reason naming the features you compared."""
+
+
 MAX_UNAVAILABLE_IN_A_ROW = 3
 
 
@@ -202,20 +245,27 @@ class VisionJudge:
     def __init__(self, llm: LLMClient, *, blind_observer: bool = False) -> None:
         self._llm = llm
         self._blind_observer = blind_observer
+        self._lock = threading.Lock()
         self._disabled_reason: str | None = None
         self._unavailable_in_a_row = 0
 
     @property
     def disabled_reason(self) -> str | None:
         """Why the judge stopped working for this run, or None while it is available."""
-        return self._disabled_reason
+        with self._lock:
+            return self._disabled_reason
 
-    def disable(self, reason: str) -> None:
-        """Stop sending requests for the rest of the run."""
-        self._disabled_reason = reason
+    def disable(self, reason: str) -> bool:
+        """Stop sending requests for the rest of the run. Returns True on first transition."""
+        with self._lock:
+            if self._disabled_reason is not None:
+                return False
+            self._disabled_reason = reason
+            return True
 
     def record_success(self) -> None:
-        self._unavailable_in_a_row = 0
+        with self._lock:
+            self._unavailable_in_a_row = 0
 
     def record_unavailable(self, error: str) -> bool:
         """Count a failure that retrying cannot fix. Returns True when the judge gives up.
@@ -224,14 +274,35 @@ class VisionJudge:
         wait out a long timeout. A single invalid reply does not count: that is a bad answer from
         a working model, and the next request may be fine.
         """
-        self._unavailable_in_a_row += 1
-        if self._unavailable_in_a_row < MAX_UNAVAILABLE_IN_A_ROW:
-            return False
-        self.disable(
-            f"the model was unavailable {MAX_UNAVAILABLE_IN_A_ROW} times in a row "
-            f"(last error: {error})"
+        with self._lock:
+            if self._disabled_reason is not None:
+                return False
+            self._unavailable_in_a_row += 1
+            if self._unavailable_in_a_row < MAX_UNAVAILABLE_IN_A_ROW:
+                return False
+            self._disabled_reason = (
+                f"the model was unavailable {MAX_UNAVAILABLE_IN_A_ROW} times in a row "
+                f"(last error: {error})"
+            )
+            return True
+
+    def judge_face_identity(
+        self, face: np.ndarray, reference_faces: list[Path]
+    ) -> FaceIdentityVerdict:
+        """Compare a face crop with the character's reference face panels (identity only).
+
+        The face-only crop matters: given whole images, the model weighs costume as heavily as
+        the face, so a different person in a matching outfit scores as a near-match.
+        """
+        content = []
+        for path in reference_faces:
+            content += [text_block("REFERENCE face:"), image_block(path)]
+        content += [text_block("FACE TO CHECK:"), image_block(face)]
+        verdict = self._llm.complete_json(
+            system=_FACE_IDENTITY_SYSTEM, content=content, schema=FaceIdentityVerdict
         )
-        return True
+        self.record_success()
+        return verdict
 
     def judge(
         self,

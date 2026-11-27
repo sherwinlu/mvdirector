@@ -89,9 +89,52 @@ def test_doc2_config_defaults_and_keep_still_on_video_fail_wiring(
     shot.still.selected_attempt = 1
     shot.video.attempts_allowed = len(shot.video.attempts) + 1
     runner.run([AssetKind.VIDEO], shot_ids=[shot.id])
-    assert shot.video.status is AssetStatus.EXHAUSTED
     assert shot.still.status is AssetStatus.PENDING
     assert shot.still.selected_attempt is None
+    # The video goes back to pending too: left EXHAUSTED it would never re-render from the new
+    # still, and its kept clip would no longer match the still it was made from.
+    assert shot.video.status is AssetStatus.PENDING
+    assert shot.video.selected_attempt is None
+
+
+def test_keep_still_false_rerenders_video_from_new_still_after_exhaustion(
+    project, analysis, sample_png, sample_mp4
+) -> None:
+    """Regression: a video exhaustion that resets the still must not strand the video."""
+    project.config.retry.keep_still_on_video_fail = False
+    project.config.retry.max_attempts = 1
+    manifest = build_manifest(project.config, analysis, "lyrics", "style", llm=None)
+    shot = manifest.shots[0]
+    shot.type = ShotType.BROLL
+    shot.still.attempts_allowed = 1
+    shot.video.attempts_allowed = 1
+    fake = FakeComfy(png=sample_png, mp4=sample_mp4)
+
+    def _runner(video_passes: list[bool]) -> ShotRunner:
+        return ShotRunner(
+            project,
+            manifest,
+            ComfyClient(project.config.comfy, transport=fake.transport(), sleep=lambda _: None),
+            QualityGates(
+                image=ScriptedGate([True, True]),
+                video=ScriptedGate(video_passes),
+                face_analyzer=None,
+            ),
+            RetryPolicy(project.config.retry, project.config.seed, llm=None),
+            load_templates(project, ["t2i", "still", "lipsync", "i2v"]),
+            RunBudget(10),
+        )
+
+    _runner([False]).run([AssetKind.STILL, AssetKind.VIDEO], shot_ids=[shot.id])
+    assert shot.still.status is AssetStatus.PENDING
+    assert shot.video.status is AssetStatus.PENDING
+
+    # The next run renders a fresh still and then a video made from it.
+    _runner([True]).run([AssetKind.STILL, AssetKind.VIDEO], shot_ids=[shot.id])
+    assert shot.still.status is AssetStatus.PASSED
+    assert shot.still.selected_attempt == 2
+    assert shot.video.status is AssetStatus.PASSED
+    assert shot.video.selected_attempt == 2
 
 
 def test_pin_character_details_controls_still_motion_draft_grid_and_runner(
@@ -216,3 +259,69 @@ def test_pin_character_details_empty_appearance_and_closeup_facial_invariants(
         prompts.scrub_lower_body_wardrobe("She wears simple, flat leather shoes.", allow_empty=True)
         == ""
     )
+
+
+def test_reject_rate_survives_regeneration_and_later_approval(
+    project, analysis, sample_png, sample_mp4
+) -> None:
+    """Regression: the runner clears ``shot.review`` on regeneration, which erased rejections.
+
+    After the usual reject -> run -> approve cycle the human reject rate read 0%.
+    """
+    from mvdirector import report
+
+    manifest = build_manifest(project.config, analysis, "lyrics", "style", llm=None)
+    shot = manifest.shots[0]
+    shot.type = ShotType.BROLL
+    fake = FakeComfy(png=sample_png, mp4=sample_mp4)
+
+    def _run() -> None:
+        ShotRunner(
+            project,
+            manifest,
+            ComfyClient(project.config.comfy, transport=fake.transport(), sleep=lambda _: None),
+            QualityGates(
+                image=ScriptedGate([True] * 4), video=ScriptedGate([True] * 4), face_analyzer=None
+            ),
+            RetryPolicy(project.config.retry, project.config.seed, llm=None),
+            load_templates(project, ["t2i", "still", "lipsync", "i2v"]),
+            RunBudget(10),
+        ).run([AssetKind.STILL, AssetKind.VIDEO], shot_ids=[shot.id])
+
+    _run()
+    review.reject(manifest, shot.id, "too dark", AssetKind.VIDEO, project.config)
+    _run()
+    review.reject(manifest, shot.id, "still too dark", AssetKind.VIDEO, project.config)
+    _run()
+    assert shot.review.decision is None  # the runner cleared the last rejection
+    review.approve(manifest, shot.id)
+    assert shot.rejection_count == 2
+
+    stats = report.attempt_stats(manifest)
+    assert stats.rejected_count == 1
+    assert stats.total_rejections == 2
+    assert stats.approved_count == 1
+    assert stats.reviewed_count == 1
+    assert stats.human_reject_rate == 1.0
+
+    # The counter is persisted, so a reloaded manifest reports the same numbers.
+    project.save_manifest(manifest)
+    assert report.attempt_stats(project.load_manifest()).to_dict() == stats.to_dict()
+
+
+def test_rejection_count_is_backward_compatible_and_validated(project, analysis) -> None:
+    import json
+
+    from pydantic import ValidationError
+
+    from mvdirector.models import Manifest
+
+    manifest = build_manifest(project.config, analysis, "lyrics", "style", llm=None)
+    raw = json.loads(manifest.model_dump_json())
+    for shot in raw["shots"]:
+        shot.pop("rejection_count")  # a manifest written before the field existed
+    assert Manifest.model_validate(raw).shots[0].rejection_count == 0
+    for bad in (True, -1, 1.5):
+        raw["shots"][0]["rejection_count"] = bad
+        with pytest.raises(ValidationError):
+            Manifest.model_validate(raw)

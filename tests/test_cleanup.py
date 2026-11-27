@@ -229,3 +229,54 @@ def test_plan_cleanup_skips_escaping_symlink_in_attempt_path(tmp_path, project, 
     assert winner not in plan.files
     cleanup.apply_cleanup(project, manifest, plan)
     assert outside_secret.read_bytes() == b"secret"
+
+
+def test_symlinked_selected_attempt_still_protects_its_in_project_target(project, manifest):
+    """Regression: a selected take stored as a symlink must keep the file it points at.
+
+    Skipping symlinked attempts entirely (to avoid resolving links that escape the project)
+    dropped their targets from the keep set, so the orphan scan deleted the selected take's
+    real file.
+    """
+    shot = manifest.shots[0]
+    target = project.asset_path(shot, AssetKind.STILL, 7)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"selected pixels")
+    link = project.asset_path(shot, AssetKind.STILL, 1)
+    link.symlink_to(target.name)
+    shot.still.attempts.append(
+        Attempt(
+            number=1,
+            strategy=RetryStrategy.INITIAL,
+            seed=1,
+            prompt="p",
+            path=project.rel(link.parent) + "/" + link.name,
+        )
+    )
+    shot.still.status, shot.still.selected_attempt = AssetStatus.PASSED, 1
+    upscaled_target = project.path("assets/videos") / f"{shot.id}_a09_upscaled.mp4"
+    upscaled_target.parent.mkdir(parents=True, exist_ok=True)
+    upscaled_target.write_bytes(b"upscaled")
+    upscaled_link = upscaled_target.with_name(f"{shot.id}_a02_upscaled.mp4")
+    upscaled_link.symlink_to(upscaled_target.name)
+    shot.video.upscaled_path = f"assets/videos/{upscaled_link.name}"
+    _save(project, manifest)
+
+    plan = api.clean(project, delete=True)
+
+    assert target not in plan.files and target.read_bytes() == b"selected pixels"
+    assert upscaled_target not in plan.files and upscaled_target.read_bytes() == b"upscaled"
+    assert link.is_symlink() and upscaled_link.is_symlink()
+
+
+@pytest.mark.parametrize("days", [100_000_000, 999_999_999, 10**12])
+def test_huge_retention_days_keeps_everything_instead_of_overflowing(project, manifest, days):
+    shot = manifest.shots[0]
+    _take(project, shot, AssetKind.VIDEO, 1)
+    _take(project, shot, AssetKind.VIDEO, 2, selected=True)
+    _save(project, manifest)
+    plan = cleanup.plan_cleanup(project, manifest, retention_days=days)
+    assert plan.files == []
+    res = CliRunner().invoke(app, ["clean", "--retention-days", str(days), "-p", str(project.root)])
+    assert res.exit_code == 0, res.output
+    assert "Would delete 0 superseded, 0 orphaned" in res.output

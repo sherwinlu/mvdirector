@@ -411,6 +411,19 @@ _COVERAGE_STOPWORDS = frozenset(
         "together",
         "toward",
         "towards",
+        # Directional adverbs from motion prompts ("a gentle forward push", "tilts upward")
+        "backward",
+        "backwards",
+        "downward",
+        "downwards",
+        "forward",
+        "forwards",
+        "inward",
+        "onward",
+        "outward",
+        "sideways",
+        "upward",
+        "upwards",
         "under",
         "until",
         "upon",
@@ -537,6 +550,13 @@ _COVERAGE_STOPWORDS = frozenset(
         "low",
         "medium",
         "medium-close",
+        # Hyphenated shot jargon that reads as a noun phrase ("at eye-level", "a two-shot")
+        "deep-focus",
+        "eye-level",
+        "high-angle",
+        "low-angle",
+        "three-quarter",
+        "two-shot",
         "midground",
         "mist",
         "moment",
@@ -1047,33 +1067,113 @@ def _normalize_phrase(text: str) -> str:
     return " ".join(norm)
 
 
-def _extract_noun_candidates(text: str) -> tuple[set[str], dict[str, str]]:
-    """Return ``(candidates, phrase_to_head)`` of normalized noun candidates in ``text``."""
+# Words that end a noun phrase: once a chunk is followed by one of these (or by punctuation or
+# the end of the text), its last word is a noun rather than the verb of a clause.
+_PHRASE_CLOSERS = frozenset(
+    {
+        "above",
+        "across",
+        "against",
+        "along",
+        "amid",
+        "among",
+        "and",
+        "around",
+        "as",
+        "at",
+        "behind",
+        "below",
+        "beneath",
+        "beside",
+        "between",
+        "beyond",
+        "but",
+        "by",
+        "for",
+        "from",
+        "in",
+        "inside",
+        "into",
+        "near",
+        "nor",
+        "of",
+        "on",
+        "onto",
+        "or",
+        "over",
+        "past",
+        "through",
+        "to",
+        "toward",
+        "towards",
+        "under",
+        "upon",
+        "while",
+        "with",
+        "within",
+        "without",
+    }
+)
+# Stopword nouns that usually start a clause in shot prompts ("the camera holds steady").
+_CLAUSE_SUBJECTS = frozenset({"camera", "focus", "frame", "lens", "light", "lights", "shot"})
+_NEXT_WORD_RE = re.compile(r"[ \t]*([a-z]+)?")
+_DETERMINER_WORD_RE = re.compile(_DETERMINER_PREFIX)
+
+
+def _extract_noun_candidates(text: str) -> tuple[set[str], dict[str, str], set[str]]:
+    """Return ``(noun_phrases, phrase_to_head, loose_words)`` normalized from ``text``.
+
+    ``noun_phrases`` come from determiner/preposition-led chunks that are closed by punctuation,
+    the end of the text, or a preposition/conjunction ("a brass lantern on wet stone"), which is
+    reliable evidence the last word is a noun. ``loose_words`` holds everything weaker: heads of
+    chunks running into a verb ("the lantern swings" -> "swing") and every remaining content word.
+    They only count as mentions of a noun some closed chunk in the project already established.
+    """
     folded = ascii_fold(text).lower()
     candidates: set[str] = set()
     phrase_to_head: dict[str, str] = {}
+    loose: set[str] = set()
 
     for match in _CHUNK_RE.finditer(folded):
         raw_words = match.group(1).split()
+        closed = False
+        if len(raw_words) == 2 and raw_words[1] in _PHRASE_CLOSERS:
+            raw_words.pop()
+            closed = True
+        else:
+            nxt = _NEXT_WORD_RE.match(folded, match.end())
+            next_word = nxt.group(1) if nxt else None
+            # A chunk's last word reads as a verb when an object or adverb follows it
+            # ("pushes the door", "swings gently"); otherwise it is taken as the noun.
+            closed = (
+                next_word is None
+                or next_word in _PHRASE_CLOSERS
+                or not (_DETERMINER_WORD_RE.fullmatch(next_word) or next_word.endswith("ly"))
+            )
+        stripped = False
         while raw_words and (
             raw_words[0] in _COVERAGE_STOPWORDS
             or raw_words[0].endswith("ly")
             or len(raw_words[0]) < 3
         ):
+            stripped = stripped or raw_words[0] in _CLAUSE_SUBJECTS
             raw_words.pop(0)
         if not raw_words:
             continue
         head = _singularize(raw_words[-1])
         if len(head) < 3 or head in _COVERAGE_STOPWORDS or head.endswith(("ly", "ing", "ed")):
             continue
+        # "the camera remains rooted": once a subject noun is dropped as a stopword, the word
+        # left over is the clause's verb, not a noun.
+        bucket = candidates if closed and not stripped else loose
         if len(raw_words) == 2:
             mod = _singularize(raw_words[0])
             if len(mod) >= 3 and mod not in _COVERAGE_STOPWORDS and not mod.endswith("ly"):
                 phrase = f"{mod} {head}"
-                candidates.add(phrase)
+                bucket.add(phrase)
                 phrase_to_head[phrase] = head
         if head not in _MATERIAL_MODIFIERS:
-            candidates.add(head)
+            bucket.add(head)
             phrase_to_head[head] = head
 
     for token in _WORD_RE.findall(folded):
@@ -1087,10 +1187,9 @@ def _extract_noun_candidates(text: str) -> tuple[set[str], dict[str, str]]:
             or lemma.endswith("ed")
         ):
             continue
-        candidates.add(lemma)
-        phrase_to_head.setdefault(lemma, lemma)
+        loose.add(lemma)
 
-    return candidates, phrase_to_head
+    return candidates, phrase_to_head, loose
 
 
 def _entity_tokens(text: str) -> set[str]:
@@ -1099,8 +1198,9 @@ def _entity_tokens(text: str) -> set[str]:
     out: set[str] = set()
     if norm:
         out.add(norm)
-    cands, _ = _extract_noun_candidates(text.replace("_", " "))
+    cands, _, bare = _extract_noun_candidates(text.replace("_", " "))
     out.update(cands)
+    out.update(bare)
     return out
 
 
@@ -1448,8 +1548,14 @@ def lint_reference_coverage(
             if section not in seclist:
                 seclist.append(section)
 
-    for shot in shots:
-        cands, head_map = _extract_noun_candidates(shot.text)
+    extracted = [_extract_noun_candidates(shot.text) for shot in shots]
+    # A loose word counts as a noun mention only once some shot uses it in a closed noun chunk
+    # ("beside a lantern."). Otherwise every verb, adverb and camera direction ("forward",
+    # "maintain", "level") recurs across sections and floods the report.
+    noun_vocabulary: set[str] = {cand for cands, _, _ in extracted for cand in cands}
+    for shot, (noun_phrases, head_map, loose_words) in zip(shots, extracted, strict=True):
+        cands = noun_phrases | (loose_words & noun_vocabulary)
+        head_map = {**{word: word for word in loose_words}, **head_map}
         phrase_heads.update(head_map)
         norm_text = _normalize_phrase(shot.text)
         padded_norm_text = f" {norm_text} " if norm_text else ""

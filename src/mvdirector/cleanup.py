@@ -53,6 +53,14 @@ def _has_symlink_component(root: Path, relative: str | Path) -> bool:
     return False
 
 
+def _resolve_in_project(project: Project, relative: str) -> Path | None:
+    """Resolved path for a manifest entry, or None when it (or a link on it) leaves the project."""
+    try:
+        return project.path(relative)
+    except ConfigError:
+        return None
+
+
 def _is_generation_file(project: Project, path: Path) -> bool:
     """True for a file the runner writes: ``assets/{stills,videos}/<shot>_aNN.{png,mp4}``.
 
@@ -105,7 +113,11 @@ def plan_cleanup(
             ref_now = ref_now.replace(tzinfo=timezone.utc)
         else:
             ref_now = ref_now.astimezone(timezone.utc)
-        cutoff = ref_now - timedelta(days=retention_days)
+        try:
+            cutoff = ref_now - timedelta(days=retention_days)
+        except OverflowError:
+            # A window reaching past year 1 keeps everything rather than crashing.
+            cutoff = datetime.min.replace(tzinfo=timezone.utc)
 
     plan = CleanupPlan()
     kept: set[Path] = set()
@@ -114,20 +126,25 @@ def plan_cleanup(
     for shot in manifest.shots:
         for kind in AssetKind:
             state = shot.asset(kind)
-            if state.upscaled_path and not _has_symlink_component(
-                project.root, state.upscaled_path
-            ):
-                kept.add(project.path(state.upscaled_path))
+            if state.upscaled_path:
+                upscaled = _resolve_in_project(project, state.upscaled_path)
+                if upscaled is not None:
+                    kept.add(upscaled)
             settled = _is_settled(state)
             for attempt in state.attempts:
                 if not attempt.path:
                     continue
-                if _has_symlink_component(project.root, attempt.path):
+                path = _resolve_in_project(project, attempt.path)
+                if path is None:
                     continue
-                path = project.path(attempt.path)
                 if not settled or attempt.number == state.selected_attempt:
+                    # A kept take reached through a symlink keeps the file the link points at.
                     kept.add(path)
-                elif path.is_file() and _is_generation_file(project, path):
+                elif (
+                    not _has_symlink_component(project.root, attempt.path)
+                    and path.is_file()
+                    and _is_generation_file(project, path)
+                ):
                     superseded_candidates.append(path)
                     if cutoff is not None:
                         ts = _parse_utc(attempt.created_at) or _file_mtime_utc(path)
@@ -211,7 +228,7 @@ def apply_cleanup(project: Project, manifest: Manifest, plan: CleanupPlan) -> No
                 if (
                     attempt.path
                     and not _has_symlink_component(project.root, attempt.path)
-                    and project.path(attempt.path) in gone
+                    and _resolve_in_project(project, attempt.path) in gone
                 ):
                     attempt.path = None
     for path in plan.files:

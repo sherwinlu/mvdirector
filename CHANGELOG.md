@@ -7,10 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 ### Added
-- **Pre-spend reference coverage lint & generic N-slot reference binding:** Added zero-LLM `lint_reference_coverage` (`mvdirector.generation.preflight`, `mvdirector.api.lint_assets`, `mvd assets --lint`), configurable `planning.max_props` (default `3`, `0..30`), priority-ordered generic N-slot binding (`lead > set > secondaries > props` across `prop_image_N` and `reference_image_K_face`) with optional workflow-node pruning and `@imageN` prompt tag alignment.
+- **Pre-spend reference coverage lint & generic N-slot reference binding:** Added zero-LLM `lint_reference_coverage` (`mvdirector.generation.preflight`, `mvdirector.api.lint_assets`, `mvd assets --lint`; a word counts as a noun only once some prompt uses it in a closed noun phrase, and undeclared findings tell you to declare the prop or set before generating it), configurable `planning.max_props` (default `3`, `0..30`), priority-ordered generic N-slot binding (`lead > set > secondaries > props` across `prop_image_N` and `reference_image_K_face`) with optional workflow-node pruning and `@imageN` prompt tag alignment.
 - **Opening-hook priority:** Added `planning.opening_seconds` (`8.0s`), `retry.opening_extra_attempts` (`2`), `qc.opening_threshold_margin`, computed `Shot.is_opening` / `Shot.is_opening_at(...)` (no schema migration), planner opening-window guidance, and `ReviewReason.OPENING` review queuing (including in `light` mode).
-- **Rejection-aware attempt statistics:** Added `report.attempt_stats(manifest)` (mean attempts per passed still/video split by shot type plus human-reject rate from `Review.decision`), exposed via `mvdirector.api.attempt_stats` and `mvd qc-report`.
-- **Multi-tenant & workflow execution primitives:** Added `retry.keep_still_on_video_fail` (default `true`), `planning.pin_character_details` (default `true`), `ComfyClient.interrupt()` (`POST /interrupt`), and age-based retention pruning via `cleanup.plan_cleanup(..., retention_days=..., now=...)` and `mvd clean --retention-days`.
+- **Rejection-aware attempt statistics:** Added `report.attempt_stats(manifest)` (mean attempts per passed still/video split by shot type plus the human-reject rate: the share of reviewed shots a reviewer rejected at least once, and `total_rejections`), exposed via `mvdirector.api.attempt_stats` and `mvd qc-report`.
+- **Multi-tenant & workflow execution primitives:** Added `retry.keep_still_on_video_fail` (default `true`; when `false`, a rejected or exhausted video sends both the still and the video back to pending so the video re-renders from the new still), `planning.pin_character_details` (default `true`), `ComfyClient.interrupt()` (`POST /interrupt`), and age-based retention pruning via `cleanup.plan_cleanup(..., retention_days=..., now=...)` and `mvd clean --retention-days`.
+
+### Changed
+- **Durable rejection count (`Shot.rejection_count`, manifest field, default `0`):** every reviewer rejection now increments a per-shot counter that survives regeneration, because the runner clears `shot.review` whenever a shot re-renders. Manifests without the field load unchanged (`schema_version` stays `1`); builds older than this one reject manifests that carry it, as with any added field.
 
 ## [0.8.0b4] - 2026-11-27
 

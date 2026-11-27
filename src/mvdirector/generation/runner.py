@@ -1980,8 +1980,16 @@ class ShotRunner:
             state.status = AssetStatus.EXHAUSTED
             state.selected_attempt = best.number if best else None
             state.clear_pending_overrides()
-            if kind is AssetKind.VIDEO and not self._project.config.retry.keep_still_on_video_fail:
-                shot.still.reset(self._project.config.retry.max_attempts)
+            restart_from_still = (
+                kind is AssetKind.VIDEO and not self._project.config.retry.keep_still_on_video_fail
+            )
+            if restart_from_still:
+                # Re-render the still from scratch. The clips made from the old still no longer
+                # match it, so the video goes back to pending as well and follows once the new
+                # still passes; left EXHAUSTED, it would never be rendered from the new still.
+                max_attempts = self._project.config.retry.max_attempts
+                shot.still.reset(max_attempts)
+                state.reset(max_attempts)
             self._project.save_manifest(self._manifest)
         self._emit(
             RunEvent(
@@ -1992,12 +2000,18 @@ class ShotRunner:
                 generations_used=self._budget.used,
             )
         )
+        if restart_from_still:
+            outcome = "regenerating the still, then the video (retry.keep_still_on_video_fail)"
+        elif best:
+            outcome = f"keeping attempt {best.number} for review"
+        else:
+            outcome = "nothing usable was produced"
         log.warning(
             "%s %s exhausted after %d attempts; %s",
             shot.id,
             kind.value,
             len(state.attempts),
-            f"keeping attempt {best.number} for review" if best else "nothing usable was produced",
+            outcome,
         )
 
     def _effective_mute_spans(self, shot: Shot) -> list[tuple[float, float]]:

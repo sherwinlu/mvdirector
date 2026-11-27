@@ -1572,7 +1572,16 @@ def assets(
                     f"  [{finding.entity_kind}:{status}] {finding.noun} "
                     f"({finding.count} shots{sec_note}: {shots_note})"
                 )
-                typer.echo(f"    suggest: {finding.suggested_command}")
+                if finding.declared:
+                    typer.echo(f"    suggest: {finding.suggested_command}")
+                else:
+                    # The generate commands only accept props/sets the visual bible declares,
+                    # so running the suggestion before declaring it fails ("No prop matching").
+                    section = "settings" if finding.entity_kind == "set" else "props"
+                    typer.echo(
+                        f"    suggest: declare it under visual_bible.{section} in manifest.json, "
+                        f"then: {finding.suggested_command}"
+                    )
 
 
 def _generate(

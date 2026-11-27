@@ -401,3 +401,60 @@ def test_lint_chunk_re_skips_articles_after_prepositions_and_detects_three_lette
     assert {"key", "hat", "map"}.issubset(by_noun)
     for noise in ("pan", "eye", "sky", "red", "dim", "low", "cut"):
         assert noise not in by_noun
+
+
+def test_lint_does_not_flag_verbs_and_camera_directions_as_props() -> None:
+    """Regression: every recurring content word used to become a prop finding.
+
+    On real 50-150 shot manifests the bare-token pass reported ~140 findings per project,
+    led by words like "forward", "remain" and "maintain".
+    """
+    prompts = [
+        "The camera remains fixed as she leans forward into the light.",
+        "The camera maintains a steady push forward while the lantern swings gently.",
+        "The camera remains still; she walks forward beside a brass lantern.",
+        "Slow push forward at eye-level, the camera holds as the lantern sways.",
+    ]
+    sections = ["Verse 1", "Chorus", "Verse 2", "Bridge"]
+    manifest = Manifest(
+        title="t",
+        duration=16.0,
+        fps=24,
+        shots=[
+            _shot(i + 1, section=sections[i], still_prompt=text) for i, text in enumerate(prompts)
+        ],
+    )
+    nouns = {f.noun for f in lint_reference_coverage(manifest)}
+    for noise in ("forward", "remain", "maintain", "swing", "walk", "push", "eye-level"):
+        assert noise not in nouns
+    # The lantern is established as a noun once ("beside a brass lantern."), so its other,
+    # verb-adjacent mentions still count toward the recurrence threshold.
+    assert "lantern" in nouns
+
+
+def test_cli_lint_tells_you_to_declare_undeclared_entities_before_generating(project) -> None:
+    """Regression: the suggested generate command fails for a prop the bible does not declare."""
+    manifest = Manifest(
+        title="t",
+        duration=12.0,
+        fps=24,
+        visual_bible=VisualBible(settings=[SetDesign(name="Neon Alley", description="wet alley")]),
+        shots=[
+            _shot(
+                1, section="Verse 1", still_prompt="A compass on the desk.", setting="Neon Alley"
+            ),
+            _shot(
+                2, section="Chorus", still_prompt="Close-up of the compass.", setting="Neon Alley"
+            ),
+            _shot(3, section="Outro", still_prompt="She holds the compass.", setting="Neon Alley"),
+        ],
+    )
+    project.save_manifest(manifest)
+    res = CliRunner().invoke(app, ["assets", "--lint", "-p", str(project.root)])
+    assert res.exit_code == 0, res.output
+    assert (
+        "suggest: declare it under visual_bible.props in manifest.json, then: "
+        "mvd props generate --prop compass"
+    ) in res.output
+    # A declared-but-unlocked set is directly actionable, so no declare step is suggested.
+    assert "suggest: mvd plates generate --set 'Neon Alley'" in res.output

@@ -220,10 +220,11 @@ class AttemptStatsSummary:
     mean_attempts_per_passed: float = 0.0
     p90_attempts: float = 0.0
     p90_multiplier: float = 0.0
-    reviewed_count: int = 0
-    approved_count: int = 0
-    rejected_count: int = 0
-    human_reject_rate: float = 0.0
+    reviewed_count: int = 0  # shots a reviewer approved or rejected at least once
+    approved_count: int = 0  # shots whose current decision is an approval
+    rejected_count: int = 0  # shots a reviewer rejected at least once
+    total_rejections: int = 0  # every rejection, counting repeat rejections of a shot
+    human_reject_rate: float = 0.0  # rejected_count / reviewed_count
     by_kind: dict[str, AttemptBucketStats] = field(default_factory=dict)
     by_shot_type: dict[str, AttemptBucketStats] = field(default_factory=dict)
 
@@ -283,6 +284,16 @@ class _BucketAcc:
         return self.stats
 
 
+def _rejections(shot: Shot) -> int:
+    """Times a reviewer rejected ``shot``, surviving the review reset on regeneration.
+
+    A manifest written before ``rejection_count`` existed only has the current decision, so a
+    shot rejected but not yet regenerated counts once.
+    """
+    pending_legacy = int(shot.review.decision is ReviewDecision.REJECTED)
+    return max(shot.rejection_count, pending_legacy)
+
+
 def attempt_stats(manifest: Manifest) -> AttemptStatsSummary:
     """Compute retry, attempt-multiplier, and human-rejection statistics for ``manifest``."""
     overall = _BucketAcc()
@@ -291,12 +302,16 @@ def attempt_stats(manifest: Manifest) -> AttemptStatsSummary:
 
     approved_count = 0
     rejected_count = 0
+    reviewed_count = 0
+    total_rejections = 0
 
     for shot in manifest.shots:
-        if shot.review.decision is ReviewDecision.APPROVED:
-            approved_count += 1
-        elif shot.review.decision is ReviewDecision.REJECTED:
-            rejected_count += 1
+        rejections = _rejections(shot)
+        approved = shot.review.decision is ReviewDecision.APPROVED
+        approved_count += approved
+        rejected_count += rejections > 0
+        reviewed_count += approved or rejections > 0
+        total_rejections += rejections
         shot_bucket = _shot_type_bucket(shot)
         for kind in (AssetKind.STILL, AssetKind.VIDEO):
             state = shot.asset(kind)
@@ -307,7 +322,6 @@ def attempt_stats(manifest: Manifest) -> AttemptStatsSummary:
             shot_acc[shot_bucket].record(state.status, attempts_count, errored)
 
     overall_stats = overall.finalize()
-    reviewed_count = approved_count + rejected_count
     reject_rate = round(rejected_count / reviewed_count, 4) if reviewed_count else 0.0
 
     return AttemptStatsSummary(
@@ -323,6 +337,7 @@ def attempt_stats(manifest: Manifest) -> AttemptStatsSummary:
         reviewed_count=reviewed_count,
         approved_count=approved_count,
         rejected_count=rejected_count,
+        total_rejections=total_rejections,
         human_reject_rate=reject_rate,
         by_kind={k: acc.finalize() for k, acc in kind_acc.items()},
         by_shot_type={k: acc.finalize() for k, acc in shot_acc.items()},
@@ -339,7 +354,8 @@ def render_attempt_stats(stats: AttemptStatsSummary, markdown: bool = False) -> 
         f"Mean attempts/passed: {stats.mean_attempts_per_passed:.2f}, "
         f"p90: {stats.p90_attempts:.2f}. "
         f"Human reject rate: {stats.human_reject_rate:.1%} "
-        f"({stats.rejected_count}/{stats.reviewed_count} reviewed)."
+        f"({stats.rejected_count}/{stats.reviewed_count} reviewed shots rejected, "
+        f"{stats.total_rejections} rejection(s) in total)."
     )
     rows: list[tuple[str, AttemptBucketStats]] = [
         (f"kind:{k}", v) for k, v in stats.by_kind.items()

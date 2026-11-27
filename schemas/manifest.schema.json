@@ -1246,6 +1246,13 @@
         },
         "review": {
           "$ref": "#/$defs/Review"
+        },
+        "rejection_count": {
+          "default": 0,
+          "description": "How many times a reviewer has rejected this shot. Unlike review.decision, which the runner clears when the shot regenerates, this survives regeneration.",
+          "minimum": 0,
+          "title": "Rejection Count",
+          "type": "integer"
         }
       },
       "required": [

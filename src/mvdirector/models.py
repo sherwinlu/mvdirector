@@ -959,6 +959,21 @@ class Shot(StrictModel):
     still: AssetState = Field(default_factory=AssetState)
     video: AssetState = Field(default_factory=AssetState)
     review: Review = Field(default_factory=Review)
+    rejection_count: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "How many times a reviewer has rejected this shot. Unlike review.decision, which the "
+            "runner clears when the shot regenerates, this survives regeneration."
+        ),
+    )
+
+    @field_validator("rejection_count", mode="before")
+    @classmethod
+    def _reject_bool_rejection_count(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("rejection_count must be an integer, not a boolean.")
+        return value
 
     @field_validator("id")
     @classmethod

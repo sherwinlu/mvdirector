@@ -204,7 +204,9 @@ def reject(
         shot.video.reset(extra, note)
         if not config.retry.keep_still_on_video_fail:
             shot.still.reset(extra)
-    # The decision is recorded on the old review; the runner clears it on regeneration.
+    # The decision is recorded on the old review; the runner clears it on regeneration, so the
+    # durable count is what reports read.
+    shot.rejection_count += 1
     shot.review = Review(
         required=True,
         reasons=shot.review.reasons,

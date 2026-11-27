@@ -488,14 +488,30 @@ class VideoQC:
                 "Keep the face frontal with the mouth unobstructed, and simplify body and "
                 "camera movement so the mouth can follow the vocal."
             )
+        if in_sync:
+            # A passing lip-sync check must score at least pass_score so its heavy weight cannot
+            # drag an otherwise-passing clip below the overall pass mark and waste retry renders.
+            pass_floor = self._qc.pass_score
+            progress = (
+                1.0
+                if self._cfg.lipsync_good <= self._cfg.lipsync_min
+                else linear_score(
+                    result.correlation, self._cfg.lipsync_min, self._cfg.lipsync_good
+                )
+            )
+            sync_score: float | None = pass_floor + (1.0 - pass_floor) * progress
+        elif blocking:
+            sync_score = linear_score(
+                result.correlation, self._cfg.lipsync_bad, self._cfg.lipsync_good
+            )
+        else:
+            # A weak advisory result carries no score, so it cannot pull a clip below the pass mark.
+            sync_score = None
         sync = CheckResult(
             name="lipsync",
             status=CheckStatus.PASSED if in_sync else CheckStatus.FAILED,
             hard=blocking,
-            # A weak advisory result carries no score, so it cannot pull a clip below the pass mark.
-            score=linear_score(result.correlation, self._cfg.lipsync_bad, self._cfg.lipsync_good)
-            if blocking or in_sync
-            else None,
+            score=sync_score,
             detail=sync_detail,
             fix_hint=sync_hint,
             metrics=sync_metrics,

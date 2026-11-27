@@ -34,6 +34,7 @@ from mvdirector.bench.dataset import (
     QCLabelItem,
     resolve_still_and_references,
 )
+from mvdirector.bench.planning import md_cell
 from mvdirector.bench.telemetry import (
     CallRecord,
     InstrumentedLLM,
@@ -768,7 +769,8 @@ def render_vision_qc_markdown(results: Sequence[VisionQCArmResult]) -> str:
             else "n/a"
         )
         lines.append(
-            f"| **{r.arm_id}** | `{r.model}` | {_format_check_cell(r, 'vision_spec')} | "
+            f"| **{md_cell(r.arm_id)}** | `{md_cell(r.model)}` | "
+            f"{_format_check_cell(r, 'vision_spec')} | "
             f"{_format_check_cell(r, 'vision_artifacts')} | "
             f"{_format_check_cell(r, 'vision_character')} | "
             f"{gate_acc} | {fp} | {fn} | {r.refusal_rate:.1%} ({r.refusals}) | "

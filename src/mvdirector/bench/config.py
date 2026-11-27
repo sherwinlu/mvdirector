@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator
 
 from mvdirector.config import (
     CONFIG_FILENAME,
@@ -33,6 +33,12 @@ _SNAPSHOT_SUFFIX_RE = re.compile(
 )
 
 
+def _reject_bool_number(value: object, info: ValidationInfo) -> object:
+    if isinstance(value, bool):
+        raise ValueError(f"{info.field_name} must be a number, not a boolean.")
+    return value
+
+
 class ModelPricing(BaseModel):
     """Estimated USD per 1M tokens for cost comparison across benchmark arms."""
 
@@ -42,6 +48,17 @@ class ModelPricing(BaseModel):
     output_per_million: float = Field(ge=0.0)
     thoughts_per_million: float | None = Field(default=None, ge=0.0)
     cached_input_per_million: float | None = Field(default=None, ge=0.0)
+
+    @field_validator(
+        "input_per_million",
+        "output_per_million",
+        "thoughts_per_million",
+        "cached_input_per_million",
+        mode="before",
+    )
+    @classmethod
+    def _no_bool(cls, value: object, info: ValidationInfo) -> object:
+        return _reject_bool_number(value, info)
 
 
 # Default USD / 1M token pricing estimates; override per arm in bench.yaml as rates change.
@@ -137,6 +154,11 @@ class ModelArm(BaseModel):
     pricing: ModelPricing | None = None
     notes: str = ""
 
+    @field_validator("max_tokens", "shots_per_request", "timeout_seconds", mode="before")
+    @classmethod
+    def _no_bool_numbers(cls, value: object, info: ValidationInfo) -> object:
+        return _reject_bool_number(value, info)
+
     @field_validator("id")
     @classmethod
     def _validate_arm_id(cls, value: str) -> str:
@@ -216,6 +238,11 @@ class GPUCostConfig(BaseModel):
         ge=1,
         description="Reference shot count per full music video for net effective cost scaling.",
     )
+
+    @field_validator("still_usd", "video_usd", "shots_per_video", mode="before")
+    @classmethod
+    def _no_bool(cls, value: object, info: ValidationInfo) -> object:
+        return _reject_bool_number(value, info)
 
 
 def default_arms() -> list[ModelArm]:
@@ -374,7 +401,7 @@ def load_benchmark_config(path: Path | None) -> BenchmarkConfig:
         raise ConfigError(f"Benchmark config not found: {path}")
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+    except (OSError, UnicodeDecodeError, yaml.YAMLError, RecursionError) as exc:
         raise ConfigError(f"Could not read benchmark config {path}: {exc}") from exc
     if not isinstance(raw, dict):
         raise ConfigError(f"Benchmark config {path} must contain a YAML mapping.")

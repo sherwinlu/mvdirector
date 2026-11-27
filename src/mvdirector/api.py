@@ -497,11 +497,15 @@ def validate_project(
             f"LLM settings ({llm_config.provider}, {llm_config.model}); `mvd llm-check` tests them",
             _check_llm_config,
         )
-    for label_prefix, extra_cfg in (
-        ("Vision QC LLM", project.config.qc.llm),
-        ("Audio listen LLM", project.config.planning.audio_llm),
+    for label_prefix, extra_cfg, feature_active in (
+        ("Vision QC LLM", project.config.qc.llm, project.config.qc.vision_enabled),
+        (
+            "Audio listen LLM",
+            project.config.planning.audio_llm,
+            project.config.planning.audio_listen != "never",
+        ),
     ):
-        if extra_cfg is not None and extra_cfg.enabled:
+        if feature_active and extra_cfg is not None and extra_cfg.enabled:
 
             def _check_extra(cfg: LLMConfig = extra_cfg) -> None:
                 with _close_llm(_build_project_llm(project, cfg)):

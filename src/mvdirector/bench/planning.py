@@ -32,6 +32,7 @@ from mvdirector.bench.telemetry import CallRecord, InstrumentedLLM, TelemetrySum
 from mvdirector.config import CONFIG_FILENAME, ProjectConfig
 from mvdirector.errors import ConfigError, MVDError
 from mvdirector.llm.factory import build_llm
+from mvdirector.llm.http import redact_url
 from mvdirector.models import Character, Framing, Manifest, Shot, ShotType, VideoStyle
 from mvdirector.planning import prompts
 from mvdirector.planning.planner import build_manifest
@@ -340,6 +341,16 @@ def _load_valid_cached_planning(
     return cached
 
 
+def _redact_literal_base_url(section: object) -> object:
+    if not isinstance(section, dict):
+        return section
+    copied = dict(section)
+    raw_url = copied.get("base_url")
+    if isinstance(raw_url, str) and "${" not in raw_url:
+        copied["base_url"] = redact_url(raw_url)
+    return copied
+
+
 def _sanitized_arm_yaml(source_project: Project, arm: ModelArm, title: str) -> dict[str, Any]:
     """Build an isolated project.yaml mapping without expanding or persisting env secrets."""
     cfg_path = source_project.root / CONFIG_FILENAME
@@ -356,7 +367,11 @@ def _sanitized_arm_yaml(source_project: Project, arm: ModelArm, title: str) -> d
         "enabled": True,
         "provider": arm.provider,
         "model": arm.model,
-        "base_url": arm.base_url,
+        "base_url": (
+            redact_url(arm.base_url)
+            if isinstance(arm.base_url, str) and "${" not in arm.base_url
+            else arm.base_url
+        ),
         "api_key_env": arm.api_key_env,
         "max_tokens": arm.max_tokens,
         "shots_per_request": arm.shots_per_request,
@@ -365,12 +380,17 @@ def _sanitized_arm_yaml(source_project: Project, arm: ModelArm, title: str) -> d
         "stream": arm.stream,
     }
     # Benchmarks never connect to ComfyUI; strip any connection secrets if present literally.
-    comfy_raw = raw_yaml.get("comfy")
+    comfy_raw = _redact_literal_base_url(raw_yaml.get("comfy"))
     if isinstance(comfy_raw, dict):
-        sanitized_comfy = dict(comfy_raw)
-        sanitized_comfy.pop("headers", None)
-        sanitized_comfy.pop("api_key_comfy_org", None)
-        raw_yaml["comfy"] = sanitized_comfy
+        comfy_raw.pop("headers", None)
+        comfy_raw.pop("api_key_comfy_org", None)
+        raw_yaml["comfy"] = comfy_raw
+    for parent_key, child_key in (("qc", "llm"), ("planning", "audio_llm")):
+        parent = raw_yaml.get(parent_key)
+        if isinstance(parent, dict) and child_key in parent:
+            parent_copy = dict(parent)
+            parent_copy[child_key] = _redact_literal_base_url(parent_copy[child_key])
+            raw_yaml[parent_key] = parent_copy
     return raw_yaml
 
 
@@ -396,6 +416,7 @@ def _stage_isolated_arm_folder(
 
     cfg = source_project.config.model_copy(deep=True)
     cfg.llm = arm.to_llm_config(environ=environ)
+    cfg.planning.audio_listen = "never"
     cfg.title = f"{source_project.config.title} [{arm.id}: {arm.label}]"
 
     style_path = source_project.input_path(cfg.inputs.style, "style")
@@ -462,6 +483,9 @@ def run_planning_arm(
         if cached is not None:
             log.info("Skipping cached Track 1 run %s / %s (%s)", track, arm.id, arm_dir)
             return cached
+
+    if overwrite and manifest_path.is_file():
+        manifest_path.unlink(missing_ok=True)
 
     effective_env = resolve_bench_environ(source_project.environ(), environ)
     cfg, lyrics_text, style_text, mix_path = _stage_isolated_arm_folder(
@@ -616,6 +640,11 @@ def run_planning_benchmark(
     return results
 
 
+def md_cell(value: str) -> str:
+    """Escape pipes, backticks, and line breaks for Markdown table cells."""
+    return value.replace("|", "\\|").replace("`", "'").replace("\r", " ").replace("\n", " ")
+
+
 def render_planning_markdown(results: Sequence[PlanningArmResult]) -> str:
     """Render a concise GitHub-flavored Markdown comparison table for Track 1 results."""
     lines = [
@@ -638,7 +667,8 @@ def render_planning_markdown(results: Sequence[PlanningArmResult]) -> str:
         )
         inv = f"{q.invariant_always_coverage:.0%}{warn}" if q.invariants_defined else "none"
         lines.append(
-            f"| {r.track} | **{r.arm_id}** | `{r.model}` | {audio} | {r.status} | "
+            f"| {md_cell(r.track)} | **{md_cell(r.arm_id)}** | `{md_cell(r.model)}` | {audio} | "
+            f"{md_cell(r.status)} | "
             f"{t.first_pass_rate:.0%} ({t.first_pass_ok}/{t.calls}) | {t.schema_retries} | "
             f"{t.truncations} | {t.refusals} | {q.fallback_shots}/{q.total_shots} | {inv} | "
             f"{q.framing_detail_compliance:.0%} | {q.affirmative_phrasing_compliance:.0%} | "

@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import random
 import re
 import secrets
@@ -23,6 +24,8 @@ from mvdirector.errors import ConfigError
 from mvdirector.models import Manifest, Shot, ShotType
 from mvdirector.planning import prompts
 from mvdirector.store import atomic_write
+
+log = logging.getLogger(__name__)
 
 _MAX_MATCHED_SHOTS = 10
 _MIN_MATCHED_SHOTS = 8
@@ -245,11 +248,18 @@ def build_blind_viewer_payload(
     reveal_map: dict[str, dict[str, dict[str, Any]]] = {}
 
     for track, track_results in sorted(by_track.items()):
-        loaded: list[tuple[PlanningArmResult, Manifest]] = [
-            (r, Manifest.model_validate_json(Path(r.manifest_path).read_text(encoding="utf-8")))
-            for r in track_results
-            if r.manifest_path is not None
-        ]
+        loaded: list[tuple[PlanningArmResult, Manifest]] = []
+        for r in track_results:
+            if r.manifest_path is None:
+                continue
+            try:
+                manifest = Manifest.model_validate_json(
+                    Path(r.manifest_path).read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError) as exc:
+                log.warning("Skipping unreadable benchmark manifest %s: %s", r.manifest_path, exc)
+                continue
+            loaded.append((r, manifest))
         if not loaded:
             continue
         matched = select_matched_shots([m for _, m in loaded], max_shots=max_shots)
@@ -307,6 +317,8 @@ def build_blind_viewer_payload(
         )
         reveal_map[track] = track_reveal
 
+    if not tracks_blind:
+        raise ConfigError("No readable Track 1 manifests found to build a blind comparison viewer.")
     return {"tracks": tracks_blind}, {"tracks": reveal_map}
 
 

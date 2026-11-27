@@ -251,7 +251,8 @@ def scaffold_qc_dataset(
     if isinstance(target_size, bool) or target_size < 1:
         raise ConfigError(f"target_size must be a positive integer, got {target_size!r}.")
 
-    opened_projects = [open_bench_project(proj_dir) for proj_dir in projects]
+    unique_projects = list(dict.fromkeys(Path(proj_dir).resolve() for proj_dir in projects))
+    opened_projects = [open_bench_project(proj_dir) for proj_dir in unique_projects]
     prefixes = _project_id_prefixes([p.root for p in opened_projects])
 
     good_by_proj: list[list[tuple[int, QCLabelItem]]] = []

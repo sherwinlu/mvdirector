@@ -822,3 +822,162 @@ def test_l4_bool_rejection_and_none_score_gate_consistency():
         ]
     )
     assert "FP (good rejected)" not in html_out
+
+
+# ------------------------------------------------------------------ Round 2
+
+
+def test_r2_bench_config_recursion_and_bool_rejection(tmp_path: Path):
+    deep = tmp_path / "deep.yaml"
+    deep.write_text("[" * 2000 + "]" * 2000, encoding="utf-8")
+    with pytest.raises(ConfigError, match="Could not read benchmark config"):
+        load_benchmark_config(deep)
+
+    with pytest.raises(ValidationError, match="boolean"):
+        from mvdirector.bench.config import ModelPricing
+
+        ModelPricing(input_per_million=True, output_per_million=0.0)
+    with pytest.raises(ValidationError, match="boolean"):
+        GPUCostConfig(still_usd=True)
+    with pytest.raises(ValidationError, match="boolean"):
+        ModelArm(id="A", label="A", provider="openai", model="m", shots_per_request=True)
+
+
+def test_r2_duplicate_projects_deduped_and_corrupt_manifest_skipped(tmp_path: Path):
+    from mvdirector.bench.blind_viewer import build_blind_viewer_payload
+    from mvdirector.bench.planning import PlanningArmResult
+
+    p = _setup_project(tmp_path / "dup")
+    rel = "assets/stills/s01_a1.png"
+    _make_tiny_png(p / rel)
+    m = Manifest(
+        title="D",
+        duration=8.0,
+        fps=24,
+        shots=[
+            _make_shot(
+                0,
+                "s01",
+                type=ShotType.BROLL,
+                framing=Framing.WIDE,
+                still=AssetState(
+                    selected_attempt=1,
+                    attempts=[
+                        Attempt(
+                            number=1,
+                            strategy=RetryStrategy.INITIAL,
+                            seed=1,
+                            prompt="p",
+                            path=rel,
+                            qc=QCReport(passed=True, score=0.9, checks=[]),
+                        )
+                    ],
+                ),
+            )
+        ],
+    )
+    (p / "manifest.json").write_text(m.model_dump_json(), encoding="utf-8")
+    items = scaffold_qc_dataset([p, p], tmp_path / "dup.csv", target_size=10)
+    assert len(items) == 1
+    assert len(load_qc_dataset(tmp_path / "dup.csv")) == 1
+
+    bad_m = tmp_path / "bad_manifest.json"
+    bad_m.write_text("{corrupt", encoding="utf-8")
+    with pytest.raises(ConfigError, match="No readable Track 1 manifests"):
+        build_blind_viewer_payload(
+            [
+                PlanningArmResult(
+                    track="t",
+                    source_project=str(p),
+                    arm_id="A",
+                    arm_label="A",
+                    provider="openai",
+                    model="m",
+                    attach_audio=False,
+                    output_dir=str(tmp_path),
+                    manifest_path=str(bad_m),
+                    status="ok",
+                )
+            ]
+        )
+
+
+def test_r2_validate_project_skips_disabled_features_and_planning_arm_isolates_audio_listen(
+    tmp_path: Path, monkeypatch
+):
+    pv = _setup_project(
+        tmp_path / "val",
+        extra_yaml={
+            "llm": {"enabled": False},
+            "planning": {
+                "audio_listen": "never",
+                "audio_llm": {
+                    "provider": "gemini",
+                    "model": "gemini-3.8-flash",
+                    "api_key_env": "MVD_MISSING_AUDIO_KEY",
+                },
+            },
+            "qc": {
+                "vision_enabled": False,
+                "llm": {
+                    "provider": "gemini",
+                    "model": "gemini-3.8-flash",
+                    "api_key_env": "MVD_MISSING_QC_KEY",
+                },
+            },
+        },
+    )
+    checks = api.validate_project(pv)
+    labels = [c.label for c in checks]
+    assert not any("Vision QC LLM" in lbl or "Audio listen LLM" in lbl for lbl in labels)
+
+    # Track 1 arm benchmark isolates planning.audio_listen='always' so Gemini arms don't make an
+    # extra AudioListeningNotes pre-pass call.
+    p_always = _setup_project(
+        tmp_path / "always_src",
+        extra_yaml={
+            "planning": {"audio_listen": "always"},
+            "comfy": {"base_url": "https://user:literal_secret@comfy.internal:8188"},
+        },
+    )
+    (p_always / "inputs" / "mix.wav").write_bytes(b"RIFFfake")
+    monkeypatch.setattr(
+        "mvdirector.llm.base.audio_block",
+        lambda _p: {
+            "type": "audio",
+            "source": {"type": "base64", "media_type": "audio/mpeg", "data": "AA=="},
+        },
+    )
+
+    class _AudioArmLLM(_StubPlannerLLM):
+        supports_audio = True
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.schemas: list[str] = []
+
+        def complete_json(self, *, system: str, content, schema):
+            self.schemas.append(schema.__name__)
+            return super().complete_json(system=system, content=content, schema=schema)
+
+    spy = _AudioArmLLM()
+    arm = ModelArm(
+        id="A", label="Flash", provider="gemini", model="gemini-3.8-flash", attach_audio=True
+    )
+    res = run_planning_arm(p_always, arm, tmp_path / "out", llm_factory=lambda _a, _e: spy)
+    assert "AudioListeningNotes" not in spy.schemas
+    dumped = (Path(res.output_dir) / "project.yaml").read_text(encoding="utf-8")
+    assert "literal_secret" not in dumped
+
+    # Failed overwrite removes stale manifest.json from disk.
+    assert (Path(res.output_dir) / "manifest.json").is_file()
+
+    class _FailLLM:
+        def complete_json(self, **kw):
+            raise LLMError("boom")
+
+    err_res = run_planning_arm(
+        p_always, arm, tmp_path / "out", overwrite=True, llm_factory=lambda _a, _e: _FailLLM()
+    )
+    assert err_res.status == "error"
+    assert not (Path(res.output_dir) / "manifest.json").exists()

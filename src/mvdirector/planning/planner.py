@@ -1284,17 +1284,19 @@ def _populate_slice_mutes(
     """Record foreign-singer and non-singing lead-in/tail mute spans on lip-sync slices."""
     shots = manifest.shots
     multi_char = len(manifest.characters) > 1
-    has_aligned_lyrics = any(
-        ln.timing_source == "aligned" and ln.start is not None and ln.end is not None
+    aligned_lyric_spans = [
+        (ln.start, ln.end)
         for ln in analysis.lyric_lines
-    )
+        if (
+            ln.timing_source == "aligned"
+            and ln.start is not None
+            and ln.end is not None
+            and ln.end > ln.start
+        )
+    ]
     singing_spans: list[tuple[float, float]] = (
-        [
-            (ln.start, ln.end)
-            for ln in analysis.lyric_lines
-            if ln.start is not None and ln.end is not None and ln.end > ln.start
-        ]
-        if has_aligned_lyrics
+        aligned_lyric_spans
+        if aligned_lyric_spans
         else [(w.start, w.end) for w in analysis.vocal_windows if w.end > w.start]
     )
     for idx, shot in enumerate(shots):

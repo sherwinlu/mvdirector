@@ -284,6 +284,16 @@ def detect_vocal_windows(
     ]
 
 
+def _word_overlaps_window(win: TimeSpan, word: lyrics_mod.Word) -> bool:
+    """True when ``word`` overlaps ``win``, including zero-duration words inside it."""
+    w_start, w_end = float(word.start), float(word.end)
+    if w_end > w_start:
+        return min(win.end, w_end) > max(win.start, w_start)
+    if w_end == w_start:
+        return win.start <= w_start <= win.end
+    return False
+
+
 def filter_vocal_windows_by_words(
     windows: list[TimeSpan],
     words: Sequence[lyrics_mod.Word],
@@ -299,13 +309,14 @@ def filter_vocal_windows_by_words(
     """
     if not windows or not words:
         return list(windows)
+    safe_pad = max(0.0, float(pad)) if math.isfinite(pad) else 0.0
     kept: list[TimeSpan] = []
     for win in windows:
-        hits = [w for w in words if min(win.end, float(w.end)) > max(win.start, float(w.start))]
+        hits = [w for w in words if _word_overlaps_window(win, w)]
         if len(hits) < min_words_per_window:
             continue
-        trimmed_start = round(max(win.start, min(float(w.start) for w in hits) - pad), 3)
-        trimmed_end = round(min(win.end, max(float(w.end) for w in hits) + pad), 3)
+        trimmed_start = round(max(win.start, min(float(w.start) for w in hits) - safe_pad), 3)
+        trimmed_end = round(min(win.end, max(float(w.end) for w in hits) + safe_pad), 3)
         if trimmed_end > trimmed_start:
             kept.append(TimeSpan(start=trimmed_start, end=trimmed_end))
     return kept if kept else list(windows)

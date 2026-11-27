@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sys
 import threading
 import weakref
@@ -23,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from mvdirector import assemble, media
+from mvdirector import assemble, media, plugins
 from mvdirector.comfy.cache import ComfyRenderCache, canonical_graph_key, file_sha256
 from mvdirector.comfy.client import ComfyClient
 from mvdirector.comfy.provider import ComfyEndpointProvider, StaticComfyProvider
@@ -374,8 +375,14 @@ class ShotRunner:
         return [waves[d] for d in sorted(waves)]
 
     @staticmethod
+    def _video_frame_bucket(num_frames: int) -> int:
+        """Round ``num_frames`` to a 16-frame shape bucket to keep torch.compile caches warm."""
+        clamped = max(1, int(num_frames))
+        return ((clamped + 15) // 16) * 16
+
+    @staticmethod
     def _sort_for_cache(shots: list[Shot], kind: AssetKind) -> list[Shot]:
-        """Group independent shots by workflow/setting/prompt prefix to keep ComfyUI caches warm.
+        """Group independent shots by workflow/shape-bucket/setting to keep ComfyUI caches warm.
 
         Inspired by ``tysonfarrington-cmyk/xenoform`` (``final_tier.py``) and
         ``tsondo/musicvision`` (``assets/consistency.py``).
@@ -396,6 +403,7 @@ class ShotRunner:
             shots,
             key=lambda s: (
                 0 if s.type is ShotType.LIPSYNC else 1,
+                ShotRunner._video_frame_bucket(s.num_frames),
                 s.setting,
                 s.motion_prompt[:48],
                 s.index,
@@ -973,6 +981,8 @@ class ShotRunner:
                 attempt.qc = self._check(shot, kind, destination)
             if kind is AssetKind.VIDEO and attempt.qc is not None:
                 attempt.sync_delay_seconds = self._extract_sync_delay(shot, attempt.qc)
+                if attempt.qc.passed and shot.type is not ShotType.LIPSYNC:
+                    attempt.optimal_in_offset = self._select_optimal_in_offset(shot, destination)
         except (ComfyJobError, MediaToolError) as exc:
             # The job itself failed. Record it and let the loop try again.
             log.warning("%s %s attempt %d errored: %s", shot.id, kind.value, plan.number, exc)
@@ -1001,6 +1011,33 @@ class ShotRunner:
         head = max(0.0, shot.audio_slice.head_handle)
         tail = max(0.0, shot.audio_slice.end - shot.end)
         return round(max(-head, min(tail, float(raw_delay))), 4)
+
+    def _select_optimal_in_offset(self, shot: Shot, video_path: Path) -> float:
+        """Run optional clip_selector plugin on non-lipsync videos, clamped to handles."""
+        selector_name = self._project.config.plugins.clip_selector
+        if not selector_name or shot.type is ShotType.LIPSYNC:
+            return 0.0
+        head = max(0.0, shot.audio_slice.head_handle)
+        tail = max(0.0, shot.audio_slice.end - shot.end)
+        if head <= 0.0 and tail <= 0.0:
+            return 0.0
+        try:
+            fn = plugins.load_plugin(plugins.CLIP_SELECTORS_GROUP, selector_name)
+            raw = fn(video_path, shot, self._project.config.video.fps, head, tail)
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                raise TypeError(f"clip_selector {selector_name!r} returned {type(raw).__name__}")
+            val = float(raw)
+            if not math.isfinite(val):
+                raise ValueError("non-finite offset")
+            return round(max(-head, min(tail, val)), 4)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "Clip selector plugin %r failed on %s (%s); using offset 0.0.",
+                selector_name,
+                shot.id,
+                exc,
+            )
+            return 0.0
 
     @staticmethod
     def _has_distinct_ref_target(
@@ -1337,7 +1374,12 @@ class ShotRunner:
         for param, _, ref_path in video_refs or ():
             params[param] = self._upload(ref_path, client=client)
         if shot.type is ShotType.LIPSYNC or "audio" in template.bindings.required:
-            params["audio"] = self._upload(self._ensure_audio_slice(shot), client=client)
+            audio_path = (
+                self._ensure_conditioning_audio(shot)
+                if shot.type is ShotType.LIPSYNC
+                else self._ensure_audio_slice(shot)
+            )
+            params["audio"] = self._upload(audio_path, client=client)
         if self._video_uses_audio_video(shot, template):
             params["audio_video"] = self._upload(
                 self._ensure_audio_video_slice(shot), client=client
@@ -1839,8 +1881,55 @@ class ShotRunner:
             atomic_write(marker, json.dumps(stamp))
         return path
 
+    def _ensure_conditioning_audio(self, shot: Shot) -> Path:
+        """Conditioned vocal slice for lip-sync generation; QC still scores the original slice."""
+        raw_path = self._ensure_audio_slice(shot)
+        plugin_name = self._project.config.plugins.audio_conditioner
+        if not plugin_name or shot.type is not ShotType.LIPSYNC:
+            return raw_path
+        try:
+            fn = plugins.load_plugin(plugins.AUDIO_CONDITIONERS_GROUP, plugin_name)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "Audio conditioner plugin %r unavailable (%s); using raw slice.", plugin_name, exc
+            )
+            return raw_path
+        cond_path = raw_path.with_name(f"{raw_path.stem}.cond{raw_path.suffix}")
+        raw_stat = raw_path.stat()
+        stamp: dict[str, Any] = {
+            "raw_size": raw_stat.st_size,
+            "raw_mtime_ns": raw_stat.st_mtime_ns,
+            "plugin": plugin_name,
+            "version": plugins.plugin_version(fn),
+        }
+        marker = cond_path.with_name(f"{cond_path.name}.json")
+        if cond_path.is_file() and _read_stamp(marker) == stamp:
+            return cond_path
+        try:
+            analysis = None
+            with suppress(Exception):
+                analysis = self._project.load_analysis()
+            out = fn(raw_path, cond_path, shot, analysis)
+            resolved = Path(out) if out is not None else cond_path
+            if not resolved.is_file() or resolved.stat().st_size <= 0:
+                raise OSError(f"audio_conditioner {plugin_name!r} did not write a non-empty file")
+            atomic_write(marker, json.dumps(stamp))
+            return resolved
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "Audio conditioner plugin %r failed on %s (%s); falling back to raw slice.",
+                plugin_name,
+                shot.id,
+                exc,
+            )
+            return raw_path
+
     def _ensure_audio_video_slice(self, shot: Shot) -> Path:
-        wav_path = self._ensure_audio_slice(shot)
+        wav_path = (
+            self._ensure_conditioning_audio(shot)
+            if shot.type is ShotType.LIPSYNC
+            else self._ensure_audio_slice(shot)
+        )
         mp4_path = self._project.audio_video_slice_path(shot.id)
         wav_stat = wav_path.stat()
         fps = self._project.config.video.fps

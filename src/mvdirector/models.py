@@ -644,6 +644,14 @@ class Attempt(StrictModel):
             "(inspired by VisualFrisson/ComfyUI-OneShotMV)."
         ),
     )
+    optimal_in_offset: float = Field(
+        default=0.0,
+        allow_inf_nan=False,
+        description=(
+            "Optional in-point offset in seconds selected for non-lipsync clips within available "
+            "handles (ignored on lip-sync shots)."
+        ),
+    )
     regressed: bool = Field(
         default=False,
         description=(

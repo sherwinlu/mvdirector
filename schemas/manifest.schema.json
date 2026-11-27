@@ -197,6 +197,12 @@
           "title": "Sync Delay Seconds",
           "type": "number"
         },
+        "optimal_in_offset": {
+          "default": 0.0,
+          "description": "Optional in-point offset in seconds selected for non-lipsync clips within available handles (ignored on lip-sync shots).",
+          "title": "Optimal In Offset",
+          "type": "number"
+        },
         "regressed": {
           "default": false,
           "description": "True when an in-place repair did not strictly improve on the previous attempt and should be excluded from best_attempt selection.",

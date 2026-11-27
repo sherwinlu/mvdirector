@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import re
+import unicodedata
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -72,6 +73,21 @@ _STYLE_LANG_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("ar", re.compile(r"\b(?:arabic)\b", re.IGNORECASE)),
     ("hi", re.compile(r"\b(?:hindi)\b", re.IGNORECASE)),
     ("th", re.compile(r"\b(?:thai)\b", re.IGNORECASE)),
+    ("el", re.compile(r"\b(?:greek|ελληνικά)\b", re.IGNORECASE)),
+    ("he", re.compile(r"\bhebrew\b", re.IGNORECASE)),
+    ("bn", re.compile(r"\bbengali\b", re.IGNORECASE)),
+    ("pa", re.compile(r"\b(?:punjabi|gurmukhi)\b", re.IGNORECASE)),
+    ("gu", re.compile(r"\bgujarati\b", re.IGNORECASE)),
+    ("ta", re.compile(r"\btamil\b", re.IGNORECASE)),
+    ("te", re.compile(r"\btelugu\b", re.IGNORECASE)),
+    ("kn", re.compile(r"\bkannada\b", re.IGNORECASE)),
+    ("ml", re.compile(r"\bmalayalam\b", re.IGNORECASE)),
+    ("ka", re.compile(r"\bgeorgian\b", re.IGNORECASE)),
+    ("hy", re.compile(r"\barmenian\b", re.IGNORECASE)),
+    ("am", re.compile(r"\bamharic\b", re.IGNORECASE)),
+    ("km", re.compile(r"\bkhmer\b", re.IGNORECASE)),
+    ("my", re.compile(r"\b(?:burmese|myanmar)\b", re.IGNORECASE)),
+    ("lo", re.compile(r"\blao\b", re.IGNORECASE)),
 )
 _EXPLICIT_MULTILINGUAL_RE = re.compile(
     r"\b(?:bilingual|multilingual|trilingual|code[- ]switching|spanglish)\b",
@@ -263,8 +279,31 @@ _METER_54_RE = re.compile(r"\b5/4\b")
 _METER_78_RE = re.compile(r"\b7/8\b")
 _FREE_TIME_RE = re.compile(r"\b(?:odd meter|rubato|free time|beatless)\b", re.IGNORECASE)
 
-_VOWEL_GROUP_RE = re.compile(r"[aeiouyáéíóúàèìòùâêîôûäëïöüãõøœæіїєаеёиоуыэюя]+", re.IGNORECASE)
+_VOWEL_GROUP_RE = re.compile(r"[aeiouyøœæіїєаеиоуыэюяαεηιουω]+", re.IGNORECASE)
+_INDIC_VIRAMAS = frozenset("\u094d\u09cd\u0a4d\u0acd\u0b4d\u0bcd\u0c4d\u0ccd\u0d4d")
 _LATIN_WORD_RE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ']+")
+
+_SCRIPT_LANG_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("ru", re.compile(r"[\u0400-\u04FF]")),
+    ("el", re.compile(r"[\u0370-\u03FF\u1F00-\u1FFF]")),
+    ("hy", re.compile(r"[\u0530-\u058F]")),
+    ("he", re.compile(r"[\u0590-\u05FF]")),
+    ("ar", re.compile(r"[\u0600-\u06FF]")),
+    ("hi", re.compile(r"[\u0900-\u097F]")),
+    ("bn", re.compile(r"[\u0980-\u09FF]")),
+    ("pa", re.compile(r"[\u0A00-\u0A7F]")),
+    ("gu", re.compile(r"[\u0A80-\u0AFF]")),
+    ("ta", re.compile(r"[\u0B80-\u0BFF]")),
+    ("te", re.compile(r"[\u0C00-\u0C7F]")),
+    ("kn", re.compile(r"[\u0C80-\u0CFF]")),
+    ("ml", re.compile(r"[\u0D00-\u0D7F]")),
+    ("th", re.compile(r"[\u0E00-\u0E7F]")),
+    ("lo", re.compile(r"[\u0E80-\u0EFF]")),
+    ("my", re.compile(r"[\u1000-\u109F]")),
+    ("ka", re.compile(r"[\u10A0-\u10FF]")),
+    ("am", re.compile(r"[\u1200-\u137F]")),
+    ("km", re.compile(r"[\u1780-\u17FF]")),
+)
 
 
 @dataclass(frozen=True)
@@ -325,14 +364,9 @@ def _script_languages(text: str) -> list[str]:
         found.append("ja")
     if re.search(r"[\u4E00-\u9FFF]", text) and not has_kana:
         found.append("zh")
-    if re.search(r"[\u0400-\u04FF]", text):
-        found.append("ru")
-    if re.search(r"[\u0600-\u06FF]", text):
-        found.append("ar")
-    if re.search(r"[\u0E00-\u0E7F]", text):
-        found.append("th")
-    if re.search(r"[\u0900-\u097F]", text):
-        found.append("hi")
+    for code, pattern in _SCRIPT_LANG_PATTERNS:
+        if pattern.search(text):
+            found.append(code)
     return found
 
 
@@ -345,7 +379,7 @@ def detect_languages(
     transcript_multilingual: bool = False,
 ) -> tuple[list[str], bool]:
     """Return ``(iso_languages, is_multilingual)`` from lyrics, style cues, and transcript hints."""
-    pos_style = strip_negative_style_tags(style_text)
+    pos_style = strip_negative_style_tags(_musical_style_portion(style_text))
     section_headers = " | ".join(lyrics_mod.extract_section_tags(lyrics_text))
     sung_lines = [
         lyrics_mod.strip_romanization_guides(ln.text) for ln in lyrics_mod.parse_lyrics(lyrics_text)
@@ -417,14 +451,24 @@ def detect_languages(
 
 
 def _line_syllables(text: str) -> int:
-    """Approximate sung syllable count across syllabic (CJK/Kana/Hangul) and alphabetic scripts."""
+    """Approximate sung syllable count across syllabic, Brahmic/Indic, and alphabetic scripts."""
     syllabic = sum(1 for ch in text if lyrics_mod.is_syllabic_char(ch))
     non_syllabic = "".join(" " if lyrics_mod.is_syllabic_char(ch) else ch for ch in text)
     alpha_syllables = 0
     for token in lyrics_mod.tokenize(non_syllabic):
         if not any(ch.isalpha() for ch in token):
             continue
-        groups = _VOWEL_GROUP_RE.findall(token)
+        indic_letters = sum(1 for ch in token if 0x0900 <= ord(ch) <= 0x0D7F and ch.isalpha())
+        if indic_letters:
+            viramas = sum(1 for ch in token if ch in _INDIC_VIRAMAS)
+            alpha_syllables += max(1, indic_letters - viramas)
+            continue
+        base = "".join(
+            ch
+            for ch in unicodedata.normalize("NFD", token)
+            if not unicodedata.category(ch).startswith("M")
+        )
+        groups = _VOWEL_GROUP_RE.findall(base)
         count = len(groups)
         if count > 1 and token.endswith("e") and not token.endswith(("ee", "le", "ie")):
             count -= 1
@@ -604,7 +648,7 @@ def profile_track(
     transcript_multilingual: bool = False,
 ) -> TrackProfile:
     """Build a ``TrackProfile`` from text cues and optional DSP/alignment ``Analysis``."""
-    pos_style = strip_negative_style_tags(style_text)
+    pos_style = strip_negative_style_tags(_musical_style_portion(style_text))
     section_tags = lyrics_mod.extract_section_tags(lyrics_text)
     if analysis is not None and not lyrics_text.strip() and analysis.lyric_lines:
         lyrics_text = "\n".join(

@@ -178,7 +178,7 @@ class PrepareConfig(_Section):
         description="PyTorch device for stem separation ('auto' lets Demucs choose cuda/mps/cpu).",
     )
     whisper_model: str = Field(
-        default="small",
+        default="large-v3-turbo",
         description="faster-whisper model size used for lyric transcription and alignment.",
     )
     whisper_language: str | None = Field(

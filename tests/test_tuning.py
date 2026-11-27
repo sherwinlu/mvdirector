@@ -60,10 +60,7 @@ def test_bilingual_suno_track_strips_negative_tags_and_tunes_whisper_and_drops()
     prepare_cfg, whisper_adj = tuning.tune_prepare_config(cfg, lyrics_text=lyrics, style_text=style)
     assert prepare_cfg.whisper_multilingual is True
     assert prepare_cfg.whisper_model == "large-v3-turbo"
-    assert {a.key for a in whisper_adj} == {
-        "prepare.whisper_multilingual",
-        "prepare.whisper_model",
-    }
+    assert {a.key for a in whisper_adj} == {"prepare.whisper_multilingual"}
 
     all_adj = {a.key: a.recommended for a in tuning.recommend_adjustments(cfg, profile)}
     assert all_adj["video.dynamic_pacing"] is True
@@ -325,7 +322,9 @@ def test_yaml_persistence_preserves_comments_env_vars_and_custom_settings(tmp_pa
 
     # YAML 1.1 reserved word language code 'no' (Norwegian) is safely quoted, not boolean False!
     no_profile = TrackProfile(languages=["no"], multilingual=False, drop_or_chop_heavy=True)
-    no_adj = tuning.recommend_adjustments(ProjectConfig(), no_profile)
+    no_cfg = ProjectConfig()
+    no_cfg.prepare.whisper_model = "small"
+    no_adj = tuning.recommend_adjustments(no_cfg, no_profile, force=True)
     minimal_yaml = tmp_path / "minimal.yaml"
     minimal_yaml.write_text(
         "prepare:\n  whisper_language:\n  whisper_model: small\n"
@@ -477,3 +476,54 @@ def test_adversarial_and_stress_inputs_for_track_profiling(tmp_path: Path) -> No
     proj.config.inputs.lyrics = "../../etc/passwd"
     with pytest.raises(ConfigError):
         tuning.read_optional_project_inputs(proj)
+
+
+def test_greek_and_indic_language_detection_and_syllable_counting() -> None:
+    # Monolingual Greek lyrics and title hint lock whisper_language='el'.
+    langs_el, multi_el = tuning.detect_languages(lyrics_text="[Verse 1]\nΑγάπη και μουσική\n")
+    assert langs_el == ["el"]
+    assert multi_el is False
+
+    langs_el_title, multi_el_title = tuning.detect_languages(title_hint="Αγάπη")
+    assert langs_el_title == ["el"]
+    assert multi_el_title is False
+
+    # Bilingual Greek + English triggers multilingual mode.
+    langs_bi, multi_bi = tuning.detect_languages(
+        lyrics_text="[Verse 1]\nΑγάπη μου\n[Chorus]\nRunning through the night with you\n"
+    )
+    assert set(langs_bi) == {"el", "en"}
+    assert multi_bi is True
+
+    # Additional non-Latin scripts (Hebrew, Bengali, Tamil, Georgian) detect cleanly.
+    assert tuning.detect_languages(title_hint="שלום")[0] == ["he"]
+    assert tuning.detect_languages(title_hint="বাংলা")[0] == ["bn"]
+    assert tuning.detect_languages(title_hint="தமிழ்")[0] == ["ta"]
+    assert tuning.detect_languages(title_hint="საქართველო")[0] == ["ka"]
+
+    # Greek syllable counting handles monotonic/polytonic accents and diphthongs.
+    assert tuning._line_syllables("Αγάπη") == 3
+    assert tuning._line_syllables("καλημέρα") == 4
+    assert tuning._line_syllables("μουσική") == 3
+
+    # Hindi/Devanagari syllable counting accounts for virama consonant clusters.
+    assert tuning._line_syllables("नमस्ते") == 3  # na-mas-te (4 letters - 1 virama)
+    assert tuning._line_syllables("प्यार") == 2  # pyaa-r (3 letters - 1 virama)
+    assert tuning._line_syllables("ज़िन्दगी") == 3  # zin-da-gi (4 letters - 1 virama)
+
+    # Accented trailing 'é' in Latin is not mistaken for silent English 'e'.
+    assert tuning._line_syllables("café") == 2
+    assert tuning._line_syllables("time") == 1
+
+    # Language adjectives inside Visual direction or Exclusions must not override musical language.
+    style_with_visual_ref = (
+        "Music style: Indie folk ballad, warm acoustic guitar\n\n"
+        "Visual direction: Singer walks through ancient Greek ruins with a French bulldog.\n\n"
+        "Exclusions: Japanese neon signs, Arabic calligraphy\n"
+    )
+    en_lyrics = "[Verse 1]\nWalking through the night with you and never looking back\n"
+    langs_clean, multi_clean = tuning.detect_languages(
+        lyrics_text=en_lyrics, style_text=style_with_visual_ref
+    )
+    assert langs_clean == ["en"]
+    assert multi_clean is False

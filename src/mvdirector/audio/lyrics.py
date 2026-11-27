@@ -246,7 +246,7 @@ class WhisperTranscriber:
 
     def __init__(
         self,
-        model_size: str = "small",
+        model_size: str = "large-v3-turbo",
         language: str | None = None,
         *,
         multilingual: bool = False,

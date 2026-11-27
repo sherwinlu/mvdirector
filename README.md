@@ -81,7 +81,7 @@ cd projects\my-song
 ```
 
 1. Put your song files in `inputs/`: `mix.wav`, `vocals.wav` (optionally a drum stem or DAW/Suno stem pack in `inputs/stems/`), `inputs/lyrics.txt` (`[Section]` tags and `(adlibs)`), and `inputs/style.md` — or start from a single `.mp3`/`.wav` file with `mvd prepare /path/to/song.mp3` (requires the `stems` and `align` extras), or draft lyrics and a brief first with `mvd brief --idea "..."`. For `mode: mix`, supply `inputs/mix.wav` and an optional `inputs/tracklist.json` (`.yaml`, `.cue`, `.csv`, or `.txt`).
-2. Edit `project.yaml` (title, mode, resolution, LLM provider/model, and `video:` / `mix:` settings matching your ComfyUI workflow). With `auto_tune: true` (default), `mvd prepare`, `mvd analyze`, and `mvd plan` automatically tune default transcription, pacing, and lip-sync parameters for your track (`mvd tune [--apply]` previews or writes them to `project.yaml`).
+2. Edit `project.yaml` (title, mode, resolution, LLM provider/model, and `video:` / `mix:` settings matching your ComfyUI workflow). With `auto_tune: true` (default), `mvd prepare`, `mvd analyze`, and `mvd plan` automatically tune default transcription (`large-v3-turbo`), pacing, and lip-sync parameters for your track (`mvd tune [--apply]` previews or writes them to `project.yaml`). For non-English and non-Latin audio caveats (such as scripts not auto-detected by `auto_tune` or audio-only code-switching), see [Language Support & Known Limitations](docs/pipeline-and-qc.md#language-support--known-limitations).
 3. Export and bind your ComfyUI workflows under `workflows/` (see `workflows/README.md` and [Workflows & Model Bindings](docs/workflows.md)).
 
 ```bash

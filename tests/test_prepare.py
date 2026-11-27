@@ -191,7 +191,7 @@ def test_prepare_config_validation() -> None:
     cfg = PrepareConfig()
     assert cfg.stem_model == "htdemucs"
     assert cfg.stem_device == "auto"
-    assert cfg.whisper_model == "small"
+    assert cfg.whisper_model == "large-v3-turbo"
     assert cfg.whisper_language is None
 
     with pytest.raises(ValidationError):

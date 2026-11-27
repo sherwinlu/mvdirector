@@ -28,6 +28,8 @@ from mvdirector.errors import MediaToolError
 log = logging.getLogger(__name__)
 
 _HW_ENCODERS = ("h264_nvenc", "h264_videotoolbox")
+# Highest frame rate ``probe`` reports; above it the container's avg_frame_rate is bogus.
+_MAX_PLAUSIBLE_FPS = 1000
 _ENCODERS_LOCK = threading.Lock()
 _ENCODERS_CACHE: frozenset[str] | None = None
 
@@ -191,9 +193,11 @@ def probe(path: Path) -> MediaInfo:
     if video and video.get("avg_frame_rate") not in (None, "", "0/0", "N/A"):
         try:
             frac = Fraction(str(video["avg_frame_rate"]))
-            if frac > 0:
+            # A corrupt or hostile container can claim any rate; anything past
+            # _MAX_PLAUSIBLE_FPS is treated as unknown rather than trusted downstream.
+            if 0 < frac <= _MAX_PLAUSIBLE_FPS:
                 fps = float(frac)
-        except (ValueError, ZeroDivisionError):
+        except (ValueError, ZeroDivisionError, OverflowError):
             fps = None
     raw_duration = (data.get("format") or {}).get("duration", 0.0)
     try:

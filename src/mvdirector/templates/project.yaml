@@ -36,7 +36,8 @@ video:
   size_multiple: 1               # grid your workflow renders on (LTX: 64); sizes snap to it, keeping the aspect
   fps: 24
   max_clip_seconds: 8.0          # longest clip your video workflow handles well
-  min_clip_seconds: 1.5
+  min_clip_seconds: 2.5
+  broll_min_clip_seconds: null   # optional shorter min clip for high-intensity non-vocal B-roll drops
   handle_seconds: 0.25           # extra on each side of a shot, trimmed at assembly
   frame_multiple: 8              # frame rule multiple*n+offset (LTX: 8/1, Wan: 4/1, MiniMax: 1/0)
   frame_offset: 1
@@ -50,6 +51,9 @@ video:
   motion_no_subtitles: true      # prevent video models from rendering karaoke subtitles (not used in mix mode)
   motion_no_music: true          # tell audio-video models not to hallucinate background music
   motion_include_lyrics: false   # set true for prompt-driven lip-sync models (e.g. Seedance)
+  assembly_intercut: false       # true = beat-lock intercut high-intensity non-lipsync runs at assembly
+  assembly_intercut_min_intensity: 0.7  # minimum section intensity (0-1) to trigger assembly_intercut
+  assembly_intercut_anticipation_frames: 1  # frames before beat for assembly_intercut cuts (0-3)
 
 mix:                             # used when mode: mix (30-90+ minute continuous mixes)
   default_segment_seconds: 240.0 # fallback 4-min chapters when inputs.tracklist is null

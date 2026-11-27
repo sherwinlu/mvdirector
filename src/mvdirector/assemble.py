@@ -11,6 +11,7 @@ never accumulates and the picture stays locked to the music from start to finish
 from __future__ import annotations
 
 import logging
+import math
 import os
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -24,7 +25,15 @@ from mvdirector import media
 from mvdirector.audio import broadcast_qa as broadcast_qa_mod
 from mvdirector.audio import foley as foley_mod
 from mvdirector.errors import ConfigError, MVDError
-from mvdirector.models import Attempt, ContinuityMode, Manifest, RetryStrategy, Shot, ShotType
+from mvdirector.models import (
+    Analysis,
+    Attempt,
+    ContinuityMode,
+    Manifest,
+    RetryStrategy,
+    Shot,
+    ShotType,
+)
 from mvdirector.project import Project, require_safe_id
 from mvdirector.qc.color_drift import fit_color_drift_affine
 from mvdirector.review.policy import is_ready, refresh_reviews
@@ -198,6 +207,463 @@ def plan_clips(
         else:  # draft: black placeholder
             plans.append(ClipPlan(shot_id, frames, None, False, 0.0))
     return plans
+
+
+_MAX_INTERCUT_WINDOW_SECONDS = 3600.0
+# Fewer than 3 frames leaves libx264 without B-frames (dts=0), which shifts PTS/DTS when
+# concat-copied beside B-frame body pieces (duplicating a frame) and yields no visible dissolve
+# at 1 frame. Fall back to a clean hard cut below this floor.
+_MIN_XFADE_FRAMES = 3
+
+
+def _partition_intercut_windows(
+    run: list[tuple[Shot, ClipPlan]],
+) -> list[list[tuple[Shot, ClipPlan]]]:
+    """Split a long non-lipsync run into temporally local 2-3 shot intercut windows."""
+    n = len(run)
+    if n <= 3:
+        return [run]
+    windows: list[list[tuple[Shot, ClipPlan]]] = []
+    idx = 0
+    while idx < n:
+        rem = n - idx
+        size = 2 if rem in (2, 4) else 3
+        windows.append(run[idx : idx + size])
+        idx += size
+    return windows
+
+
+def _intercut_window(
+    run: list[tuple[Shot, ClipPlan]],
+    beats: list[float],
+    fps: int,
+    *,
+    tempo_bpm: float | None = None,
+    min_intensity: float,
+    anticipation_frames: int,
+    used_ids: set[str],
+    avoid_first_source: Path | None = None,
+) -> list[ClipPlan]:
+    """Beat-lock intercut one local 2-3 shot non-lipsync window, preserving exact frame count."""
+    originals = [p for _, p in run]
+    if len(run) < 2 or fps <= 0:
+        return originals
+
+    total_frames = sum(p.frames for p in originals)
+    if total_frames <= 0:
+        return originals
+
+    weighted_intensity = sum(s.intensity * p.frames for s, p in run) / total_frames
+    if weighted_intensity < min_intensity:
+        return originals
+
+    run_start = run[0][0].start
+    run_start_frame = round(run_start * fps)
+    run_end_frame = run_start_frame + total_frames
+    run_end = run_end_frame / fps
+    if run_end - run_start > _MAX_INTERCUT_WINDOW_SECONDS:
+        return originals
+
+    run_beats = sorted(
+        {b for b in beats if math.isfinite(b) and run_start + 1e-3 < b < run_end - 1e-3}
+    )
+    if (
+        len(run_beats) < 2
+        and tempo_bpm is not None
+        and math.isfinite(tempo_bpm)
+        and 50.0 <= tempo_bpm <= 220.0
+    ):
+        step_s = 60.0 / tempo_bpm
+        k = 1
+        synth: list[float] = []
+        while run_start + k * step_s < run_end - 1e-3:
+            synth.append(run_start + k * step_s)
+            k += 1
+        run_beats = synth
+    if len(run_beats) < 2:
+        return originals
+
+    beat_step_s = float(np.median(np.diff(run_beats)))
+    # Keep every intercut comfortably readable (>= 0.75s) so edits never feel stroby/jumpy,
+    # while breaking up 3-4s B-roll holds that drag like slow motion.
+    min_sub_frames = max(18, round(0.75 * fps))
+    relaxed_min = max(12, round(0.50 * fps))
+    step_pattern: tuple[int, ...]
+    if beat_step_s >= 0.70:
+        # Mid-tempo / ballad (<= 85 BPM): 2-beat hold alternating with 1-beat punch (~1.6s / ~0.8s)
+        step_pattern = (2, 1, 1) if weighted_intensity >= 0.85 else (2,)
+    elif weighted_intensity >= 0.85:
+        # Upbeat peak (120-160 BPM): 1-bar (~1.75s) anchor + two half-bar (~0.88s) punches
+        step_pattern = (4, 2, 2)
+    else:
+        # Moderate-high energy: clean 1-bar (~1.75-2.0s) cuts
+        step_pattern = (4,)
+
+    frame_edges = [run_start_frame]
+    pat_idx = 0
+    beat_idx = step_pattern[0] - 1
+    while beat_idx < len(run_beats):
+        cut_frame = round(run_beats[beat_idx] * fps) - anticipation_frames
+        if (
+            cut_frame - frame_edges[-1] >= min_sub_frames
+            and run_end_frame - cut_frame >= min_sub_frames
+        ):
+            frame_edges.append(cut_frame)
+            pat_idx += 1
+            beat_idx += step_pattern[pat_idx % len(step_pattern)]
+        else:
+            beat_idx += 1
+    frame_edges.append(run_end_frame)
+    if len(frame_edges) <= 2:
+        return originals
+
+    cursors = [max(0.0, p.head_handle + p.sync_delay) for p in originals]
+    # Use the actual generated clip frame budget (shot.num_frames minus in-point and a small
+    # tail-drift margin) while subtracting positive sync_delay from tail_handle so we never
+    # allocate frames past the end of the source clip.
+    remaining_frames: list[int] = []
+    for (s, p), c in zip(run, cursors):
+        eff_tail = max(0.0, p.tail_handle - max(0.0, p.sync_delay))
+        tail_bonus = max(0, round((eff_tail - min(0.10, eff_tail)) * fps))
+        remaining_frames.append(max(p.frames + tail_bonus, s.num_frames - round(c * fps) - 2))
+    if any(r < min_sub_frames for r in remaining_frames):
+        return originals
+
+    slice_needs = [f_b - f_a for f_a, f_b in zip(frame_edges[:-1], frame_edges[1:])]
+    rem_total = sum(slice_needs)
+    sub_plans: list[ClipPlan] = []
+    sub_sources: list[int] = []
+    prev_src = -1
+
+    def _usable_after(chosen: int, take: int, *, prev_extra: int = 0) -> int:
+        total = 0
+        for j, r in enumerate(remaining_frames):
+            nr = r
+            if prev_extra and j == prev_src:
+                nr -= prev_extra
+            if j == chosen:
+                nr -= take
+            if nr < 0:
+                return -1
+            if j == chosen or nr >= min_sub_frames:
+                total += nr
+        return total
+
+    def _no_sliver(idx: int, take: int) -> bool:
+        left = remaining_frames[idx] - take
+        return left == 0 or left >= min_sub_frames
+
+    def _next_shot_id(base_id: str) -> str:
+        seq = len(sub_plans)
+        cand = f"{base_id}_ic{seq:02d}"
+        while cand in used_ids:
+            seq += 1
+            cand = f"{base_id}_ic{seq:02d}"
+        used_ids.add(cand)
+        return cand
+
+    def _emit(src_idx: int, frames: int) -> None:
+        nonlocal prev_src, rem_total
+        src_plan = originals[src_idx]
+        sub_plans.append(
+            ClipPlan(
+                shot_id=_next_shot_id(src_plan.shot_id),
+                frames=frames,
+                source=src_plan.source,
+                is_video=True,
+                head_handle=round(cursors[src_idx], 4),
+                sync_delay=0.0,
+                drop_first_frame=False,
+                continuity=ContinuityMode.CUT,
+                tail_handle=0.0,
+            )
+        )
+        sub_sources.append(src_idx)
+        cursors[src_idx] += frames / fps
+        remaining_frames[src_idx] -= frames
+        rem_total -= frames
+        prev_src = src_idx
+
+    def _extend_prev(extra: int) -> None:
+        nonlocal rem_total
+        prev_plan = sub_plans[-1]
+        sub_plans[-1] = ClipPlan(
+            shot_id=prev_plan.shot_id,
+            frames=prev_plan.frames + extra,
+            source=prev_plan.source,
+            is_video=prev_plan.is_video,
+            head_handle=prev_plan.head_handle,
+            sync_delay=prev_plan.sync_delay,
+            drop_first_frame=prev_plan.drop_first_frame,
+            continuity=prev_plan.continuity,
+            tail_handle=0.0,
+        )
+        cursors[prev_src] += extra / fps
+        remaining_frames[prev_src] -= extra
+        rem_total -= extra
+
+    def _rollback() -> list[ClipPlan]:
+        for p in sub_plans:
+            used_ids.discard(p.shot_id)
+        return originals
+
+    for s_idx in range(len(slice_needs)):
+        need = slice_needs[s_idx]
+        has_next_slice = s_idx + 1 < len(slice_needs)
+        while need > 0:
+            rem_after_slice = rem_total - need
+            full = (
+                [
+                    idx
+                    for idx in range(len(originals))
+                    if idx != prev_src
+                    and remaining_frames[idx] >= need
+                    and _usable_after(idx, need) >= rem_after_slice
+                ]
+                if need >= relaxed_min
+                else []
+            )
+            if full:
+                chosen = max(
+                    full,
+                    key=lambda idx: (
+                        not sub_plans and originals[idx].source != avoid_first_source,
+                        _no_sliver(idx, need),
+                        remaining_frames[idx],
+                        -idx,
+                    ),
+                )
+                _emit(chosen, need)
+                need = 0
+                break
+
+            if need >= 2 * min_sub_frames:
+                split_cands: list[tuple[tuple[bool, bool, int, int], int, int]] = []
+                for idx in range(len(originals)):
+                    if idx == prev_src or remaining_frames[idx] < min_sub_frames:
+                        continue
+                    max_take = min(remaining_frames[idx], need - min_sub_frames)
+                    take_options = [max_take]
+                    if (
+                        remaining_frames[idx] > max_take
+                        and remaining_frames[idx] - max_take < min_sub_frames
+                    ):
+                        alt_take = remaining_frames[idx] - min_sub_frames
+                        if min_sub_frames <= alt_take <= max_take:
+                            take_options.append(alt_take)
+                    for take in take_options:
+                        if _usable_after(idx, take) >= rem_total - take:
+                            split_cands.append(
+                                (
+                                    (
+                                        not sub_plans
+                                        and originals[idx].source != avoid_first_source,
+                                        _no_sliver(idx, take),
+                                        remaining_frames[idx],
+                                        -idx,
+                                    ),
+                                    idx,
+                                    take,
+                                )
+                            )
+                if split_cands:
+                    _, chosen, take = max(split_cands, key=lambda item: item[0])
+                    _emit(chosen, take)
+                    need -= take
+                    continue
+
+            if sub_plans and prev_src >= 0 and remaining_frames[prev_src] > 0:
+                nudge_options: list[tuple[tuple[bool, int, int, int], int, int]] = []
+                for alt in range(len(originals)):
+                    if alt == prev_src or remaining_frames[alt] < min_sub_frames:
+                        continue
+                    min_gap = max(0, need - remaining_frames[alt])
+                    floor_gap = need - min_sub_frames
+                    drain_gap = remaining_frames[prev_src]
+                    for gap in dict.fromkeys((min_gap, floor_gap, drain_gap)):
+                        alt_take = need - gap
+                        if (
+                            0 < gap <= remaining_frames[prev_src]
+                            and min_sub_frames <= alt_take <= remaining_frames[alt]
+                            and _usable_after(alt, alt_take, prev_extra=gap) >= rem_after_slice
+                        ):
+                            nudge_options.append(
+                                (
+                                    (
+                                        _no_sliver(alt, alt_take),
+                                        -gap,
+                                        remaining_frames[alt],
+                                        -alt,
+                                    ),
+                                    alt,
+                                    gap,
+                                )
+                            )
+                if nudge_options:
+                    _, alt, gap = max(nudge_options, key=lambda item: item[0])
+                    _extend_prev(gap)
+                    _emit(alt, need - gap)
+                    need = 0
+                    break
+
+            if sub_plans and prev_src >= 0 and remaining_frames[prev_src] > 0:
+                if (
+                    remaining_frames[prev_src] >= need
+                    and _usable_after(prev_src, need) >= rem_after_slice
+                ):
+                    _extend_prev(need)
+                    need = 0
+                    break
+                if remaining_frames[prev_src] < need:
+                    ext = remaining_frames[prev_src]
+                    _extend_prev(ext)
+                    need -= ext
+                    if need < min_sub_frames:
+                        if has_next_slice:
+                            slice_needs[s_idx + 1] += need
+                            need = 0
+                            break
+                        if need < relaxed_min:
+                            return _rollback()
+                    continue
+
+            if need >= 2 * relaxed_min:
+                relaxed_cands = [
+                    idx
+                    for idx in range(len(originals))
+                    if idx != prev_src and remaining_frames[idx] >= relaxed_min
+                ]
+                if relaxed_cands:
+                    chosen = max(
+                        relaxed_cands,
+                        key=lambda idx: (
+                            not sub_plans and originals[idx].source != avoid_first_source,
+                            remaining_frames[idx],
+                            -idx,
+                        ),
+                    )
+                    take = min(remaining_frames[chosen], need - relaxed_min)
+                    _emit(chosen, take)
+                    need -= take
+                    continue
+
+            return _rollback()
+
+    if len(sub_plans) < 2:
+        return _rollback()
+
+    # Non-final sub-clips of a source keep tail_handle=0.0 so xfade never borrows and replays
+    # frames that will appear in a later sub-clip from that same source.
+    last_pos: dict[int, int] = {src_idx: pos for pos, src_idx in enumerate(sub_sources)}
+    final_plans: list[ClipPlan] = []
+    for pos, (plan, src_idx) in enumerate(zip(sub_plans, sub_sources)):
+        if pos == last_pos[src_idx] and remaining_frames[src_idx] > 0:
+            final_plans.append(
+                ClipPlan(
+                    shot_id=plan.shot_id,
+                    frames=plan.frames,
+                    source=plan.source,
+                    is_video=plan.is_video,
+                    head_handle=plan.head_handle,
+                    sync_delay=plan.sync_delay,
+                    drop_first_frame=plan.drop_first_frame,
+                    continuity=plan.continuity,
+                    tail_handle=round(remaining_frames[src_idx] / fps, 4),
+                )
+            )
+        else:
+            final_plans.append(plan)
+    return final_plans
+
+
+def _intercut_run(
+    run: list[tuple[Shot, ClipPlan]],
+    beats: list[float],
+    fps: int,
+    *,
+    tempo_bpm: float | None = None,
+    min_intensity: float,
+    anticipation_frames: int,
+    used_ids: set[str] | None = None,
+) -> list[ClipPlan]:
+    """Beat-lock intercut one contiguous non-lipsync video run, preserving exact frame count."""
+    originals = [p for _, p in run]
+    if len(run) < 2 or fps <= 0:
+        return originals
+    active_ids = used_ids if used_ids is not None else {p.shot_id for p in originals}
+    out: list[ClipPlan] = []
+    for window in _partition_intercut_windows(run):
+        avoid_src = out[-1].source if out else None
+        out.extend(
+            _intercut_window(
+                window,
+                beats,
+                fps,
+                tempo_bpm=tempo_bpm,
+                min_intensity=min_intensity,
+                anticipation_frames=anticipation_frames,
+                used_ids=active_ids,
+                avoid_first_source=avoid_src,
+            )
+        )
+    return out
+
+
+def intercut_plans(
+    plans: list[ClipPlan],
+    manifest: Manifest,
+    analysis: Analysis | None,
+    *,
+    min_intensity: float = 0.70,
+    anticipation_frames: int = 1,
+) -> list[ClipPlan]:
+    """Beat-lock intercut high-intensity contiguous non-lipsync video runs at assembly time.
+
+    Lip-sync shots, calm sections (< ``min_intensity``), still holds, and ``CONTINUE`` chains
+    are preserved untouched. Total frame count is conserved identically for every run.
+    """
+    if analysis is None or len(plans) != len(manifest.shots) or len(plans) < 2:
+        return list(plans)
+
+    used_ids: set[str] = {p.shot_id for p in plans}
+    result: list[ClipPlan] = []
+    run: list[tuple[Shot, ClipPlan]] = []
+
+    def _flush() -> None:
+        if not run:
+            return
+        result.extend(
+            _intercut_run(
+                run,
+                analysis.beats,
+                manifest.fps,
+                tempo_bpm=analysis.tempo_bpm,
+                min_intensity=min_intensity,
+                anticipation_frames=anticipation_frames,
+                used_ids=used_ids,
+            )
+        )
+        run.clear()
+
+    for idx, (shot, plan) in enumerate(zip(manifest.shots, plans)):
+        next_is_continue = (
+            idx + 1 < len(plans) and plans[idx + 1].continuity is ContinuityMode.CONTINUE
+        )
+        eligible = (
+            shot.type is not ShotType.LIPSYNC
+            and plan.is_video
+            and plan.source is not None
+            and plan.continuity is ContinuityMode.CUT
+            and not next_is_continue
+            and plan.frames > 0
+        )
+        if eligible:
+            run.append((shot, plan))
+        else:
+            _flush()
+            result.append(plan)
+    _flush()
+    return result
 
 
 def clip_command(
@@ -429,10 +895,30 @@ def assemble(
     out_w, out_h = _resolve_output_size(project, draft=draft, width=width, height=height)
     refresh_reviews(manifest, project.config)
     plans = plan_clips(project, manifest, force, draft=draft)
+    video_cfg = project.config.video
+    if video_cfg.assembly_intercut:
+        try:
+            analysis = project.load_analysis()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Skipping assembly intercut: could not load analysis (%s)", exc)
+        else:
+            before_count = len(plans)
+            plans = intercut_plans(
+                plans,
+                manifest,
+                analysis,
+                min_intensity=video_cfg.assembly_intercut_min_intensity,
+                anticipation_frames=video_cfg.assembly_intercut_anticipation_frames,
+            )
+            if len(plans) != before_count:
+                log.info(
+                    "Assembly intercut expanded %d shot(s) into %d beat-locked clip(s).",
+                    before_count,
+                    len(plans),
+                )
     mix = project.input_path(project.config.inputs.mix, "mix")
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    video_cfg = project.config.video
     grade_vf = color_grade_filter(video_cfg.color_grade, video_cfg.film_grain)
     xfade_name = _XFADE_MAP.get(video_cfg.transition)
     use_xfade = xfade_name is not None and video_cfg.transition_seconds > 0.0
@@ -453,7 +939,7 @@ def assemble(
         clips: list[tuple[ClipPlan, Path, int]] = []
         for idx, plan in enumerate(active_plans):
             safe_id = require_safe_id(plan.shot_id, "shot id")
-            clip = work / f"{safe_id}.mp4"
+            clip = work / f"{idx:04d}_{safe_id}.mp4"
             is_last = idx == len(active_plans) - 1
             # Beat-preserving xfade tail borrowing (inspired by thefullnacho/on-the-one conform.py):
             # borrow extra tail frames on shot i so shot i+1 still starts at its exact musical beat.
@@ -475,6 +961,8 @@ def assemble(
                         0, round((plan.tail_handle - max(0.0, plan.sync_delay)) * manifest.fps)
                     )
                     overlap = min(overlap, avail_tail)
+                if overlap < _MIN_XFADE_FRAMES:
+                    overlap = 0
             else:
                 overlap = 0
             clips.append((plan, clip, overlap))
@@ -511,8 +999,8 @@ def assemble(
                     # Clean-room VAE color-drift affine match using exact boundary frames only
                     # (inspired by SonderSaid/ComfyUI-Sonder-Editor color_correction.py).
                     prev_path, prev_last_idx = prev_clip_info
-                    prev_png = work / f"{safe_id}_prev_ref.png"
-                    curr_png = work / f"{safe_id}_curr_ref.png"
+                    prev_png = work / f"{c_idx:04d}_{safe_id}_prev_ref.png"
+                    curr_png = work / f"{c_idx:04d}_{safe_id}_curr_ref.png"
                     # First frame this clip actually plays (after any dropped handoff seam frame).
                     in_frame = round(max(0.0, plan.head_handle + plan.sync_delay) * manifest.fps)
                     start_idx = in_frame + (1 if plan.drop_first_frame else 0)

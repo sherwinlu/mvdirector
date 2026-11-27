@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import re
 import statistics
 import unicodedata
@@ -1249,14 +1250,69 @@ def _neighbor_singer_ids(manifest: Manifest, shot: Shot) -> set[str]:
     return set()
 
 
+def _non_singing_gaps(
+    slice_start: float,
+    slice_end: float,
+    covered_spans: list[tuple[float, float]],
+    *,
+    pad: float = 0.20,
+    min_gap: float = 0.25,
+) -> list[tuple[float, float]]:
+    """Spans inside ``[slice_start, slice_end]`` outside every padded singing span."""
+    if (
+        not covered_spans
+        or not (math.isfinite(slice_start) and math.isfinite(slice_end))
+        or slice_end - slice_start < min_gap
+    ):
+        return []
+    safe_pad = max(0.0, float(pad)) if math.isfinite(pad) else 0.0
+    padded = _merge_spans(
+        [
+            (max(0.0, a - safe_pad), b + safe_pad)
+            for a, b in covered_spans
+            if math.isfinite(a) and math.isfinite(b) and b > a
+        ]
+    )
+    if not padded:
+        return []
+    gaps: list[tuple[float, float]] = []
+    cursor = slice_start
+    for a, b in padded:
+        if b <= cursor:
+            continue
+        if a >= slice_end:
+            break
+        if a - cursor >= min_gap:
+            gaps.append((cursor, a))
+        cursor = max(cursor, b)
+    if slice_end - cursor >= min_gap:
+        gaps.append((cursor, slice_end))
+    return gaps
+
+
 def _populate_slice_mutes(
     manifest: Manifest,
     analysis: Analysis,
     voice_map: dict[str, str],
 ) -> None:
-    """Record foreign-singer mute spans on lip-sync slices so voices never bleed across cuts."""
+    """Record foreign-singer and non-singing lead-in/tail mute spans on lip-sync slices."""
     shots = manifest.shots
     multi_char = len(manifest.characters) > 1
+    aligned_lyric_spans = [
+        (ln.start, ln.end)
+        for ln in analysis.lyric_lines
+        if (
+            ln.timing_source == "aligned"
+            and ln.start is not None
+            and ln.end is not None
+            and ln.end > ln.start
+        )
+    ]
+    singing_spans: list[tuple[float, float]] = (
+        aligned_lyric_spans
+        if aligned_lyric_spans
+        else [(w.start, w.end) for w in analysis.vocal_windows if w.end > w.start]
+    )
     for idx, shot in enumerate(shots):
         if shot.type is not ShotType.LIPSYNC:
             shot.audio_slice.mute_spans = []
@@ -1266,6 +1322,17 @@ def _populate_slice_mutes(
         is_together = len(active) >= 2
         handle_mutes: list[tuple[float, float]] = []
         body_mutes: list[tuple[float, float]] = []
+
+        # Silence instrumental lead-in / tail / gaps inside the slice so stem bleed never drives
+        # mouth movement before singing begins or after a lyric ends.
+        for g_start, g_end in _non_singing_gaps(s_start, s_end, singing_spans):
+            if g_start < shot.start:
+                handle_mutes.append((g_start, min(g_end, shot.start)))
+            if g_end > shot.end:
+                handle_mutes.append((max(g_start, shot.end), g_end))
+            in_s, in_e = max(g_start, shot.start), min(g_end, shot.end)
+            if in_e - in_s >= 0.01:
+                body_mutes.append((in_s, in_e))
 
         if multi_char and active:
             if idx > 0 and s_start < shot.start:

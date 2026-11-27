@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -18,7 +19,7 @@ from PIL import Image
 from typer.testing import CliRunner
 
 from mvdirector import api
-from mvdirector.assemble import ClipPlan, clip_command, source_frame_index
+from mvdirector.assemble import ClipPlan, ClipTiming, clip_command, source_frame_index
 from mvdirector.bench.config import BenchmarkConfig, GPUCostConfig, ModelArm
 from mvdirector.bench.dataset import QCLabelItem
 from mvdirector.bench.planning import run_planning_arm
@@ -349,6 +350,11 @@ def test_review_ui_escapes_untrusted_markdown() -> None:
         (0.3125, False, 0, 16, 5),
         # Equal rates and frame-aligned in-points reduce to the plain frame offset.
         (0.25, True, 4, 24, 11),
+        # Equal rates, in-point between frames: the next source frame plays first
+        # (0.1 s x 24 = frame 2.4 -> 3; round() picked 2).
+        (0.1, False, 0, 24, 3),
+        (0.1, True, 5, 24, 9),
+        (0.137, False, 0, 24, 4),
     ],
 )
 def test_source_frame_index_matches_ffmpeg_conform(
@@ -357,10 +363,21 @@ def test_source_frame_index_matches_ffmpeg_conform(
     assert source_frame_index(in_point, drop, played, 24, src_fps) == expected
 
 
+def test_clip_timing_played_frames_use_conform_mapping() -> None:
+    """ShotRunner's handoff frame comes from ClipTiming; it must agree with the shared mapping."""
+    timing = ClipTiming(
+        in_point=0.1, sync_delay=0.1, drop_first_frame=False, continuity=ContinuityMode.CUT
+    )
+    assert timing.first_played_frame(24) == 3
+    assert timing.last_played_frame(12, 24) == 14
+    assert timing.last_played_frame(12, 24, 16.0) == source_frame_index(0.1, False, 11, 24, 16)
+
+
 @needs_ffmpeg
-def test_source_frame_index_against_real_clip_command(tmp_path: Path) -> None:
+@pytest.mark.parametrize("src_fps", [16, 24, 25])
+def test_source_frame_index_against_real_clip_command(tmp_path: Path, src_fps: int) -> None:
     """Handoff and seam frames must be the frames that actually play after conform."""
-    src_fps, fps = 16, 24
+    fps = 24
     src = tmp_path / "src.mkv"
     raw = b"".join(np.full((32, 32), 4 * i, np.uint8).tobytes() for i in range(40))
     subprocess.run(
@@ -371,7 +388,8 @@ def test_source_frame_index_against_real_clip_command(tmp_path: Path) -> None:
     )
     # Avoid exact half-tick ties (e.g. 0.3125 s at 16 fps): ffmpeg resolves those by the
     # container's timestamp precision, which no closed form can know.
-    for in_point, drop in ((0.0, True), (0.1, True), (0.1, False), (0.27, True), (0.5, True)):
+    cases = ((0.0, True), (0.1, True), (0.1, False), (0.137, False), (0.27, True), (0.5, True))
+    for in_point, drop in cases:
         plan = ClipPlan(
             "s001",
             12,
@@ -391,4 +409,19 @@ def test_source_frame_index_against_real_clip_command(tmp_path: Path) -> None:
         frames = np.frombuffer(decoded, np.uint8).reshape(-1, 32, 32)
         played = [int(round(f[8:24, 8:24].mean() / 4)) for f in frames]
         expected = [source_frame_index(in_point, drop, j, fps, src_fps) for j in range(12)]
-        assert played == expected, (in_point, drop)
+        assert played == expected, (src_fps, in_point, drop)
+
+
+def test_source_frame_index_is_constant_time_and_total() -> None:
+    """A probed rate like 90000 fps (odd timebase) must not turn the lookup into a long scan."""
+    started = time.monotonic()
+    for _ in range(200):
+        source_frame_index(0.1, True, 479, 24, 1_000_000.0)
+    assert time.monotonic() - started < 0.5
+    assert source_frame_index(0.1, True, 479, 24, 1_000_000.0) == source_frame_index(
+        0.1, True, 479, 24, 1_000_000
+    )
+    # Non-finite or negative in-points degrade to the clip start instead of raising.
+    assert source_frame_index(float("nan"), False, 0, 24, 24) == 0
+    assert source_frame_index(float("inf"), False, 3, 24, 24) == 3
+    assert source_frame_index(-1.0, False, 0, 24, 24) == 0

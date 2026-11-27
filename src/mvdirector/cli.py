@@ -2094,7 +2094,7 @@ def bench_init_config(
     ),
     overwrite: bool = typer.Option(False, "--overwrite", help="Replace an existing config file."),
 ) -> None:
-    """Write a starter bench.yaml with the 6-model + 1-control matrix and token pricing."""
+    """Write a starter bench.yaml with the default multi-model matrix and token pricing."""
     from mvdirector.bench import write_default_benchmark_config
 
     try:

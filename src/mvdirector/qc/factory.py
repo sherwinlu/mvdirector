@@ -45,6 +45,7 @@ class QualityGates:
     face_backend: str = "mediapipe"
     lipsync_backend: str = "mediapipe"
     vision_reason: str | None = None
+    qc_check_plugins: tuple[str, ...] = ()
 
     def close(self) -> None:
         """Release native resources held by the face and lip-sync backends (a no-op for fakes)."""
@@ -107,6 +108,8 @@ class QualityGates:
                     self.vision_reason or "vision checks disabled",
                 )
             )
+        if self.qc_check_plugins:
+            active.extend(self.qc_check_plugins)
         return active, skipped
 
 
@@ -177,4 +180,5 @@ def build_quality_gates(config: ProjectConfig, llm: LLMClient | None) -> Quality
         face_backend=config.qc.face_backend,
         lipsync_backend=config.qc.lipsync_backend,
         vision_reason=vision_reason,
+        qc_check_plugins=tuple(dict.fromkeys(config.plugins.qc_checks)),
     )

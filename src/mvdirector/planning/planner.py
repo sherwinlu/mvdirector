@@ -1401,13 +1401,18 @@ def _non_singing_gaps(
     min_gap: float = 0.25,
 ) -> list[tuple[float, float]]:
     """Spans inside ``[slice_start, slice_end]`` outside every padded singing span."""
+    safe_min_gap = (
+        max(1e-6, float(min_gap))
+        if (not isinstance(min_gap, bool) and math.isfinite(min_gap))
+        else 0.25
+    )
     if (
         not covered_spans
         or not (math.isfinite(slice_start) and math.isfinite(slice_end))
-        or slice_end - slice_start < min_gap
+        or slice_end - slice_start < safe_min_gap
     ):
         return []
-    safe_pad = max(0.0, float(pad)) if math.isfinite(pad) else 0.0
+    safe_pad = max(0.0, float(pad)) if (not isinstance(pad, bool) and math.isfinite(pad)) else 0.0
     padded = _merge_spans(
         [
             (max(0.0, a - safe_pad), b + safe_pad)
@@ -1424,10 +1429,10 @@ def _non_singing_gaps(
             continue
         if a >= slice_end:
             break
-        if a - cursor >= min_gap:
+        if a - cursor >= safe_min_gap:
             gaps.append((cursor, a))
         cursor = max(cursor, b)
-    if slice_end - cursor >= min_gap:
+    if slice_end - cursor >= safe_min_gap:
         gaps.append((cursor, slice_end))
     return gaps
 
@@ -1440,6 +1445,7 @@ def _populate_slice_mutes(
     """Record foreign-singer and non-singing lead-in/tail mute spans on lip-sync slices."""
     shots = manifest.shots
     multi_char = len(manifest.characters) > 1
+    vocal_spans = [(w.start, w.end) for w in analysis.vocal_windows if w.end > w.start]
     aligned_lyric_spans = [
         (ln.start, ln.end)
         for ln in analysis.lyric_lines
@@ -1450,10 +1456,14 @@ def _populate_slice_mutes(
             and ln.end > ln.start
         )
     ]
+    if aligned_lyric_spans and vocal_spans:
+        aligned_lyric_spans = [
+            (a, b)
+            for a, b in aligned_lyric_spans
+            if any(min(b, ve) > max(a, vs) for vs, ve in vocal_spans)
+        ]
     singing_spans: list[tuple[float, float]] = (
-        aligned_lyric_spans
-        if aligned_lyric_spans
-        else [(w.start, w.end) for w in analysis.vocal_windows if w.end > w.start]
+        aligned_lyric_spans if aligned_lyric_spans else vocal_spans
     )
     for idx, shot in enumerate(shots):
         if shot.type is not ShotType.LIPSYNC:

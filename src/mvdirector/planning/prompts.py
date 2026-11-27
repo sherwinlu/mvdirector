@@ -462,8 +462,7 @@ Rules:
   passport mugshot.
 - Character close_up framing: frame from just above the head to the collarbone so the face fills
   at least a third of the frame height, with both eyes and mouth clearly inside the frame. Never
-  write
-  "from the chest up" or "upper chest up" for close_up; that is medium_close. Never ask for
+  write "from the chest up" or "upper chest up" for close_up; that is medium_close. Never ask for
   extreme mouth-only or eye-only macros on character shots, which crop off the head and break
   face framing checks. On close_up and medium_close shots, describe ONLY face, neck, shoulders,
   upper torso, and raised hands—never mention boots, shoes, feet, legs, lower skirt hems, or

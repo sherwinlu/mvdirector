@@ -218,10 +218,11 @@ function renderShotsTab(track) {
     const sh = d.shots[meta.id];
     if (!sh) return `<section class="card"><h2>${esc(d.alias)}</h2><p class="muted">Shot missing.</p></section>`;
     const stillText = state.showComposed ? sh.composed_still_prompt : sh.still_prompt;
+    const castList = (sh.characters && sh.characters.length) ? sh.characters : (sh.character ? [sh.character] : []);
     return `
       <section class="card">
         <h2>${esc(d.alias)} <span class="pill">${esc(sh.type)} · ${esc(sh.framing)}</span></h2>
-        <div class="kv"><b>Set:</b> ${esc(sh.setting)} ${sh.wardrobe ? `· <b>Wardrobe:</b> <code>${esc(sh.wardrobe)}</code>` : ""} ${sh.character ? `· <b>Cast:</b> <code>${esc((sh.characters || [sh.character]).join(", "))}</code>` : ""}</div>
+        <div class="kv"><b>Set:</b> ${esc(sh.setting)} ${sh.wardrobe ? `· <b>Wardrobe:</b> <code>${esc(sh.wardrobe)}</code>` : ""} ${castList.length ? `· <b>Cast:</b> <code>${esc(castList.join(", "))}</code>` : ""}</div>
         <div class="section-label">${state.showComposed ? "Composed ComfyUI Still Prompt" : "Raw Director still_prompt"}</div>
         <div class="prompt-box">${esc(stillText)}</div>
         <div class="section-label">motion_prompt</div>

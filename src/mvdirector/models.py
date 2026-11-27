@@ -652,6 +652,14 @@ class Attempt(StrictModel):
             "handles (ignored on lip-sync shots)."
         ),
     )
+
+    @field_validator("optimal_in_offset", mode="before")
+    @classmethod
+    def _reject_bool_optimal_in_offset(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("optimal_in_offset must be a number, not a boolean.")
+        return value
+
     regressed: bool = Field(
         default=False,
         description=(

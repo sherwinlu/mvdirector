@@ -15,6 +15,7 @@ import math
 import os
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from PIL import Image
 from mvdirector import media
 from mvdirector.audio import broadcast_qa as broadcast_qa_mod
 from mvdirector.audio import foley as foley_mod
-from mvdirector.errors import ConfigError, MVDError
+from mvdirector.errors import ConfigError, MediaToolError, MVDError
 from mvdirector.models import (
     Analysis,
     Attempt,
@@ -150,6 +151,8 @@ def clip_timing(
         raw_offset = video.sync_delay_seconds if sync_delay_compensation else 0.0
     else:
         raw_offset = video.optimal_in_offset
+    if not math.isfinite(raw_offset):
+        raw_offset = 0.0
     delay = round(max(-head, min(tail, raw_offset)), 4)
     continuity = shot.continuity
     if continuity is ContinuityMode.CONTINUE and not used_handoff:
@@ -622,8 +625,17 @@ def intercut_plans(
     Lip-sync shots, calm sections (< ``min_intensity``), still holds, and ``CONTINUE`` chains
     are preserved untouched. Total frame count is conserved identically for every run.
     """
-    if analysis is None or len(plans) != len(manifest.shots) or len(plans) < 2:
+    if (
+        analysis is None
+        or len(plans) != len(manifest.shots)
+        or len(plans) < 2
+        or isinstance(min_intensity, bool)
+        or not math.isfinite(min_intensity)
+    ):
         return list(plans)
+    safe_anticipation = (
+        max(0, int(anticipation_frames)) if not isinstance(anticipation_frames, bool) else 0
+    )
 
     used_ids: set[str] = {p.shot_id for p in plans}
     result: list[ClipPlan] = []
@@ -639,7 +651,7 @@ def intercut_plans(
                 manifest.fps,
                 tempo_bpm=analysis.tempo_bpm,
                 min_intensity=min_intensity,
-                anticipation_frames=anticipation_frames,
+                anticipation_frames=safe_anticipation,
                 used_ids=used_ids,
             )
         )
@@ -1002,7 +1014,13 @@ def assemble(
                     prev_png = work / f"{c_idx:04d}_{safe_id}_prev_ref.png"
                     curr_png = work / f"{c_idx:04d}_{safe_id}_curr_ref.png"
                     # First frame this clip actually plays (after any dropped handoff seam frame).
-                    in_frame = round(max(0.0, plan.head_handle + plan.sync_delay) * manifest.fps)
+                    source_fps = float(manifest.fps)
+                    if video_cfg.i2v_fps is not None:
+                        with suppress(MediaToolError):
+                            probed = media.probe(plan.source)
+                            if probed.fps is not None and probed.fps > 0:
+                                source_fps = probed.fps
+                    in_frame = round(max(0.0, plan.head_handle + plan.sync_delay) * source_fps)
                     start_idx = in_frame + (1 if plan.drop_first_frame else 0)
                     media.extract_frame_at_index(prev_path, max(0, prev_last_idx), prev_png)
                     media.extract_frame_at_index(plan.source, start_idx, curr_png)

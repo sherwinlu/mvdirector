@@ -935,6 +935,18 @@ class ImageQCConfig(_Section):
     vision_identity_hard_min: float = Field(default=0.50, ge=0.0, le=1.0, allow_inf_nan=False)
     vision_identity_good: float = Field(default=0.80, ge=0.0, le=1.0, allow_inf_nan=False)
 
+    @field_validator(
+        "vision_identity_min_face_px",
+        "vision_identity_hard_min",
+        "vision_identity_good",
+        mode="before",
+    )
+    @classmethod
+    def _reject_bool_for_vision_identity_number(cls, value: Any, info: ValidationInfo) -> Any:
+        if isinstance(value, bool):
+            raise ValueError(f"qc.image.{info.field_name} must be a number, not a boolean.")
+        return value
+
     @model_validator(mode="after")
     def _check_vision_identity_thresholds(self) -> ImageQCConfig:
         if self.vision_identity_good < self.vision_identity_hard_min:
@@ -1020,6 +1032,19 @@ class VideoQCConfig(_Section):
     vision_identity_min_face_px: int = Field(default=40, ge=16)
     vision_identity_hard_min: float = Field(default=0.50, ge=0.0, le=1.0, allow_inf_nan=False)
     vision_identity_good: float = Field(default=0.80, ge=0.0, le=1.0, allow_inf_nan=False)
+
+    @field_validator(
+        "vision_identity_frames",
+        "vision_identity_min_face_px",
+        "vision_identity_hard_min",
+        "vision_identity_good",
+        mode="before",
+    )
+    @classmethod
+    def _reject_bool_for_vision_identity_number(cls, value: Any, info: ValidationInfo) -> Any:
+        if isinstance(value, bool):
+            raise ValueError(f"qc.video.{info.field_name} must be a number, not a boolean.")
+        return value
 
     @model_validator(mode="after")
     def _check_vision_identity_thresholds(self) -> VideoQCConfig:
@@ -1158,7 +1183,9 @@ class QCConfig(_Section):
     image: ImageQCConfig = Field(default_factory=ImageQCConfig)
     video: VideoQCConfig = Field(default_factory=VideoQCConfig)
 
-    @field_validator("vision_spec", "vision_artifacts", "vision_character", mode="before")
+    @field_validator(
+        "pass_score", "vision_spec", "vision_artifacts", "vision_character", mode="before"
+    )
     @classmethod
     def _reject_bool_for_vision_threshold(cls, value: Any, info: ValidationInfo) -> Any:
         if isinstance(value, bool):

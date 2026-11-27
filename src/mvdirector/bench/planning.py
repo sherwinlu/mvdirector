@@ -20,13 +20,14 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from mvdirector.bench.config import (
     BenchmarkConfig,
     ModelArm,
     open_bench_project,
     resolve_bench_environ,
+    validate_budget_usd,
 )
 from mvdirector.bench.telemetry import CallRecord, InstrumentedLLM, TelemetrySummary
 from mvdirector.config import CONFIG_FILENAME, ProjectConfig
@@ -86,6 +87,8 @@ _INVARIANT_JEWELRY_RE = re.compile(
 class PlanningQualityMetrics(BaseModel):
     """Automated Track 1 quality and guardrail-compliance metrics for one planned manifest."""
 
+    model_config = ConfigDict(allow_inf_nan=False)
+
     total_shots: int = 0
     singer_shots: int = 0
     broll_shots: int = 0
@@ -110,6 +113,8 @@ class PlanningQualityMetrics(BaseModel):
 
 class PlanningArmResult(BaseModel):
     """Saved benchmark outcome for one (track, model arm) planning run."""
+
+    model_config = ConfigDict(allow_inf_nan=False)
 
     track: str
     source_project: str
@@ -391,6 +396,10 @@ def _sanitized_arm_yaml(source_project: Project, arm: ModelArm, title: str) -> d
             parent_copy = dict(parent)
             parent_copy[child_key] = _redact_literal_base_url(parent_copy[child_key])
             raw_yaml[parent_key] = parent_copy
+    planning_raw = raw_yaml.get("planning")
+    planning_copy = dict(planning_raw) if isinstance(planning_raw, dict) else {}
+    planning_copy["audio_listen"] = "never"
+    raw_yaml["planning"] = planning_copy
     return raw_yaml
 
 
@@ -590,6 +599,7 @@ def run_planning_benchmark(
     """Run Track 1 planning across selected ``projects`` and ``arms`` and write merged summaries."""
     if not projects:
         raise ConfigError("Provide at least one project directory for Track 1 planning benchmark.")
+    budget_cap = validate_budget_usd(max_budget_usd)
     arms = config.select_arms(arm_ids, include_controls=include_controls)
     results: list[PlanningArmResult] = []
     spent_usd = 0.0
@@ -599,10 +609,10 @@ def run_planning_benchmark(
         base_track = _safe_track_slug(project_dir.resolve().name)
         track = base_track
         suffix = 2
-        while track in used_tracks:
+        while track.casefold() in used_tracks:
             track = f"{base_track}-{suffix}"
             suffix += 1
-        used_tracks.add(track)
+        used_tracks.add(track.casefold())
         for arm in arms:
             arm_dir = out_root / "planning" / track / arm.id
             already_cached = (
@@ -612,10 +622,10 @@ def run_planning_benchmark(
                 )
                 is not None
             )
-            if max_budget_usd is not None and not already_cached and spent_usd >= max_budget_usd:
+            if budget_cap is not None and not already_cached and spent_usd >= budget_cap:
                 if on_progress and not budget_hit:
                     on_progress(
-                        f"Budget cap reached (${spent_usd:.4f} >= ${max_budget_usd:.2f}); "
+                        f"Budget cap reached (${spent_usd:.4f} >= ${budget_cap:.2f}); "
                         "skipping remaining uncached arms."
                     )
                 budget_hit = True

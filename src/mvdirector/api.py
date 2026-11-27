@@ -497,15 +497,14 @@ def validate_project(
             f"LLM settings ({llm_config.provider}, {llm_config.model}); `mvd llm-check` tests them",
             _check_llm_config,
         )
-    for label_prefix, extra_cfg, feature_active in (
-        ("Vision QC LLM", project.config.qc.llm, project.config.qc.vision_enabled),
-        (
-            "Audio listen LLM",
-            project.config.planning.audio_llm,
-            project.config.planning.audio_listen != "never",
-        ),
-    ):
-        if feature_active and extra_cfg is not None and extra_cfg.enabled:
+    qc_extra = project.config.qc.llm if project.config.qc.vision_enabled else None
+    audio_extra = _resolve_audio_llm_config(project.config)
+    extra_llms: list[tuple[str, LLMConfig | None]] = [
+        ("Vision QC LLM", qc_extra),
+        ("Audio listen LLM", audio_extra if audio_extra is not qc_extra else None),
+    ]
+    for label_prefix, extra_cfg in extra_llms:
+        if extra_cfg is not None and extra_cfg.enabled:
 
             def _check_extra(cfg: LLMConfig = extra_cfg) -> None:
                 with _close_llm(_build_project_llm(project, cfg)):
@@ -548,7 +547,8 @@ def check_llm(project_dir: ProjectRef, skip_image: bool = False) -> LLMCheckOutc
     config = project.config.llm
     qc_cfg = project.config.qc.llm
     outcome = LLMCheckOutcome(config.provider, config.model, config.enabled)
-    outcome.vision_needed = project.config.qc.vision_enabled
+    qc_explicitly_disabled = qc_cfg is not None and not qc_cfg.enabled
+    outcome.vision_needed = project.config.qc.vision_enabled and not qc_explicitly_disabled
     outcome.tested_images = outcome.vision_needed and not skip_image
     if config.enabled:
         with _close_llm(_build_project_llm(project, config)) as client:

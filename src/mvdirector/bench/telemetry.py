@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TypeVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from mvdirector.bench.config import ModelArm, ModelPricing
 from mvdirector.llm.base import (
@@ -28,6 +28,8 @@ T = TypeVar("T", bound=BaseModel)
 
 class CallRecord(BaseModel):
     """Serializable per-request telemetry entry."""
+
+    model_config = ConfigDict(allow_inf_nan=False)
 
     stage: str = ""
     schema_name: str
@@ -51,6 +53,8 @@ class CallRecord(BaseModel):
 
 class TelemetrySummary(BaseModel):
     """Aggregated LLM telemetry across a planning run or Vision QC sweep."""
+
+    model_config = ConfigDict(allow_inf_nan=False)
 
     calls: int = 0
     succeeded: int = 0

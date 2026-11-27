@@ -184,6 +184,9 @@ def crop_face(image: np.ndarray, bbox: tuple[int, int, int, int], pad: float = 0
     return image[top:bottom, left:right]
 
 
+_IMAGE_ERRORS = (OSError, UnidentifiedImageError, ValueError, Image.DecompressionBombError)
+
+
 def _readable_image(path: Path) -> bool:
     """True when ``path`` is a non-empty regular file that Pillow recognizes as an image."""
     try:
@@ -192,9 +195,23 @@ def _readable_image(path: Path) -> bool:
         with Image.open(path) as opened:
             opened.verify()
         return True
-    except (OSError, UnidentifiedImageError, ValueError):
+    except _IMAGE_ERRORS:
         log.warning("Skipping unreadable reference face image: %s", path)
         return False
+
+
+def _skip_incomplete_identity(
+    last_error: LLMError | None,
+    last_image_error: Exception | None,
+    disabled_reason: str | None,
+) -> CheckResult:
+    if last_error is not None:
+        return skipped("identity", f"vision identity check errored: {last_error}")
+    if last_image_error is not None:
+        return skipped("identity", f"vision identity image unreadable: {last_image_error}")
+    if disabled_reason:
+        return skipped("identity", disabled_reason)
+    return skipped("identity", "no face available to compare")
 
 
 def _disable_for_unsupported_images(judge: VisionJudge, exc: ImagesNotSupportedError) -> str:
@@ -293,7 +310,7 @@ def vision_identity_check(
             except ImagesNotSupportedError as exc:
                 reason = _disable_for_unsupported_images(judge, exc)
                 return skipped("identity", reason)
-            except (OSError, UnidentifiedImageError, ValueError) as exc:
+            except (*_IMAGE_ERRORS, TypeError) as exc:
                 log.warning("Vision identity check could not encode image: %s", exc)
                 last_image_error = exc
                 if best is not None and best[0] < hard_min:
@@ -320,15 +337,16 @@ def vision_identity_check(
         if judge.disabled_reason:
             break
     if not frame_scores:
-        if last_error is not None:
-            return skipped("identity", f"vision identity check errored: {last_error}")
-        if last_image_error is not None:
-            return skipped("identity", f"reference face image unreadable: {last_image_error}")
-        if judge.disabled_reason:
-            return skipped("identity", judge.disabled_reason)
-        return skipped("identity", "no face available to compare")
+        return _skip_incomplete_identity(last_error, last_image_error, judge.disabled_reason)
+    missing = len(judgeable) - len(frame_scores)
     score = float(np.median(frame_scores))
     failed = score < hard_min
+    if failed and missing > 0:
+        # Never hard-fail a multi-frame clip on incomplete evidence when unjudged frames
+        # (dropped by a flaky judge or encoding error) could have lifted the median to pass.
+        optimistic = float(np.median([*frame_scores, *([1.0] * missing)]))
+        if optimistic >= hard_min:
+            return _skip_incomplete_identity(last_error, last_image_error, judge.disabled_reason)
     worst_reason = reasons[int(np.argmin(frame_scores))]
     check_score = 0.0 if failed else floor_passing_score(score, hard_min, good, pass_score)
     return CheckResult(

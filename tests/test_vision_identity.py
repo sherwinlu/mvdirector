@@ -592,3 +592,112 @@ def test_quality_gates_check_summary_reports_mediapipe_vision_identity():
     active_off, skipped_off = gates_off.check_summary()
     assert "identity" not in active_off
     assert "vision_identity is false" in dict(skipped_off)["identity"]
+
+
+def test_vision_identity_handles_decompression_bomb_and_unencodable_frame(tmp_path, ref_faces):
+    import struct
+    import zlib
+
+    def _chunk(kind: bytes, payload: bytes) -> bytes:
+        crc = zlib.crc32(kind + payload) & 0xFFFFFFFF
+        return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", crc)
+
+    # Minimal valid-header PNG declaring 20000x20000 pixels (exceeds Pillow's bomb threshold).
+    ihdr = struct.pack(">IIBBBBB", 20_000, 20_000, 8, 2, 0, 0, 0)
+    bomb_png = tmp_path / "bomb.png"
+    bomb_png.write_bytes(b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + _chunk(b"IEND", b""))
+
+    frame = np.zeros((704, 1280, 3), dtype=np.uint8)
+    face = _face(200)
+    res_bomb = vision_identity_check(
+        VisionJudge(ScriptedLLM([])),  # type: ignore[arg-type]
+        [(frame, [face])],
+        IdentityReference(FakeFaces([face]), [bomb_png]),
+        min_face_px=100,
+        hard_min=0.5,
+        good=0.8,
+    )
+    assert res_bomb.status is CheckStatus.SKIPPED
+    assert "unavailable" in res_bomb.detail
+
+    # Unexpected non-uint8 frame dtype fails encoding with TypeError -> skipped with neutral detail.
+    bad_dtype_frame = np.zeros((704, 1280, 3), dtype=np.float64)
+    res_dtype = vision_identity_check(
+        VisionJudge(ScriptedLLM([])),  # type: ignore[arg-type]
+        [(bad_dtype_frame, [face])],
+        IdentityReference(FakeFaces([face]), ref_faces),
+        min_face_px=100,
+        hard_min=0.5,
+        good=0.8,
+    )
+    assert res_dtype.status is CheckStatus.SKIPPED
+    assert "vision identity image unreadable" in res_dtype.detail
+
+    # DecompressionBombError raised during judge encoding also degrades cleanly to skipped.
+    class BombOnEncodeJudge(VisionJudge):
+        def judge_face_identity(self, face_crop, reference_faces):
+            raise Image.DecompressionBombError("oversized image")
+
+    res_encode_bomb = vision_identity_check(
+        BombOnEncodeJudge(ScriptedLLM([])),  # type: ignore[arg-type]
+        [(frame, [face])],
+        IdentityReference(FakeFaces([face]), ref_faces),
+        min_face_px=100,
+        hard_min=0.5,
+        good=0.8,
+    )
+    assert res_encode_bomb.status is CheckStatus.SKIPPED
+    assert "vision identity image unreadable" in res_encode_bomb.detail
+
+
+def test_vision_identity_skips_incomplete_multiframe_clip_only_when_missing_could_pass(ref_faces):
+    frame = np.zeros((704, 1280, 3), dtype=np.uint8)
+    face = _face(200)
+    ref = IdentityReference(FakeFaces([face]), ref_faces)
+
+    # 1. 2-frame clip: frame 1 = 0.20, frame 2 errors -> optimistic median 0.60 >= 0.50 -> skipped.
+    res_2f = vision_identity_check(
+        VisionJudge(ScriptedLLM([0.20, LLMUnavailableError("timeout")])),  # type: ignore[arg-type]
+        [(frame, [face]), (frame, [face])],
+        ref,
+        min_face_px=100,
+        hard_min=0.5,
+        good=0.8,
+    )
+    assert res_2f.status is CheckStatus.SKIPPED
+    assert "errored" in res_2f.detail
+
+    # 2. 2-frame clip: frame 1 = 0.20, judge disabled before frame 2 -> skipped with disable reason.
+    class DisableAfterFirstLLM:
+        def __init__(self, target_judge: list[VisionJudge]) -> None:
+            self._judge_ref = target_judge
+
+        def complete_json(self, *, system, content, schema):
+            self._judge_ref[0].disable("breaker tripped concurrently")
+            return FaceIdentityVerdict(same_person=0.20, reason="turned away")
+
+    holder: list[VisionJudge] = []
+    concurrent_judge = VisionJudge(DisableAfterFirstLLM(holder))  # type: ignore[arg-type]
+    holder.append(concurrent_judge)
+    res_disabled = vision_identity_check(
+        concurrent_judge,
+        [(frame, [face]), (frame, [face])],
+        ref,
+        min_face_px=100,
+        hard_min=0.5,
+        good=0.8,
+    )
+    assert res_disabled.status is CheckStatus.SKIPPED
+    assert res_disabled.detail == "breaker tripped concurrently"
+
+    # 3. 3-frame clip: 0.10, 0.15, error -> optimistic median [0.10, 0.15, 1.0] = 0.15 -> fails.
+    res_3f = vision_identity_check(
+        VisionJudge(ScriptedLLM([0.10, 0.15, LLMUnavailableError("timeout")])),  # type: ignore[arg-type]
+        [(frame, [face]), (frame, [face]), (frame, [face])],
+        ref,
+        min_face_px=100,
+        hard_min=0.5,
+        good=0.8,
+    )
+    assert res_3f.status is CheckStatus.FAILED and res_3f.hard
+    assert res_3f.metrics["frames_judged"] == 2.0

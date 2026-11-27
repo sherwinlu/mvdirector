@@ -174,7 +174,16 @@ def crop_face(image: np.ndarray, bbox: tuple[int, int, int, int], pad: float = 0
     """The face box with some forehead, chin and ear context, clamped to the frame."""
     x1, y1, x2, y2 = bbox
     height, width = image.shape[:2]
-    if height <= 0 or width <= 0 or x2 <= x1 or y2 <= y1:
+    if (
+        height <= 0
+        or width <= 0
+        or x2 <= x1
+        or y2 <= y1
+        or x2 <= 0
+        or y2 <= 0
+        or x1 >= width
+        or y1 >= height
+    ):
         return image[0:0, 0:0]
     margin = max(0, int(round((y2 - y1) * pad)))
     top = max(0, min(height, y1 - margin))

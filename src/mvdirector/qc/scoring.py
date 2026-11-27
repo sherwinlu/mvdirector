@@ -29,7 +29,7 @@ def floor_passing_score(value: float, minimum: float, good: float, pass_floor: f
     Prevents a heavily weighted passing check right above its threshold from pulling an
     otherwise-passing asset below ``pass_score`` and causing avoidable retry renders.
     """
-    if not (math.isfinite(pass_floor) and math.isfinite(value)):
+    if not all(math.isfinite(x) for x in (value, minimum, good, pass_floor)):
         return 0.0
     clamped_floor = min(1.0, max(0.0, pass_floor))
     progress = 1.0 if good <= minimum else linear_score(value, minimum, good)

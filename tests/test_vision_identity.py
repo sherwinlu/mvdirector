@@ -245,6 +245,9 @@ def test_crop_face_pads_and_clamps_to_the_frame():
 def test_crop_face_clamps_negative_positive_oob_and_inverted_bboxes():
     image = np.zeros((704, 1280, 3), dtype=np.uint8)
     assert crop_face(image, (-500, 100, -300, 300)).size == 0
+    # Even when padding would spill across the frame border, an off-screen bbox returns empty.
+    assert crop_face(image, (-999, -999, -100, -100)).size == 0
+    assert crop_face(image, (1350, 100, 1850, 600)).size == 0
     assert crop_face(image, (2000, 100, 2200, 300)).size == 0
     assert crop_face(image, (300, 300, 100, 100)).size == 0
     assert crop_face(image, (100, 100, 100, 250)).size == 0
@@ -701,3 +704,18 @@ def test_vision_identity_skips_incomplete_multiframe_clip_only_when_missing_coul
     )
     assert res_3f.status is CheckStatus.FAILED and res_3f.hard
     assert res_3f.metrics["frames_judged"] == 2.0
+
+
+def test_floor_passing_score_rejects_non_finite_thresholds():
+    from mvdirector.qc.scoring import floor_passing_score
+
+    for args in (
+        (0.6, float("nan"), 0.8, 0.7),
+        (0.6, 0.5, float("nan"), 0.7),
+        (0.6, float("inf"), 0.8, 0.7),
+        (0.6, float("-inf"), 0.8, 0.7),
+        (0.6, 0.5, float("inf"), 0.7),
+        (float("nan"), 0.5, 0.8, 0.7),
+        (0.6, 0.5, 0.8, float("nan")),
+    ):
+        assert floor_passing_score(*args) == 0.0

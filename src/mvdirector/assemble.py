@@ -246,14 +246,19 @@ def _intercut_run(
         return originals
 
     beat_step_s = float(np.median(np.diff(run_beats)))
-    min_sub_frames = max(10, round(0.42 * fps))
+    # Keep every intercut comfortably readable (>= 0.75s) so edits never feel stroby/jumpy,
+    # while breaking up 3-4s B-roll holds that drag like slow motion.
+    min_sub_frames = max(18, round(0.75 * fps))
     step_pattern: tuple[int, ...]
-    if weighted_intensity >= 0.85 and beat_step_s >= 0.42:
-        step_pattern = (2, 2, 1, 1)
-    elif beat_step_s >= 0.70:
-        step_pattern = (1,)
+    if beat_step_s >= 0.70:
+        # Mid-tempo / ballad (<= 85 BPM): 2-beat hold alternating with 1-beat punch (~1.6s / ~0.8s)
+        step_pattern = (2, 1, 1) if weighted_intensity >= 0.85 else (2,)
+    elif weighted_intensity >= 0.85:
+        # Upbeat peak (120-160 BPM): 1-bar (~1.75s) anchor + two half-bar (~0.88s) punches
+        step_pattern = (4, 2, 2)
     else:
-        step_pattern = (2,)
+        # Moderate-high energy: clean 1-bar (~1.75-2.0s) cuts
+        step_pattern = (4,)
 
     frame_edges = [run_start_frame]
     pat_idx = 0
@@ -344,6 +349,36 @@ def _intercut_run(
                 _emit(split_chosen[0], split_chosen[1])
                 need -= split_chosen[1]
                 continue
+            # If the best alternate clip is just slightly shorter than ``need``, nudge the
+            # previous cut boundary forward by the shortfall (still contiguous, no jump cut).
+            if sub_plans and prev_src >= 0:
+                nudge_cands = [
+                    idx
+                    for idx in range(len(originals))
+                    if idx != prev_src
+                    and remaining_frames[idx] >= max(12, min_sub_frames - 4)
+                    and remaining_frames[prev_src] >= need - remaining_frames[idx] > 0
+                ]
+                if nudge_cands:
+                    alt = max(nudge_cands, key=lambda idx: (remaining_frames[idx], -idx))
+                    gap = need - remaining_frames[alt]
+                    prev_plan = sub_plans[-1]
+                    sub_plans[-1] = ClipPlan(
+                        shot_id=prev_plan.shot_id,
+                        frames=prev_plan.frames + gap,
+                        source=prev_plan.source,
+                        is_video=prev_plan.is_video,
+                        head_handle=prev_plan.head_handle,
+                        sync_delay=prev_plan.sync_delay,
+                        drop_first_frame=prev_plan.drop_first_frame,
+                        continuity=prev_plan.continuity,
+                        tail_handle=round(max(0.0, (remaining_frames[prev_src] - gap) / fps), 4),
+                    )
+                    cursors[prev_src] += gap / fps
+                    remaining_frames[prev_src] -= gap
+                    _emit(alt, need - gap)
+                    need = 0
+                    break
             if sub_plans and prev_src >= 0 and remaining_frames[prev_src] >= need:
                 prev_plan = sub_plans[-1]
                 sub_plans[-1] = ClipPlan(

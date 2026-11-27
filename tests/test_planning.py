@@ -524,9 +524,10 @@ def test_assembly_intercut_conserves_frames_protects_lipsync_and_avoids_repeat_c
     assert sum(p.frames for p in out) == sum(p.frames for p in plans)
     # 2. Lip-sync shot s001 is completely untouched
     assert out[0] == plans[0]
-    # 3. Non-lipsync drop run expanded into >2 rhythmic beat cuts
+    # 3. Non-lipsync drop run expanded into balanced 1-bar / half-bar cuts (no <0.5s strobes)
     intercut_sub = out[1:]
-    assert len(intercut_sub) >= 6
+    assert len(intercut_sub) >= 4
+    assert all(p.frames >= round(0.50 * fps) for p in intercut_sub)
     # 4. No back-to-back jump cuts from the same source clip
     for prev, nxt in zip(intercut_sub[:-1], intercut_sub[1:]):
         assert prev.source != nxt.source

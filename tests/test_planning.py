@@ -120,7 +120,12 @@ def test_rule_based_manifest_is_complete_without_llm(analysis):
     assert [s.id for s in manifest.shots] == ["s001", "s002", "s003"]
     for shot in manifest.shots:
         assert shot.still_prompt and shot.motion_prompt
-        assert shot.still.attempts_allowed == config.retry.max_attempts
+        expected_attempts = config.retry.max_attempts + (
+            config.retry.opening_extra_attempts
+            if shot.is_opening_at(config.planning.opening_seconds)
+            else 0
+        )
+        assert shot.still.attempts_allowed == expected_attempts
         assert (shot.num_frames - 1) % 8 == 0
         assert shot.num_frames / config.video.fps >= shot.audio_slice.end - shot.audio_slice.start
     first, last = manifest.shots[0], manifest.shots[-1]

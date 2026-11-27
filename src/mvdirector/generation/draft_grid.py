@@ -493,6 +493,7 @@ def generate_section_sheet(
                 reference_notation=notation,
                 bound_references=bound_roles,
                 plate_attached=plate_path is not None,
+                pin_character_details=project.config.planning.pin_character_details,
             )
             if max_chars is not None:
                 prompt = prompts.fit_prompt_budget(prompt, max_chars)
@@ -554,7 +555,7 @@ def generate_section_sheet(
                     else:
                         shot.still.status = AssetStatus.PENDING
                     if shot.video.selected_attempt is not None:
-                        shot.video.reset(project.config.retry.max_attempts)
+                        shot.video.reset(project.config.attempt_budget(shot.start))
 
         video_path: Path | None = None
         if mode in ("r2v", "both"):

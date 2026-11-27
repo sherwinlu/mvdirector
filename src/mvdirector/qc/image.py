@@ -15,6 +15,7 @@ from PIL import Image
 
 from mvdirector.config import QCConfig, VideoConfig
 from mvdirector.models import (
+    DEFAULT_OPENING_SECONDS,
     AssetKind,
     CheckResult,
     CheckStatus,
@@ -86,12 +87,21 @@ class ImageQC:
         video: VideoConfig,
         face_analyzer: FaceAnalyzer | None,
         vision: VisionJudge | None,
+        *,
+        opening_seconds: float = DEFAULT_OPENING_SECONDS,
     ) -> None:
         self._qc = qc
         self._cfg = qc.image
         self._video = video
         self._faces = face_analyzer
         self._vision = vision
+        self._opening_seconds = opening_seconds
+
+    def _opening_margin(self, shot: Shot) -> float:
+        margin = self._qc.opening_threshold_margin
+        if margin > 0.0 and shot.is_opening_at(self._opening_seconds):
+            return margin
+        return 0.0
 
     def evaluate(
         self,
@@ -107,6 +117,8 @@ class ImageQC:
         image = load_rgb(path)
         height, width = image.shape[:2]
         target_w, target_h = expected_size or (self._video.width, self._video.height)
+        margin = self._opening_margin(shot)
+        effective_pass = min(1.0, self._qc.pass_score + margin)
         checks = [
             dimensions_check(
                 width,
@@ -119,7 +131,14 @@ class ImageQC:
             self._sharpness_check(image),
         ]
         if shot.type.shows_singer:
-            checks += self._face_checks(image, shot, manifest, reference)
+            checks += self._face_checks(
+                image,
+                shot,
+                manifest,
+                reference,
+                margin=margin,
+                pass_score=effective_pass,
+            )
         else:
             checks += self._broll_face_checks(image)
         checks += vision_checks(
@@ -128,13 +147,13 @@ class ImageQC:
             shot,
             manifest,
             AssetKind.STILL,
-            self._cfg.vision_hard_min,
-            self._cfg.vision_character_hard_min,
+            min(1.0, self._cfg.vision_hard_min + margin),
+            min(1.0, self._cfg.vision_character_hard_min + margin),
             reference_image,
             extra_references=extra_references,
-            spec_hard_min=self._cfg.vision_spec_hard_min,
+            spec_hard_min=min(1.0, self._cfg.vision_spec_hard_min + margin),
         )
-        return aggregate(checks, self._qc.weights, self._qc.pass_score)
+        return aggregate(checks, self._qc.weights, effective_pass)
 
     def _broll_face_checks(self, image: np.ndarray) -> list[CheckResult]:
         if self._faces is None:
@@ -186,6 +205,9 @@ class ImageQC:
         shot: Shot,
         manifest: Manifest,
         reference: IdentityReference | None,
+        *,
+        margin: float = 0.0,
+        pass_score: float | None = None,
     ) -> list[CheckResult]:
         if self._faces is None:
             return [
@@ -333,6 +355,7 @@ class ImageQC:
             status=CheckStatus.PASSED,
             hard=True,
         )
+        effective_pass = self._qc.pass_score if pass_score is None else pass_score
         if (
             similarity is None
             and reference is not None
@@ -340,17 +363,19 @@ class ImageQC:
             and self._qc.face_backend != "insightface"
         ):
             # No embeddings (MediaPipe): let the vision model compare face crops instead.
+            eff_vi_min = min(1.0, self._cfg.vision_identity_hard_min + margin)
             identity = vision_identity_check(
                 self._vision,
                 [(image, faces)],
                 reference,
                 min_face_px=self._cfg.vision_identity_min_face_px,
-                hard_min=self._cfg.vision_identity_hard_min,
-                good=self._cfg.vision_identity_good,
-                pass_score=self._qc.pass_score,
+                hard_min=eff_vi_min,
+                good=max(self._cfg.vision_identity_good, eff_vi_min),
+                pass_score=effective_pass,
             )
         else:
+            eff_id_min = min(1.0, self._cfg.identity_hard_min + margin)
             identity = identity_check(
-                similarity, self._cfg.identity_hard_min, self._cfg.identity_good
+                similarity, eff_id_min, max(self._cfg.identity_good, eff_id_min)
             )
         return [present, framing, identity]

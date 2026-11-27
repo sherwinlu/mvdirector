@@ -531,8 +531,8 @@ def build_mix_manifest(
                         head_handle=0.0,
                     ),
                     num_frames=num_frames,
-                    still=AssetState(attempts_allowed=config.retry.max_attempts),
-                    video=AssetState(attempts_allowed=config.retry.max_attempts),
+                    still=AssetState(attempts_allowed=config.attempt_budget(sample_start)),
+                    video=AssetState(attempts_allowed=config.attempt_budget(sample_start)),
                 )
             )
 

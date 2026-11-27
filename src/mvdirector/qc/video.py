@@ -19,6 +19,7 @@ from mvdirector import media, plugins
 from mvdirector.config import QCConfig, VideoConfig
 from mvdirector.errors import MediaToolError
 from mvdirector.models import (
+    DEFAULT_OPENING_SECONDS,
     AssetKind,
     CheckResult,
     CheckStatus,
@@ -100,6 +101,8 @@ class VideoQC:
         vision: VisionJudge | None,
         lipsync_scorer: lipsync.LipSyncScorer | None = None,
         qc_check_plugins: Sequence[str] = (),
+        *,
+        opening_seconds: float = DEFAULT_OPENING_SECONDS,
     ) -> None:
         self._qc = qc
         self._cfg = qc.video
@@ -109,6 +112,13 @@ class VideoQC:
         self._vision = vision
         self._lipsync_scorer = lipsync_scorer
         self._qc_check_plugins = tuple(dict.fromkeys(qc_check_plugins))
+        self._opening_seconds = opening_seconds
+
+    def _opening_margin(self, shot: Shot) -> float:
+        margin = self._qc.opening_threshold_margin
+        if margin > 0.0 and shot.is_opening_at(self._opening_seconds):
+            return margin
+        return 0.0
 
     def evaluate(
         self,
@@ -124,11 +134,13 @@ class VideoQC:
         prev_tail_frames: list[np.ndarray] | None = None,
         beat_times: list[float] | None = None,
     ) -> QCReport:
+        margin = self._opening_margin(shot)
+        effective_pass = min(1.0, self._qc.pass_score + margin)
         info = media.probe(path)
         technical = self._technical_checks(info, shot, expected_size=expected_size)
         if any(c.status is CheckStatus.FAILED for c in technical):
             # A broken file makes every later measurement meaningless.
-            return aggregate(technical, self._qc.weights, self._qc.pass_score)
+            return aggregate(technical, self._qc.weights, effective_pass)
 
         frames = media.extract_frames(path, self._cfg.analysis_width)
         fps = info.fps or float(self._video.fps)
@@ -138,24 +150,30 @@ class VideoQC:
         if beat_times and len(beat_times) >= 2:
             checks.append(self._beat_motion_check(frames, fps, beat_times))
         if shot.type is ShotType.LIPSYNC:
-            checks += self._lipsync_checks(frames, fps, shot, manifest, audio_slice)
+            checks += self._lipsync_checks(
+                frames, fps, shot, manifest, audio_slice, pass_score=effective_pass
+            )
             checks = _waive_static_for_passing_lipsync(checks)
         if shot.type.shows_singer:
-            checks.append(self._identity_check(frames, fps, reference))
+            checks.append(
+                self._identity_check(
+                    frames, fps, reference, margin=margin, pass_score=effective_pass
+                )
+            )
         checks += vision_checks(
             self._vision,
             self._sample(frames, self._cfg.vision_frames),
             shot,
             manifest,
             AssetKind.VIDEO,
-            self._cfg.vision_hard_min,
-            self._cfg.vision_character_hard_min,
+            min(1.0, self._cfg.vision_hard_min + margin),
+            min(1.0, self._cfg.vision_character_hard_min + margin),
             reference_image,
             extra_references=extra_references,
-            spec_hard_min=self._cfg.vision_spec_hard_min,
+            spec_hard_min=min(1.0, self._cfg.vision_spec_hard_min + margin),
         )
         checks += self._plugin_checks(frames, fps, shot, manifest, audio_slice)
-        return aggregate(checks, self._qc.weights, self._qc.pass_score)
+        return aggregate(checks, self._qc.weights, effective_pass)
 
     def _plugin_checks(
         self,
@@ -394,6 +412,8 @@ class VideoQC:
         shot: Shot,
         manifest: Manifest,
         audio_slice: Path,
+        *,
+        pass_score: float | None = None,
     ) -> list[CheckResult]:
         names = ("face_presence", "lipsync")
         if shot.framing not in self._cfg.lipsync_framings:
@@ -565,7 +585,7 @@ class VideoQC:
                 result.correlation,
                 self._cfg.lipsync_min,
                 self._cfg.lipsync_good,
-                self._qc.pass_score,
+                self._qc.pass_score if pass_score is None else pass_score,
             )
         elif blocking:
             sync_score = linear_score(
@@ -586,23 +606,31 @@ class VideoQC:
         return [presence, sync]
 
     def _identity_check(
-        self, frames: list[np.ndarray], fps: float, reference: IdentityReference | None
+        self,
+        frames: list[np.ndarray],
+        fps: float,
+        reference: IdentityReference | None,
+        *,
+        margin: float = 0.0,
+        pass_score: float | None = None,
     ) -> CheckResult:
         if self._faces is None or reference is None:
             return skipped("identity", "face analysis or reference portrait unavailable")
+        effective_pass = self._qc.pass_score if pass_score is None else pass_score
         if self._qc.face_backend != "insightface" and self._qc.vision_identity:
             samples = self._vision_identity_samples(frames)
             has_embeddings = any(f.embedding is not None for _, faces in samples for f in faces)
             if not has_embeddings:
                 # No embeddings (MediaPipe): the vision model compares face crops from a few frames.
+                eff_vi_min = min(1.0, self._cfg.vision_identity_hard_min + margin)
                 return vision_identity_check(
                     self._vision,
                     samples,
                     reference,
                     min_face_px=self._cfg.vision_identity_min_face_px,
-                    hard_min=self._cfg.vision_identity_hard_min,
-                    good=self._cfg.vision_identity_good,
-                    pass_score=self._qc.pass_score,
+                    hard_min=eff_vi_min,
+                    good=max(self._cfg.vision_identity_good, eff_vi_min),
+                    pass_score=effective_pass,
                 )
         step = max(1, round(self._cfg.identity_sample_seconds * fps))
         similarities = []
@@ -614,7 +642,8 @@ class VideoQC:
                     similarities.append(max(sims))
         # The median tolerates a few turned-away frames but catches real identity drift.
         similarity = float(np.median(similarities)) if similarities else None
-        return identity_check(similarity, self._cfg.identity_hard_min, self._cfg.identity_good)
+        eff_id_min = min(1.0, self._cfg.identity_hard_min + margin)
+        return identity_check(similarity, eff_id_min, max(self._cfg.identity_good, eff_id_min))
 
     def _vision_identity_samples(
         self, frames: list[np.ndarray]

@@ -11,7 +11,7 @@ prompt lives next to its code in ``qc/vision.py``.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Literal
 
 from mvdirector.models import (
@@ -71,6 +71,11 @@ _UPPER_BODY_WARDROBE_RE = re.compile(
     r"\b(?:coat|overcoat|jacket|blazer|hoodie|sweater|turtleneck|shirt|blouse|dress|gown|"
     r"top|vest|corset|collar|neckline|lapels?|sleeves?|shoulders?|hood|scarf|hat|cap|"
     r"earrings?|necklace|pendant|choker|locket)\b",
+    re.IGNORECASE,
+)
+_HEAD_FACIAL_INVARIANT_RE = re.compile(
+    r"\b(?:scar|tattoo|chin|forehead|temple|ears?|dimples?|glasses|spectacles|"
+    r"beard|mustache|hair|braids?|bangs)\b",
     re.IGNORECASE,
 )
 _EXPLICIT_TIGHT_FRAMING_RE = re.compile(
@@ -187,8 +192,14 @@ def scrub_lower_body_wardrobe(
             kept.append(sentence)
             continue
         # Drop pure lower-body sentences wholesale (e.g. "She wears simple, flat leather shoes.")
-        # instead of leaving dangling stubs like "She wears simple."
-        if not _UPPER_BODY_WARDROBE_RE.search(sentence):
+        # instead of leaving dangling stubs like "She wears simple.", while keeping sentences that
+        # also carry upper-body garments or facial/head invariants (e.g. "freckles across nose,
+        # silver belt").
+        if not (
+            _UPPER_BODY_WARDROBE_RE.search(sentence)
+            or _FRONTAL_FACIAL_CLAUSE_RE.search(sentence)
+            or _HEAD_FACIAL_INVARIANT_RE.search(sentence)
+        ):
             continue
         clauses = re.split(r"([,;.])", sentence)
         sent_kept: list[str] = []
@@ -520,9 +531,10 @@ Rules:
   roughly the same part of the frame while changing shot scale, so the eye lands without
   searching. When cutting on movement, keep the direction of movement or camera travel the same
   across the cut.
-- Shape the video like the song. Open on a striking, specific image in the very first shot (a
-  strong silhouette, a face in dramatic light, a telling detail) rather than a slow empty
-  establishing pan. First verse: restrained, one look. First chorus: the first
+- Shape the video like the song. Open on a striking, specific image in the very first shot and
+  opening hook shots marked opening=true (establish character and world quickly: prefer a
+  close_up or medium_close of the lead, or the strongest visual motif in dramatic light, and avoid
+  a slow plain establishing pan). First verse: restrained, one look. First chorus: the first
   escalation, so change the set, the framing or the light from the verse. Second verse: never a
   repeat of the first; add a complication (a new angle, set, prop or costume beat). Bridge: break
   the pattern of the shots before it (a different set, light or pace). Final chorus: the payoff,
@@ -652,8 +664,9 @@ Rules:
 - Physical camera placement: position the camera in open space with clear sightlines, never
   clipping through walls, floors, or solid objects.
 - Serve the SONG INTERPRETATION (meaning, tone, music feel, visual motifs) and SECTION ARCS beat.
-  Shape energy across the track: build tension into peaks, strip back in calmer passages, and
-  close on a lingering image.
+  Shape energy across the track: prioritize opening shots marked opening=true with an immediate,
+  striking hero motif that establishes the world quickly (avoid plain generic establishing shots),
+  build tension into peaks, strip back in calmer passages, and close on a lingering image.
 - Use at least three distinct sets or lighting looks across the video. Something should visibly
   evolve every 2 to 4 seconds (light shifting, particles, water, fog, shadows, camera glide).
 - still_prompt: in English, describes the first frame only—framing, camera placement, subject
@@ -1023,13 +1036,41 @@ def extract_negative_exclusions(prompt: str) -> list[str]:
     return found
 
 
+def bible_system_prompt(base_system: str, max_props: int = 3) -> str:
+    """Adjust the bible system prompt's recurring-prop budget without breaking default identity."""
+    if max_props == 3:
+        return base_system
+    if max_props <= 0:
+        return base_system.replace(
+            "0 to 3 recurring hero objects",
+            "0 recurring hero objects (always return an empty props list [])",
+        )
+    return base_system.replace(
+        "0 to 3 recurring hero objects",
+        f"0 to {max_props} recurring hero objects",
+    )
+
+
 _FRAMING_LABEL = {
     Framing.CLOSE_UP: "close-up",
     Framing.MEDIUM_CLOSE: "medium close-up",
     Framing.MEDIUM: "medium",
     Framing.WIDE: "wide",
 }
-_ORDINALS = ("first", "second", "third", "fourth", "fifth", "sixth")
+_ORDINALS = (
+    "first",
+    "second",
+    "third",
+    "fourth",
+    "fifth",
+    "sixth",
+    "seventh",
+    "eighth",
+    "ninth",
+    "tenth",
+    "eleventh",
+    "twelfth",
+)
 _STILL_REF_ROLES = {
     "reference_image": "the singer: keep the same face, hair and costume",
     "reference_profile": "the singer's side profile angle",
@@ -1054,6 +1095,8 @@ _STILL_REF_ROLES = {
 
 
 _EXTRA_STILL_REF_RE = re.compile(r"^reference_image_([1-9][0-9]*)\Z")
+_EXTRA_FACE_REF_RE = re.compile(r"^reference_image_([1-9][0-9]*)_face\Z")
+_EXTRA_PROP_REF_RE = re.compile(r"^prop_image_([1-9][0-9]*)\Z")
 
 
 def _extra_reference_index(name: str) -> int | None:
@@ -1065,13 +1108,51 @@ def _extra_reference_index(name: str) -> int | None:
     return slot - 1 if slot >= 2 else None
 
 
-def _still_ref_role(name: str) -> str | None:
+def _extra_face_index(name: str) -> int | None:
+    """Map ``reference_image_<K>_face`` (K >= 2) to its 0-based index in ``visible`` (K - 1)."""
+    match = _EXTRA_FACE_REF_RE.match(name)
+    if match is None:
+        return None
+    slot = int(match.group(1))
+    return slot - 1 if slot >= 2 else None
+
+
+def _prop_ref_index(name: str) -> int | None:
+    """Map ``prop_image`` or ``prop_image_<N>`` (N >= 2) to its 0-based prop slot index."""
+    if name == "prop_image":
+        return 0
+    match = _EXTRA_PROP_REF_RE.match(name)
+    if match is None:
+        return None
+    slot = int(match.group(1))
+    return slot - 1 if slot >= 2 else None
+
+
+def _still_ref_role(name: str, *, prop_name: str | None = None) -> str | None:
     role = _STILL_REF_ROLES.get(name)
     if role is not None:
         return role
     extra_idx = _extra_reference_index(name)
     if extra_idx is not None:
         return f"performer #{extra_idx + 1}: keep their face, hair and costume"
+    face_idx = _extra_face_index(name)
+    if face_idx is not None:
+        if face_idx == 1:
+            return (
+                "a close-up of the secondary performer's face: "
+                "match their exact facial features, eyes and hair"
+            )
+        return (
+            f"a close-up of performer #{face_idx + 1}'s face: "
+            "match their exact facial features, eyes and hair"
+        )
+    prop_idx = _prop_ref_index(name)
+    if prop_idx is not None:
+        if prop_name:
+            return f"the hero prop ({prop_name}): match its exact design, scale and details"
+        if prop_idx == 0:
+            return "a hero prop: match its exact design, scale and details"
+        return f"hero prop #{prop_idx + 1}: match its exact design, scale and details"
     return None
 
 
@@ -1079,6 +1160,8 @@ def _still_reference_note(
     plate_attached: bool,
     reference_notation: str,
     bound_references: list[str] | None,
+    *,
+    prop_names: Mapping[str, str] | None = None,
 ) -> str | None:
     if bound_references is None:
         if not plate_attached:
@@ -1092,7 +1175,7 @@ def _still_reference_note(
         return PLATE_NOTE
     active: list[tuple[str, str]] = []
     for name in bound_references:
-        role = _still_ref_role(name)
+        role = _still_ref_role(name, prop_name=(prop_names or {}).get(name))
         if role is not None:
             active.append((name, role))
     if not active:
@@ -1518,6 +1601,7 @@ def _look(
     state_id: str | None,
     *,
     framing: Framing | None = None,
+    pin_details: bool = True,
 ) -> str:
     """Appearance and costume, plus the details pinned for every still of this character.
 
@@ -1540,6 +1624,8 @@ def _look(
             wear_part, include_waist=(framing is Framing.CLOSE_UP)
         )
         described = f"{app_part} Wearing: {trimmed_wear}".strip()
+    if not pin_details:
+        return described
     return _with_pinned(character, described, framing=framing)
 
 
@@ -1551,8 +1637,10 @@ def compose_still_prompt(
     props_attached: bool = False,
     reference_notation: str = "prose",
     bound_references: list[str] | None = None,
+    bound_prop_names: Mapping[str, str] | None = None,
     sketch_attached: bool = False,
     sketch_guidance: str | None = None,
+    pin_character_details: bool = True,
 ) -> str:
     """The prompt for a shot's still.
 
@@ -1582,7 +1670,9 @@ def compose_still_prompt(
         parts.append("Chest-up medium close-up shot (head and upper chest fill frame).")
     parts.append(raw_still)
     scene = bible.find_set(shot.setting)
-    ref_note = _still_reference_note(plate_attached, reference_notation, bound_references)
+    ref_note = _still_reference_note(
+        plate_attached, reference_notation, bound_references, prop_names=bound_prop_names
+    )
     if ref_note is not None:
         parts.append(ref_note)
     effective_sketch_guidance = (
@@ -1614,10 +1704,19 @@ def compose_still_prompt(
     resolved_props = bible.resolve_props(shot.props)
     if resolved_props:
         if props_attached:
-            names = ", ".join(p.name for p in resolved_props)
-            parts.append(
-                f"Match the exact design, scale and details of the prop reference ({names})."
-            )
+            if bound_prop_names is not None:
+                attached_names = list(dict.fromkeys(bound_prop_names.values()))
+            else:
+                attached_names = [p.name for p in resolved_props]
+            if attached_names:
+                parts.append(
+                    "Match the exact design, scale and details of the prop reference "
+                    f"({', '.join(attached_names)})."
+                )
+            attached_set = {name.casefold() for name in attached_names}
+            for prop in resolved_props:
+                if prop.name.casefold() not in attached_set and prop.description:
+                    parts.append(f"Hero prop ({prop.name}): {prop.description}")
         else:
             for prop in resolved_props:
                 if prop.description:
@@ -1693,6 +1792,17 @@ def compose_still_prompt(
                     )
                     s_label = visible[char_idx][1].name or visible[char_idx][0] or default_label
                     slot_notes.append(f"Picture {slot_idx} defines {s_label}'s appearance")
+                elif (face_idx := _extra_face_index(param)) is not None and face_idx < len(visible):
+                    default_label = (
+                        "the second performer" if face_idx == 1 else f"performer {face_idx + 1}"
+                    )
+                    s_label = visible[face_idx][1].name or visible[face_idx][0] or default_label
+                    slot_notes.append(
+                        f"Picture {slot_idx} defines {s_label}'s close-up facial features"
+                    )
+                elif (prop_idx := _prop_ref_index(param)) is not None:
+                    prop_label = (bound_prop_names or {}).get(param) or f"hero prop #{prop_idx + 1}"
+                    slot_notes.append(f"Picture {slot_idx} defines {prop_label}'s design")
                 elif param == "set_image":
                     slot_notes.append(f"Picture {slot_idx} defines only the empty location")
                 elif param == "sketch_image":
@@ -1704,7 +1814,12 @@ def compose_still_prompt(
                 parts.append("; ".join(slot_notes) + ".")
         if len(visible) == 1:
             char_id, character, state_id = visible[0]
-            if look := _look(character, state_id, framing=shot.framing):
+            if look := _look(
+                character,
+                state_id,
+                framing=shot.framing,
+                pin_details=pin_character_details,
+            ):
                 if hide_facial:
                     look = scrub_frontal_facial_details(look)
                 if len(manifest.characters) <= 1 or char_id is None:
@@ -1714,13 +1829,23 @@ def compose_still_prompt(
                     parts.append(f"{lead_noun} ({label}): {look}")
         elif len(visible) > 1:
             primary_id, primary_char, primary_state = visible[0]
-            if look := _look(primary_char, primary_state, framing=shot.framing):
+            if look := _look(
+                primary_char,
+                primary_state,
+                framing=shot.framing,
+                pin_details=pin_character_details,
+            ):
                 if hide_facial:
                     look = scrub_frontal_facial_details(look)
                 label = primary_char.name or primary_id or "lead"
                 parts.append(f"{lead_noun} ({label}, matches reference portrait): {look}")
             for sec_id, sec_char, sec_state in visible[1:]:
-                if look := _look(sec_char, sec_state, framing=shot.framing):
+                if look := _look(
+                    sec_char,
+                    sec_state,
+                    framing=shot.framing,
+                    pin_details=pin_character_details,
+                ):
                     if hide_facial:
                         look = scrub_frontal_facial_details(look)
                     sec_label = sec_char.name or sec_id or "performer"
@@ -1753,13 +1878,15 @@ def compose_still_prompt(
 def _video_reference_note(
     reference_notation: str,
     bound_references: list[str] | None,
+    *,
+    prop_names: Mapping[str, str] | None = None,
 ) -> str | None:
     """Reference-image role cue for R2V video models (``@image1`` is the starting still frame)."""
     if not bound_references:
         return None
     active: list[tuple[str, str]] = []
     for name in bound_references:
-        role = _still_ref_role(name)
+        role = _still_ref_role(name, prop_name=(prop_names or {}).get(name))
         if role is not None:
             active.append((name, role))
     if not active:
@@ -1776,6 +1903,40 @@ def _video_reference_note(
     return " ".join(clauses)
 
 
+def _pinned_motion_clauses(manifest: Manifest, shot: Shot) -> list[str]:
+    if not shot.type.shows_singer:
+        return []
+    visible = manifest.visible_characters(shot)
+    if not visible:
+        return []
+    raw_still = (shot.still.prompt_override or shot.still_prompt).strip()
+    rear_view = shot.type is not ShotType.LIPSYNC and is_rear_view_prompt(raw_still)
+    hide_facial = rear_view or shot.framing is Framing.WIDE
+    multi = len(visible) > 1 or len(manifest.characters) > 1
+    clauses: list[str] = []
+    for cid, char, _ in visible:
+        if not char.appearance.strip():
+            continue
+        pinned = char.pinned()
+        if not pinned:
+            continue
+        if shot.framing in (Framing.CLOSE_UP, Framing.MEDIUM_CLOSE):
+            pinned = scrub_lower_body_wardrobe(
+                pinned, include_waist=(shot.framing is Framing.CLOSE_UP), allow_empty=True
+            )
+        if pinned and hide_facial:
+            pinned = scrub_frontal_facial_details(pinned)
+        pinned = pinned.strip()
+        if not pinned:
+            continue
+        if multi:
+            label = char.name or cid or "performer"
+            clauses.append(f"Always ({label}): {_sentence(pinned)}")
+        else:
+            clauses.append(f"Always: {_sentence(pinned)}")
+    return clauses
+
+
 def compose_motion_prompt(
     manifest: Manifest,
     shot: Shot,
@@ -1785,6 +1946,8 @@ def compose_motion_prompt(
     has_audio_video: bool = False,
     previz_attached: bool = False,
     bound_references: list[str] | None = None,
+    bound_prop_names: Mapping[str, str] | None = None,
+    pin_character_details: bool = True,
 ) -> str:
     """Assemble the full motion prompt for video generation."""
     single_take = video_config.motion_single_take if video_config is not None else True
@@ -1803,7 +1966,9 @@ def compose_motion_prompt(
     parts.append(strip_still_words(shot.video.prompt_override or shot.motion_prompt))
     if reference_notation == "tags":
         parts.append("Animate starting from @image1.")
-    video_ref_note = _video_reference_note(reference_notation, bound_references)
+    video_ref_note = _video_reference_note(
+        reference_notation, bound_references, prop_names=bound_prop_names
+    )
     if video_ref_note is not None:
         parts.append(video_ref_note)
     if shot.allow_cuts:
@@ -1850,6 +2015,8 @@ def compose_motion_prompt(
         parts.append("No subtitles, no text.")
     if no_music:
         parts.append("No music.")
+    if pin_character_details:
+        parts.extend(_pinned_motion_clauses(manifest, shot))
     if manifest.visual_bible.style:
         parts.append(f"Style: {manifest.visual_bible.style}.")
     return " ".join(part.strip() for part in parts if part.strip())
@@ -1881,6 +2048,7 @@ def draft_grid_prompt(
     reference_notation: str = "prose",
     bound_references: list[str] | None = None,
     plate_attached: bool = False,
+    pin_character_details: bool = True,
 ) -> str:
     """Prompt for a per-section 2x2 or 3x2 storyboard contact sheet anchored to refs & plates."""
     bible = manifest.visual_bible
@@ -1915,7 +2083,12 @@ def draft_grid_prompt(
             cast_bits: list[str] = []
             for cid, char, state_id in visible:
                 label = char.name or cid or "performer"
-                look = _look(char, state_id, framing=shot.framing)
+                look = _look(
+                    char,
+                    state_id,
+                    framing=shot.framing,
+                    pin_details=pin_character_details,
+                )
                 cast_bits.append(f"{label} ({look})" if look else label)
             cast_note = f" Featuring: {'; '.join(cast_bits)}." if cast_bits else ""
         else:

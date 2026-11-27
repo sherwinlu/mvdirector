@@ -2,9 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/). While the version is 0.x, a minor release may still change the public API; every such change is listed here.
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/). From `1.0.0` on, a breaking change to the public API (the `mvd` CLI, `mvdirector.api`, `project.yaml`, or the manifest schema) needs a new major version.
 
 ## [Unreleased]
+
+## [1.0.0] - 2026-11-27
+
+First **stable** release. It adds a pre-spend reference coverage lint (`mvd assets --lint`), generic N-slot reference binding for props and secondary faces, opening-hook priority, rejection-aware attempt statistics, age-based cleanup retention and ComfyUI interrupts, together with QA fixes to cleanup symlink handling, still restarts after video exhaustion, and durable rejection counts. Manifests from `0.8.x` load unchanged (`schema_version` `1`).
+
+### Added
+- **Pre-spend reference coverage lint & generic N-slot reference binding:** Added zero-LLM `lint_reference_coverage` (`mvdirector.generation.preflight`, `mvdirector.api.lint_assets`, `mvd assets --lint`; a word counts as a noun only once some prompt uses it in a closed noun phrase; undeclared nouns must recur in at least 3 shots across at least 3 song sections; undeclared findings tell you to declare the prop or set before generating it), configurable `planning.max_props` (default `3`, `0..30`), priority-ordered generic N-slot binding (`lead > set > secondaries > props` across `prop_image_N` and `reference_image_K_face`) with optional workflow-node pruning and `@imageN` prompt tag alignment.
+- **Opening-hook priority:** Added `planning.opening_seconds` (`8.0s`), `retry.opening_extra_attempts` (`2`), `qc.opening_threshold_margin`, computed `Shot.is_opening` / `Shot.is_opening_at(...)` (no schema migration), the opening bonus re-granted whenever a shot is rejected or reset, planner opening-window guidance, and `ReviewReason.OPENING` review queuing (including in `light` mode).
+- **Rejection-aware attempt statistics:** Added `report.attempt_stats(manifest)` (mean attempts per passed still/video split by shot type plus the human-reject rate: the share of reviewed shots a reviewer rejected at least once, `total_rejections`, and `p90_multiplier` as p90 attempts over the mean; `mvd qc-report --json` reports an error when combined with `--markdown`), exposed via `mvdirector.api.attempt_stats` and `mvd qc-report`.
+- **Multi-tenant & workflow execution primitives:** Added `retry.keep_still_on_video_fail` (default `true`; when `false`, a rejected or exhausted video sends both the still and the video back to pending so the video re-renders from the new still; automatic restarts are capped by `retry.max_still_restarts`, default `1`, after which the shot is queued for review; a restart emits the new `asset_restarted` run event, and `mvd run` says to run again, instead of reporting the shot as exhausted and queued for review), `planning.pin_character_details` (default `true`), `ComfyClient.interrupt()` (`POST /interrupt`), and age-based retention pruning via `cleanup.plan_cleanup(..., retention_days=..., now=...)` and `mvd clean --retention-days`.
+
+### Changed
+- **Durable rejection and restart counts (`Shot.rejection_count`, `Shot.still_restarts`, manifest fields, default `0`):** every reviewer rejection now increments a per-shot counter that survives regeneration, because the runner clears `shot.review` whenever a shot re-renders. `Shot.still_restarts` likewise records automatic still restarts. Manifests without these fields load unchanged (`schema_version` stays `1`); builds older than this one reject manifests that carry them, as with any added field.
 
 ## [0.8.0b4] - 2026-11-27
 

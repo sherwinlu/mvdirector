@@ -422,6 +422,7 @@ def test_audio_conditioner_isolated_to_lipsync_and_qc_keeps_raw_slice(
     sr = 16000
     tone = np.zeros(sr * 4, dtype=np.float32)
     sf.write(proj.path(proj.config.inputs.mix), tone, sr)
+    assert proj.config.inputs.vocals is not None
     sf.write(proj.path(proj.config.inputs.vocals), tone, sr)
 
     called_for: list[str] = []
@@ -700,6 +701,7 @@ def test_probe_encoder_works_passes_encode_args_for(
     assert len(seen_cmds) == 1
     expected_flags = media.encode_args_for(encoder)
     cmd = seen_cmds[0]
+    assert any("s=256x256" in arg for arg in cmd)
     for flag in expected_flags:
         assert flag in cmd
 
@@ -765,6 +767,7 @@ def test_ensure_conditioning_audio_blocks_escape_and_stale_custom_cache(
     sr = 16000
     tone = np.zeros(sr * 4, dtype=np.float32)
     sf.write(proj.path(proj.config.inputs.mix), tone, sr)
+    assert proj.config.inputs.vocals is not None
     sf.write(proj.path(proj.config.inputs.vocals), tone, sr)
 
     outside_file = tmp_path / "outside_secret.wav"
@@ -1094,12 +1097,13 @@ def test_nag_enabled_wiring_and_switch_pruning(
             {"i2v": template},
             None,  # type: ignore[arg-type]
         )
+
+        def _fake_run_comfy(graph: dict[str, Any], *_a: Any, **_kw: Any) -> Path:
+            rendered_graphs.append(graph)
+            return tmp_path / "o.mp4"
+
         monkeypatch.setattr(runner, "_upload", lambda p, client=None: p.name)
-        monkeypatch.setattr(
-            runner,
-            "_run_comfy",
-            lambda g, *_a, **_kw: (rendered_graphs.append(g), tmp_path / "o.mp4")[1],
-        )
+        monkeypatch.setattr(runner, "_run_comfy", _fake_run_comfy)
         att = Attempt(number=1, strategy=RetryStrategy.INITIAL, seed=1, prompt="motion")
         runner._generate_video(shot, att, tmp_path / "o.mp4", [])
         return rendered_graphs[0]

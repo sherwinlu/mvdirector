@@ -51,7 +51,7 @@ def _probe_encoder_works(encoder: str) -> bool:
                 "-f",
                 "lavfi",
                 "-i",
-                "color=c=black:s=64x64:d=0.04",
+                "color=c=black:s=256x256:r=24:d=0.1",
                 "-frames:v",
                 "1",
                 *encode_args_for(encoder),

@@ -112,7 +112,7 @@ class ClipTiming:
     """
 
     in_point: float  # seconds into the source clip (ffmpeg -ss), lip-sync delay included
-    sync_delay: float  # lip-sync offset applied, clamped to the shot's audio handles
+    sync_delay: float  # lip-sync delay or optimal in-point offset applied, clamped to handles
     drop_first_frame: bool  # a CONTINUE clip's frame 0 repeats the previous clip's last frame
     continuity: ContinuityMode  # CONTINUE only when the still really was a handoff frame
 

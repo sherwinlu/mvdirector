@@ -36,9 +36,18 @@ ALLOWED_GROUPS: frozenset[str] = frozenset(
 
 PLUGIN_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}\Z")
 
+
+class _InflightLock:
+    __slots__ = ("lock", "waiters")
+
+    def __init__(self) -> None:
+        self.lock = threading.RLock()
+        self.waiters = 0
+
+
 _CACHE_LOCK = threading.Lock()
 _LOADED_CACHE: dict[tuple[str, str], Any] = {}
-_INFLIGHT_LOCKS: dict[tuple[str, str], threading.RLock] = {}
+_INFLIGHT_LOCKS: dict[tuple[str, str], _InflightLock] = {}
 
 
 def validate_plugin_group(group: str) -> str:
@@ -83,23 +92,32 @@ def load_plugin(group: str, name: str) -> Any:
     with _CACHE_LOCK:
         if key in _LOADED_CACHE:
             return _LOADED_CACHE[key]
-        key_lock = _INFLIGHT_LOCKS.setdefault(key, threading.RLock())
-    with key_lock:
+        entry = _INFLIGHT_LOCKS.get(key)
+        if entry is None:
+            entry = _InflightLock()
+            _INFLIGHT_LOCKS[key] = entry
+        entry.waiters += 1
+    try:
+        with entry.lock:
+            with _CACHE_LOCK:
+                if key in _LOADED_CACHE:
+                    return _LOADED_CACHE[key]
+            eps = list_plugins(group)
+            ep = eps.get(clean)
+            if ep is None:
+                available = ", ".join(sorted(eps)) or "none"
+                raise ConfigError(
+                    f"Unknown plugin {clean!r} in group {group!r} (installed: {available})."
+                )
+            loaded = ep.load()
+            with _CACHE_LOCK:
+                _LOADED_CACHE[key] = loaded
+            return loaded
+    finally:
         with _CACHE_LOCK:
-            if key in _LOADED_CACHE:
-                return _LOADED_CACHE[key]
-        eps = list_plugins(group)
-        ep = eps.get(clean)
-        if ep is None:
-            available = ", ".join(sorted(eps)) or "none"
-            raise ConfigError(
-                f"Unknown plugin {clean!r} in group {group!r} (installed: {available})."
-            )
-        loaded = ep.load()
-        with _CACHE_LOCK:
-            _LOADED_CACHE[key] = loaded
-            _INFLIGHT_LOCKS.pop(key, None)
-        return loaded
+            entry.waiters -= 1
+            if entry.waiters == 0 and _INFLIGHT_LOCKS.get(key) is entry:
+                del _INFLIGHT_LOCKS[key]
 
 
 def plugin_version(plugin: Any) -> str:

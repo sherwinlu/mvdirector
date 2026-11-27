@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import subprocess
 import time
@@ -159,6 +160,68 @@ def test_load_plugin_concurrent_cold_cache_loads_once(monkeypatch: pytest.Monkey
 
     assert calls == 1
     assert len({id(obj) for obj in results}) == 1
+    assert len(plugins._INFLIGHT_LOCKS) == 0
+
+
+def test_load_plugin_releases_inflight_locks_on_errors_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+
+    class _FlakyEP(_FakeEP):
+        def load(self) -> Any:
+            nonlocal attempts
+            attempts += 1
+            time.sleep(0.01)
+            if attempts == 1:
+                raise RuntimeError("transient load failure")
+            return "recovered_plugin"
+
+    class _AlwaysFailEP(_FakeEP):
+        def load(self) -> Any:
+            raise RuntimeError("permanent load failure")
+
+    _patch_entry_points(
+        monkeypatch,
+        {
+            plugins.QC_CHECKS_GROUP: [
+                _FlakyEP("flaky_qc", None),
+                _AlwaysFailEP("broken_qc", None),
+            ]
+        },
+    )
+
+    # Repeated unknown plugin lookups must not leak lock entries.
+    for i in range(50):
+        with pytest.raises(ConfigError, match="Unknown plugin"):
+            plugins.load_plugin(plugins.QC_CHECKS_GROUP, f"missing_{i}")
+    assert len(plugins._INFLIGHT_LOCKS) == 0
+
+    # Concurrent failures must release the lock entry once all waiters unwind.
+    def _try_broken(_: int) -> bool:
+        try:
+            plugins.load_plugin(plugins.QC_CHECKS_GROUP, "broken_qc")
+        except RuntimeError:
+            return True
+        return False
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        assert all(pool.map(_try_broken, range(8)))
+    assert len(plugins._INFLIGHT_LOCKS) == 0
+
+    # First call fails transiently; concurrent waiters / retry recover cleanly with zero leaks.
+    def _try_flaky(_: int) -> str:
+        try:
+            return str(plugins.load_plugin(plugins.QC_CHECKS_GROUP, "flaky_qc"))
+        except RuntimeError:
+            return "failed"
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        outcomes = list(pool.map(_try_flaky, range(6)))
+    assert "failed" in outcomes
+    assert "recovered_plugin" in outcomes
+    assert plugins.load_plugin(plugins.QC_CHECKS_GROUP, "flaky_qc") == "recovered_plugin"
+    assert len(plugins._INFLIGHT_LOCKS) == 0
 
 
 def test_load_plugin_unknown_and_cached(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -769,6 +832,63 @@ def test_ensure_conditioning_audio_blocks_escape_and_stale_custom_cache(
     assert second.name == "custom_out.wav"
     assert second.read_bytes() == b"CUSTOM_PROCESSED_2"
     assert second != stale_cond
+
+
+def test_audio_video_slice_rebuilds_when_wav_path_changes_with_same_size_and_mtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    proj = api.open_project(api.init_project(tmp_path / "av_stamp_proj"))
+    shot = _make_shot("s001", shot_type=ShotType.LIPSYNC, start=0.0, end=2.0)
+    manifest = _make_manifest([shot])
+    runner = ShotRunner(proj, manifest, None, None, None, {}, None)  # type: ignore[arg-type]
+
+    raw_path = proj.audio_slice_path(shot.id)
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_path.write_bytes(b"RIFF_RAW_AUDIO_BYTES")
+    raw_stat = raw_path.stat()
+
+    monkeypatch.setattr(runner, "_ensure_audio_slice", lambda _s: raw_path)
+
+    encoded_sources: list[Path] = []
+
+    def _fake_audio_to_black_video(wav_path: Path, mp4_path: Path, *, fps: int) -> None:
+        encoded_sources.append(wav_path)
+        mp4_path.parent.mkdir(parents=True, exist_ok=True)
+        mp4_path.write_bytes(f"{wav_path.name}:{fps}".encode())
+
+    monkeypatch.setattr(media, "audio_to_black_video", _fake_audio_to_black_video)
+
+    def _same_stat_cond(raw_wav: Path, out_wav: Path, _shot: Shot, _analysis: Any) -> Path:
+        out_wav.write_bytes(b"RIFF_CND_AUDIO_BYTES")  # exact same byte length as raw_path
+        os.utime(out_wav, ns=(raw_stat.st_atime_ns, raw_stat.st_mtime_ns))
+        return out_wav
+
+    _patch_entry_points(
+        monkeypatch,
+        {plugins.AUDIO_CONDITIONERS_GROUP: [_FakeEP("same_stat_cond", _same_stat_cond)]},
+    )
+
+    # 1. Raw slice (conditioner disabled) encodes raw_path.
+    runner._ensure_audio_video_slice(shot)
+    assert [p.name for p in encoded_sources] == ["s001.wav"]
+
+    # 2. Cached hit with unchanged raw_path does not re-encode.
+    runner._ensure_audio_video_slice(shot)
+    assert [p.name for p in encoded_sources] == ["s001.wav"]
+
+    # 3. Enabling conditioner with identical size & mtime still invalidates and re-encodes.
+    proj.config = proj.config.model_copy(
+        deep=True, update={"plugins": PluginsConfig(audio_conditioner="same_stat_cond")}
+    )
+    runner._ensure_audio_video_slice(shot)
+    assert [p.name for p in encoded_sources] == ["s001.wav", "s001.cond.wav"]
+
+    # 4. Disabling conditioner again invalidates back to raw_path.
+    proj.config = proj.config.model_copy(
+        deep=True, update={"plugins": PluginsConfig(audio_conditioner=None)}
+    )
+    runner._ensure_audio_video_slice(shot)
+    assert [p.name for p in encoded_sources] == ["s001.wav", "s001.cond.wav", "s001.wav"]
 
 
 def test_i2v_fps_validation_and_frame_grid_alignment(

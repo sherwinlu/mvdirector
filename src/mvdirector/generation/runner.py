@@ -1992,8 +1992,16 @@ class ShotRunner:
         )
         mp4_path = self._project.audio_video_slice_path(shot.id)
         wav_stat = wav_path.stat()
+        wav_resolved = wav_path.resolve()
+        project_root = self._project.root.resolve()
+        wav_key = (
+            wav_resolved.relative_to(project_root).as_posix()
+            if wav_resolved.is_relative_to(project_root)
+            else str(wav_resolved)
+        )
         fps = self._project.config.video.fps
         stamp: dict[str, Any] = {
+            "wav_path": wav_key,
             "wav_size": wav_stat.st_size,
             "wav_mtime_ns": wav_stat.st_mtime_ns,
             "fps": fps,

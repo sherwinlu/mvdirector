@@ -12,7 +12,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from mvdirector.errors import ConfigError, LLMError
-from mvdirector.llm.base import ChatBackend, Message, Reply, blocks_of, has_images
+from mvdirector.llm.base import ChatBackend, Message, Reply, TokenUsage, blocks_of, has_images
 from mvdirector.llm.http import IMAGE_WORDS, HttpJSON, check_response, json_body
 
 _BLOCKED = {"SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY"}
@@ -28,6 +28,24 @@ def _is_thinking_config_error(text: str) -> bool:
         or "invalid" in lowered
         or "unsupported" in lowered
         or "not support" in lowered
+    )
+
+
+def _usage_from_data(data: dict[str, Any]) -> TokenUsage | None:
+    usage = data.get("usageMetadata")
+    if not isinstance(usage, dict):
+        return None
+    prompt = usage.get("promptTokenCount")
+    candidates = usage.get("candidatesTokenCount")
+    thoughts = usage.get("thoughtsTokenCount")
+    cached = usage.get("cachedContentTokenCount")
+    if not any(isinstance(v, int) and v > 0 for v in (prompt, candidates, thoughts, cached)):
+        return None
+    return TokenUsage(
+        input_tokens=int(prompt) if isinstance(prompt, int) and prompt > 0 else 0,
+        output_tokens=int(candidates) if isinstance(candidates, int) and candidates > 0 else 0,
+        thoughts_tokens=int(thoughts) if isinstance(thoughts, int) and thoughts > 0 else 0,
+        cached_tokens=int(cached) if isinstance(cached, int) and cached > 0 else 0,
     )
 
 
@@ -133,7 +151,19 @@ class GeminiChat(ChatBackend):
                     "Check llm.model, for example gemini-... as listed in Google AI Studio."
                 ),
             )
-            return self._parse(json_body(retry_response, "Gemini"))
+            retry_reply = self._parse(json_body(retry_response, "Gemini"))
+            combined_usage = (
+                (reply.usage or TokenUsage()) + (retry_reply.usage or TokenUsage())
+                if (reply.usage is not None or retry_reply.usage is not None)
+                else None
+            )
+            return Reply(
+                retry_reply.text,
+                truncated=retry_reply.truncated,
+                usage=combined_usage,
+                refused=retry_reply.refused,
+                finish_reason=retry_reply.finish_reason,
+            )
         return reply
 
     @staticmethod
@@ -166,4 +196,9 @@ class GeminiChat(ChatBackend):
         finish = candidate.get("finishReason")
         if not text and finish in _BLOCKED:
             raise LLMError(f"Gemini blocked the reply ({finish}).")
-        return Reply(text, truncated=finish == "MAX_TOKENS")
+        return Reply(
+            text,
+            truncated=finish == "MAX_TOKENS",
+            usage=_usage_from_data(data),
+            finish_reason=finish if isinstance(finish, str) else None,
+        )

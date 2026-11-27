@@ -9,14 +9,17 @@ backends (Anthropic, OpenAI and compatible servers, Ollama, Gemini) live in this
 """
 
 from mvdirector.llm.base import (
+    CallTelemetry,
     ChatBackend,
     ContentBlock,
     LLMClient,
     Reply,
+    TokenUsage,
     audio_block,
     complete_json_with_optional_audio,
     extract_json,
     image_block,
+    is_refusal_error,
     maybe_audio_block,
     text_block,
 )
@@ -24,15 +27,18 @@ from mvdirector.llm.factory import PROVIDERS, build_llm
 
 __all__ = [
     "PROVIDERS",
+    "CallTelemetry",
     "ChatBackend",
     "ContentBlock",
     "LLMClient",
     "Reply",
+    "TokenUsage",
     "audio_block",
     "build_llm",
     "complete_json_with_optional_audio",
     "extract_json",
     "image_block",
+    "is_refusal_error",
     "maybe_audio_block",
     "text_block",
 ]

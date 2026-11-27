@@ -17,7 +17,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from mvdirector.errors import LLMError
-from mvdirector.llm.base import ChatBackend, Message, Reply, blocks_of, has_images
+from mvdirector.llm.base import ChatBackend, Message, Reply, TokenUsage, blocks_of, has_images
 from mvdirector.llm.http import (
     IMAGE_WORDS,
     HttpJSON,
@@ -31,6 +31,26 @@ log = logging.getLogger("mvdirector.llm")
 
 
 _JSON_MODE_WORDS = ("response_format", "json_schema", "json_object")
+
+
+def _openai_usage(data: dict[str, Any]) -> TokenUsage | None:
+    usage = data.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    prompt = usage.get("prompt_tokens")
+    completion = usage.get("completion_tokens")
+    comp_details = usage.get("completion_tokens_details")
+    reasoning = comp_details.get("reasoning_tokens") if isinstance(comp_details, dict) else None
+    prompt_details = usage.get("prompt_tokens_details")
+    cached = prompt_details.get("cached_tokens") if isinstance(prompt_details, dict) else None
+    if not any(isinstance(v, int) and v > 0 for v in (prompt, completion, reasoning, cached)):
+        return None
+    return TokenUsage(
+        input_tokens=int(prompt) if isinstance(prompt, int) and prompt > 0 else 0,
+        output_tokens=int(completion) if isinstance(completion, int) and completion > 0 else 0,
+        thoughts_tokens=int(reasoning) if isinstance(reasoning, int) and reasoning > 0 else 0,
+        cached_tokens=int(cached) if isinstance(cached, int) and cached > 0 else 0,
+    )
 
 
 def _mentions_json_mode(text: str) -> bool:
@@ -163,6 +183,7 @@ class OpenAIChat(ChatBackend):
         refusal_parts: list[str] = []
         finish: str | None = None
         saw_choice = False
+        usage: TokenUsage | None = None
         for raw in events:
             try:
                 chunk = json.loads(raw)
@@ -170,6 +191,9 @@ class OpenAIChat(ChatBackend):
                 continue
             if not isinstance(chunk, dict):
                 continue
+            chunk_usage = _openai_usage(chunk)
+            if chunk_usage is not None:
+                usage = chunk_usage
             err = chunk.get("error")
             if err is not None:
                 if isinstance(err, dict):
@@ -204,7 +228,12 @@ class OpenAIChat(ChatBackend):
             raise LLMError(f"The model refused the request: {refusal_text}")
         if not text and finish == "content_filter":
             raise LLMError(f"{self._provider} blocked the reply with its content filter.")
-        return Reply(text, truncated=finish == "length")
+        return Reply(
+            text,
+            truncated=finish == "length",
+            usage=usage,
+            finish_reason=finish,
+        )
 
     # ----------------------------------------------------------------- response
 
@@ -237,4 +266,9 @@ class OpenAIChat(ChatBackend):
             raise LLMError(f"The model refused the request: {message['refusal']}")
         if not text and finish == "content_filter":
             raise LLMError(f"{self._provider} blocked the reply with its content filter.")
-        return Reply(text, truncated=finish == "length")
+        return Reply(
+            text,
+            truncated=finish == "length",
+            usage=_openai_usage(data),
+            finish_reason=finish if isinstance(finish, str) else None,
+        )

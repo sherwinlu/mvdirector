@@ -17,7 +17,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from mvdirector.errors import LLMError
-from mvdirector.llm.base import ChatBackend, Message, Reply, blocks_of, has_images
+from mvdirector.llm.base import ChatBackend, Message, Reply, TokenUsage, blocks_of, has_images
 from mvdirector.llm.http import (
     IMAGE_WORDS,
     HttpJSON,
@@ -159,4 +159,22 @@ class OllamaChat(ChatBackend):
             text = raw_content
         else:
             raise LLMError(f"Ollama returned non-text content: {type(raw_content).__name__}")
-        return Reply(text, truncated=data.get("done_reason") == "length")
+        eval_count = data.get("eval_count")
+        usage = (
+            TokenUsage(
+                input_tokens=int(used) if isinstance(used, int) and used > 0 else 0,
+                output_tokens=int(eval_count)
+                if isinstance(eval_count, int) and eval_count > 0
+                else 0,
+            )
+            if (isinstance(used, int) and used > 0)
+            or (isinstance(eval_count, int) and eval_count > 0)
+            else None
+        )
+        done_reason = data.get("done_reason")
+        return Reply(
+            text,
+            truncated=done_reason == "length",
+            usage=usage,
+            finish_reason=done_reason if isinstance(done_reason, str) else None,
+        )

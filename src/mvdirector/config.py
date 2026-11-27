@@ -846,6 +846,23 @@ class PlanningConfig(_Section):
             "camera."
         ),
     )
+    audio_listen: Literal["auto", "always", "never"] = Field(
+        default="auto",
+        description=(
+            "When the main planner LLM cannot attach audio (e.g. Claude or OpenAI), run one "
+            "native MP3 listening pass with an audio-capable LLM (planning.audio_llm, or qc.llm "
+            "when audio-capable) so the planner hears meter/waltz pulse, timbre, vocal delivery, "
+            "and sonic atmosphere directly. 'never' disables the pass."
+        ),
+    )
+    audio_llm: LLMConfig | None = Field(
+        default=None,
+        description=(
+            "Optional audio-capable LLM (e.g. provider: gemini) used for the single-call native "
+            "MP3 listening pass before planning when the main planner does not accept audio. "
+            "Defaults to qc.llm when qc.llm is audio-capable."
+        ),
+    )
 
 
 class ReferenceConfig(_Section):
@@ -1026,6 +1043,45 @@ class VideoQCConfig(_Section):
 class QCConfig(_Section):
     pass_score: float = Field(default=0.70, ge=0.0, le=1.0, allow_inf_nan=False)
     vision_enabled: bool = True
+    llm: LLMConfig | None = Field(
+        default=None,
+        description=(
+            "Optional separate LLM configuration for Vision QC checks (e.g. a faster/cheaper "
+            "vision judge such as gemini-3.8-flash or gemini-4-carbon while using a flagship "
+            "model for planning). Defaults to top-level llm when null."
+        ),
+    )
+    vision_spec: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+        description=(
+            "Shorthand hard minimum for vision_spec applied to both qc.image.vision_spec_hard_min "
+            "and qc.video.vision_spec_hard_min unless overridden per media type."
+        ),
+    )
+    vision_artifacts: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+        description=(
+            "Shorthand hard minimum for vision_artifacts applied to both qc.image.vision_hard_min "
+            "and qc.video.vision_hard_min unless overridden per media type."
+        ),
+    )
+    vision_character: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+        description=(
+            "Shorthand hard minimum for vision_character applied to both "
+            "qc.image.vision_character_hard_min and qc.video.vision_character_hard_min unless "
+            "overridden per media type."
+        ),
+    )
     vision_identity: bool = Field(
         default=True,
         description=(
@@ -1101,6 +1157,29 @@ class QCConfig(_Section):
     )
     image: ImageQCConfig = Field(default_factory=ImageQCConfig)
     video: VideoQCConfig = Field(default_factory=VideoQCConfig)
+
+    @field_validator("vision_spec", "vision_artifacts", "vision_character", mode="before")
+    @classmethod
+    def _reject_bool_for_vision_threshold(cls, value: Any, info: ValidationInfo) -> Any:
+        if isinstance(value, bool):
+            raise ValueError(f"qc.{info.field_name} must be a number, not a boolean.")
+        return value
+
+    @model_validator(mode="after")
+    def _apply_vision_threshold_shorthands(self) -> QCConfig:
+        shorthands = (
+            ("vision_spec", "vision_spec_hard_min"),
+            ("vision_artifacts", "vision_hard_min"),
+            ("vision_character", "vision_character_hard_min"),
+        )
+        for shorthand_field, target_field in shorthands:
+            value = getattr(self, shorthand_field)
+            if value is None:
+                continue
+            for sub in (self.image, self.video):
+                if target_field not in sub.model_fields_set:
+                    setattr(sub, target_field, value)
+        return self
 
 
 class RetryConfig(_Section):

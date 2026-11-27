@@ -147,7 +147,10 @@ def test_the_model_cannot_bring_the_singer_back_into_a_cutaway(caplog):
     with caplog.at_level("WARNING", logger="mvdirector.planning.planner"):
         planner._apply_creative(shot, creative, planner.VisualBible())
     assert shot.type is ShotType.BROLL
-    assert "no people" in shot.still_prompt.lower() and "No people" in shot.motion_prompt
+    assert "uninhabited" in shot.still_prompt.lower()
+    assert "uninhabited" in shot.motion_prompt.lower()
+    assert "no people" not in shot.still_prompt.lower()
+    assert "no people" not in shot.motion_prompt.lower()
     assert "singer" not in shot.still_prompt.lower()
     assert "put the singer back in a cutaway" in caplog.text
 
@@ -306,8 +309,11 @@ def test_a_rule_based_cutaway_has_no_people_and_matches_pace():
     planner._apply_rule_based(calm)
     planner._apply_rule_based(high)
     assert calm.framing is Framing.WIDE and high.framing is Framing.MEDIUM_CLOSE
-    assert "no people" in calm.still_prompt.lower() and "No people" in calm.motion_prompt
-    assert "no people" in high.still_prompt.lower() and "No people" in high.motion_prompt
+    for shot in (calm, high):
+        assert "uninhabited" in shot.still_prompt.lower()
+        assert "uninhabited" in shot.motion_prompt.lower()
+        assert "no people" not in shot.still_prompt.lower()
+        assert "no people" not in shot.motion_prompt.lower()
     assert calm.motion_prompt != high.motion_prompt and "Brisk movement" in high.motion_prompt
 
 
@@ -333,6 +339,10 @@ def test_direction_prompts_steer_away_from_literal_and_unreliable_shots():
         assert hazard in shots
     assert "clock hands" not in shots and "screen content" not in shots
     # Editing grammar: eye trace, a striking opening, and contrast into the drop.
+    assert "Ignore audio-production negative tags" in bible
+    assert "roughly 40 to 75 words" in shots
+    assert "VFX compositing jargon" in shots
+    assert "starting visual anchor" in shots
     assert "Eye trace:" in shots
     assert "Open on a striking, specific image in the very first shot" in shots
     assert "most striking, open frame" in shots
@@ -577,7 +587,8 @@ def test_empty_landscape_performance_prompt_converts_to_broll_or_rule_based_sing
     planner._apply_creative(shot, creative, planner.VisualBible(), allow_broll_conversion=True)
     assert shot.type is ShotType.BROLL
     assert shot.still_prompt == manor_prompt
-    assert "No people" in shot.motion_prompt
+    assert "uninhabited space" in shot.motion_prompt.lower()
+    assert "no people" not in shot.motion_prompt.lower()
 
     # When 2 cutaways already preceded this shot, keep it PERFORMANCE with a real singer prompt.
     capped = _shot(2, "Intro", 0.3, ShotType.PERFORMANCE)

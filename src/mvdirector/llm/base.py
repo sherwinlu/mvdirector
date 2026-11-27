@@ -18,7 +18,9 @@ import logging
 import math
 import re
 import tempfile
+import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
@@ -250,6 +252,10 @@ def has_images(messages: list[Message]) -> bool:
     return any(block.get("type") == "image" for m in messages for block in blocks_of(m["content"]))
 
 
+def has_audio(messages: list[Message]) -> bool:
+    return any(block.get("type") == "audio" for m in messages for block in blocks_of(m["content"]))
+
+
 def estimate_tokens(system: str, messages: list[Message]) -> int:
     """A rough token count (four characters per token, fixed costs for images and audio)."""
     chars, images, audios = len(system), 0, 0
@@ -273,10 +279,75 @@ def schema_prompt(system: str, schema: type[BaseModel]) -> str:
     )
 
 
+_REFUSAL_MARKERS = (
+    "blocked the reply",
+    "content filter",
+    "refused the request",
+    "returned no answer (safety",
+    "returned no answer (prohibited_content",
+    "returned no answer (blocklist",
+    "returned no answer (recitation",
+    "returned no answer (spii",
+    "returned no answer (image_safety",
+    "safety policy",
+)
+
+
+def positive_int(value: object) -> int:
+    """Return ``value`` as a positive ``int``, rejecting ``bool`` and non-positive values."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return 0
+    return int(value)
+
+
+def is_refusal_error(exc: BaseException) -> bool:
+    """True when ``exc`` reflects a provider safety filter or policy refusal."""
+    lowered = str(exc).lower()
+    return any(marker in lowered for marker in _REFUSAL_MARKERS)
+
+
+@dataclass(frozen=True)
+class TokenUsage:
+    input_tokens: int = 0
+    output_tokens: int = 0
+    thoughts_tokens: int = 0
+    cached_tokens: int = 0
+
+    def __add__(self, other: TokenUsage) -> TokenUsage:
+        return TokenUsage(
+            input_tokens=self.input_tokens + other.input_tokens,
+            output_tokens=self.output_tokens + other.output_tokens,
+            thoughts_tokens=self.thoughts_tokens + other.thoughts_tokens,
+            cached_tokens=self.cached_tokens + other.cached_tokens,
+        )
+
+
+@dataclass(frozen=True)
+class CallTelemetry:
+    """Per-``complete_json`` execution metrics for benchmarking and observability."""
+
+    schema: str
+    model: str
+    latency_seconds: float
+    attempts: int
+    schema_retries: int
+    first_pass_ok: bool
+    succeeded: bool
+    truncated: bool
+    refused: bool
+    has_audio: bool
+    has_images: bool
+    usage: TokenUsage
+    error: str | None = None
+
+
 @dataclass(frozen=True)
 class Reply:
     text: str
     truncated: bool = False  # the model stopped because it hit the token limit
+    usage: TokenUsage | None = None
+    refused: bool = False
+    finish_reason: str | None = None
 
 
 class ChatBackend(ABC):
@@ -284,11 +355,23 @@ class ChatBackend(ABC):
 
     supports_audio: bool = False
 
-    def __init__(self, *, model: str, max_tokens: int, context_tokens: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        model: str,
+        max_tokens: int,
+        context_tokens: int | None = None,
+        on_call: Callable[[CallTelemetry], None] | None = None,
+    ) -> None:
         self._model = model
         self._max_tokens = max_tokens
         self._context_tokens = context_tokens
         self._warned_context = False
+        self._on_call = on_call
+
+    def set_telemetry_hook(self, hook: Callable[[CallTelemetry], None] | None) -> None:
+        """Attach or clear a callback invoked after each ``complete_json`` call."""
+        self._on_call = hook
 
     def close(self) -> None:
         http = getattr(self, "_http", None)
@@ -306,49 +389,115 @@ class ChatBackend(ABC):
         system_prompt = schema_prompt(system, schema)
         messages: list[Message] = [{"role": "user", "content": content}]
         self._warn_if_large(system_prompt, messages)
+        started = time.monotonic() if self._on_call is not None else 0.0
+        total_usage = TokenUsage()
+        attempts = 0
+        schema_retries = 0
+        truncated = False
+        refused = False
+        succeeded = False
+        error_text: str | None = None
         last_error: Exception | None = None
-        for _ in range(2):
-            reply = self._send(system_prompt, messages, schema)
-            log.debug("Model reply (%d characters): %s", len(reply.text), reply.text[:500])
-            try:
-                if (bare := _try_bare_list_for_schema(reply.text, schema)) is not None:
-                    return bare
-                raw_json = extract_json(reply.text)
+        reply = Reply("")
+        try:
+            for attempt_idx in range(2):
+                attempts = attempt_idx + 1
+                if attempt_idx > 0:
+                    schema_retries += 1
                 try:
-                    return schema.model_validate_json(raw_json)
-                except ValidationError as first_exc:
-                    # Open-weights models (e.g. Qwen2.5-Omni) sometimes emit literal newlines
-                    # inside multiline JSON strings like lyrics; retry with strict=False.
+                    reply = self._send(system_prompt, messages, schema)
+                except LLMError as exc:
+                    if is_refusal_error(exc):
+                        refused = True
+                    error_text = str(exc)
+                    raise
+                if reply.usage is not None:
+                    total_usage = total_usage + reply.usage
+                if reply.refused:
+                    refused = True
+                log.debug("Model reply (%d characters): %s", len(reply.text), reply.text[:500])
+                try:
+                    if (bare := _try_bare_list_for_schema(reply.text, schema)) is not None:
+                        succeeded = True
+                        return bare
+                    raw_json = extract_json(reply.text)
                     try:
-                        parsed = json.loads(
-                            raw_json, strict=False, parse_constant=_reject_json_constant
+                        parsed_model = schema.model_validate_json(raw_json)
+                        succeeded = True
+                        return parsed_model
+                    except ValidationError as first_exc:
+                        # Open-weights models (e.g. Qwen2.5-Omni) sometimes emit literal newlines
+                        # inside multiline JSON strings like lyrics; retry with strict=False.
+                        try:
+                            parsed = json.loads(
+                                raw_json, strict=False, parse_constant=_reject_json_constant
+                            )
+                        except (ValueError, RecursionError):
+                            raise first_exc from None
+                        parsed_model = schema.model_validate(parsed)
+                        succeeded = True
+                        return parsed_model
+                except (ValidationError, LLMError) as exc:
+                    last_error = exc
+                    if reply.refused:
+                        err = LLMError(
+                            f"The model refused the request ({reply.finish_reason or 'refusal'}). "
+                            f"The reply began: {reply.text[:200]!r}"
                         )
-                    except (ValueError, RecursionError):
-                        raise first_exc from None
-                    return schema.model_validate(parsed)
-            except (ValidationError, LLMError) as exc:
-                last_error = exc
-                if reply.truncated:
-                    # A correction cannot help: the reply needs more room, not different words.
-                    raise LLMError(
-                        f"The model's reply was cut off at max_tokens ({self._max_tokens}) before "
-                        "the JSON was complete. Raise llm.max_tokens in project.yaml, or lower "
-                        "llm.shots_per_request."
-                    ) from exc
-                log.warning("Model reply failed validation; asking for a correction")
-                detail = str(exc)[:_MAX_CORRECTION_CHARS]
-                assistant_reply = reply.text if reply.text.strip() else "(empty response)"
-                messages += [
-                    {"role": "assistant", "content": assistant_reply},
-                    {
-                        "role": "user",
-                        "content": f"That did not validate: {detail}\nSend corrected JSON.",
-                    },
-                ]
-        raise LLMError(
-            f"Model reply could not be parsed as {schema.__name__}: {last_error} "
-            f"The reply began: {reply.text[:200]!r}. Run with -v to see more."
-        )
+                        error_text = str(err)
+                        raise err from exc
+                    if reply.truncated:
+                        truncated = True
+                        # A correction cannot help: the reply needs more room, not different words.
+                        err = LLMError(
+                            f"The model's reply was cut off at max_tokens ({self._max_tokens}) "
+                            "before the JSON was complete. Raise llm.max_tokens in project.yaml, "
+                            "or lower llm.shots_per_request."
+                        )
+                        error_text = str(err)
+                        raise err from exc
+                    log.warning("Model reply failed validation; asking for a correction")
+                    detail = str(exc)[:_MAX_CORRECTION_CHARS]
+                    assistant_reply = reply.text if reply.text.strip() else "(empty response)"
+                    messages += [
+                        {"role": "assistant", "content": assistant_reply},
+                        {
+                            "role": "user",
+                            "content": f"That did not validate: {detail}\nSend corrected JSON.",
+                        },
+                    ]
+            err = LLMError(
+                f"Model reply could not be parsed as {schema.__name__}: {last_error} "
+                f"The reply began: {reply.text[:200]!r}. Run with -v to see more."
+            )
+            error_text = str(err)
+            raise err
+        except BaseException as exc:
+            if error_text is None:
+                error_text = str(exc)
+            raise
+        finally:
+            if self._on_call is not None:
+                try:
+                    self._on_call(
+                        CallTelemetry(
+                            schema=schema.__name__,
+                            model=self._model,
+                            latency_seconds=round(max(0.0, time.monotonic() - started), 4),
+                            attempts=attempts,
+                            schema_retries=schema_retries,
+                            first_pass_ok=succeeded and schema_retries == 0,
+                            succeeded=succeeded,
+                            truncated=truncated,
+                            refused=refused,
+                            has_audio=has_audio(messages),
+                            has_images=has_images(messages),
+                            usage=total_usage,
+                            error=error_text,
+                        )
+                    )
+                except Exception:
+                    log.warning("LLM telemetry hook raised an exception", exc_info=True)
 
     def _warn_if_large(self, system: str, messages: list[Message]) -> None:
         if self._context_tokens is None or self._warned_context:

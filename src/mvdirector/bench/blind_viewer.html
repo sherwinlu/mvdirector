@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mvdirector — Blind Multi-Model Planning Evaluation</title>
+<style>
+  :root {
+    --bg: #0f1117; --surface: #181c26; --surface-2: #222838; --border: #2e364a;
+    --text: #e8ecf5; --muted: #98a2b8; --accent: #7c9cff; --good: #4ade80;
+    --warn: #fbbf24; --bad: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.45;
+  }
+  header {
+    position: sticky; top: 0; z-index: 20; background: rgba(15, 17, 23, 0.95);
+    backdrop-filter: blur(8px); border-bottom: 1px solid var(--border);
+    padding: 12px 20px; display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+    justify-content: space-between;
+  }
+  header h1 { margin: 0; font-size: 18px; letter-spacing: 0.2px; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  select, button {
+    background: var(--surface-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 12px; font-size: 13px; cursor: pointer;
+  }
+  button.primary { background: var(--accent); color: #0c1020; font-weight: 600; border: none; }
+  button.reveal { background: #f59e0b; color: #111; font-weight: 600; border: none; }
+  button.active { border-color: var(--accent); color: var(--accent); }
+  main { max-width: 1520px; margin: 0 auto; padding: 18px 20px 60px; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 16px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 14px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 16px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .card h2 { margin: 0; font-size: 16px; display: flex; justify-content: space-between; align-items: center; }
+  .pill {
+    display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 999px;
+    background: var(--surface-2); color: var(--muted); border: 1px solid var(--border);
+  }
+  .section-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--muted); margin-top: 6px; }
+  .kv { font-size: 13px; color: var(--text); white-space: pre-wrap; }
+  .shot-strip { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+  .shot-btn { text-align: left; padding: 6px 10px; font-size: 12px; }
+  .shot-btn.active { background: var(--accent); color: #0c1020; font-weight: 600; border-color: var(--accent); }
+  .shot-banner {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; margin-bottom: 14px; font-size: 13px;
+  }
+  .prompt-box {
+    background: #12151e; border: 1px solid var(--border); border-radius: 6px;
+    padding: 9px 11px; font-size: 12.5px; white-space: pre-wrap;
+  }
+  .rubric-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.05);
+  }
+  .stars { display: flex; gap: 4px; }
+  .star-btn {
+    width: 28px; height: 28px; padding: 0; font-size: 12px; font-weight: 600;
+    border-radius: 6px; text-align: center;
+  }
+  .star-btn.selected { background: var(--accent); color: #0c1020; border-color: var(--accent); }
+  textarea {
+    width: 100%; min-height: 60px; background: #12151e; color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-family: inherit;
+    font-size: 12.5px;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
+  th, td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: left; }
+  th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .muted { color: var(--muted); }
+  .callout {
+    background: rgba(124, 156, 255, 0.12); border: 1px solid var(--accent);
+    border-radius: 8px; padding: 10px 14px; margin: 12px 0; font-size: 13px;
+  }
+  ul.compact { margin: 4px 0 0 18px; padding: 0; font-size: 12.5px; }
+  ul.compact li { margin-bottom: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>mvdirector — Blind Planning Benchmark Viewer</h1>
+  <div class="toolbar">
+    <label class="muted" for="trackSelect">Track:</label>
+    <select id="trackSelect"></select>
+    <label style="font-size:12.5px; display:flex; align-items:center; gap:5px;">
+      <input type="checkbox" id="composedToggle"> Show composed ComfyUI still prompt
+    </label>
+    <button id="exportBtn">Export Scores JSON</button>
+    <button id="revealBtn" class="reveal">Reveal Unblinded Leaderboard</button>
+  </div>
+</header>
+<main>
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="bible">1. Visual Bibles</button>
+    <button class="tab-btn" data-tab="shots">2. Matched Shots</button>
+    <button class="tab-btn" data-tab="score">3. Blind Scoring</button>
+    <button class="tab-btn" data-tab="leaderboard" id="leaderboardTab" style="display:none;">4. Unblinded Leaderboard</button>
+  </div>
+  <div id="content"></div>
+</main>
+<script>
+const BLIND_DATA = __BLIND_DATA__;
+const ENCODED_KEY = __ENCODED_KEY__;
+const VIEWER_ID = __VIEWER_ID__;
+const RUBRICS = [
+  { key: "originality", label: "Visual originality" },
+  { key: "audio_fit", label: "Audio / mood fit" },
+  { key: "continuity", label: "Continuity precision" },
+  { key: "prompt_craft", label: "ComfyUI prompt craft" }
+];
+const STORAGE_KEY = `mvd_bench_blind_scores_v1_${VIEWER_ID}`;
+
+let state = {
+  trackIdx: 0,
+  tab: "bible",
+  shotIdx: 0,
+  showComposed: false,
+  revealed: false,
+  scores: loadScores()
+};
+
+function loadScores() {
+  try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}"); } catch { return {}; }
+}
+function saveScores() {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state.scores)); } catch {}
+}
+function esc(v) {
+  return String(v ?? "").replace(/[&<>"']/g, ch => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  })[ch]);
+}
+function decodeKey() {
+  const bin = atob(ENCODED_KEY);
+  const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
+  return JSON.parse(new TextDecoder("utf-8").decode(bytes));
+}
+function currentTrack() { return BLIND_DATA.tracks[state.trackIdx]; }
+function getScore(track, alias, key) {
+  return (((state.scores[track] || {})[alias] || {})[key]) ?? null;
+}
+function setScore(track, alias, key, val) {
+  state.scores[track] = state.scores[track] || {};
+  state.scores[track][alias] = state.scores[track][alias] || {};
+  state.scores[track][alias][key] = val;
+  saveScores();
+}
+function fmtTime(sec) {
+  const m = Math.floor(sec / 60), s = Math.floor(sec % 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function renderBibleTab(track) {
+  return `<div class="grid">${track.directors.map(d => {
+    const b = d.bible;
+    const interp = b.interpretation ? `
+      <div class="section-label">Song Interpretation</div>
+      <div class="kv"><b>Meaning:</b> ${esc(b.interpretation.meaning)}</div>
+      <div class="kv"><b>Tone:</b> ${esc(b.interpretation.tone)}</div>
+      <div class="kv"><b>Music feel:</b> ${esc(b.interpretation.music_feel)}</div>
+      ${b.interpretation.visual_motifs?.length ? `<div class="kv"><b>Motifs:</b> ${esc(b.interpretation.visual_motifs.join(" · "))}</div>` : ""}
+    ` : "";
+    const chars = (b.characters || []).map(c => `
+      <div class="prompt-box">
+        <b>${esc(c.name)}</b> <span class="pill">${esc(c.id)}</span><br>
+        ${esc(c.appearance)}
+        ${c.invariants ? `<br><b>Invariants:</b> ${esc(c.invariants)}` : ""}
+        ${(c.wardrobe || []).length ? `<ul class="compact">${c.wardrobe.map(w => `<li><b>${esc(w.id)}:</b> ${esc(w.description)}</li>`).join("")}</ul>` : ""}
+      </div>
+    `).join("");
+    const sets = (b.settings || []).map(s => `<li><b>${esc(s.name)}</b> (${esc((s.sections || []).join(", "))}): ${esc(s.description)}</li>`).join("");
+    const propsHtml = (b.props || []).map(p => `<li><b>${esc(p.name)}</b>: ${esc(p.description)}</li>`).join("");
+    const rulesHtml = (b.rules || []).map(r => `<li>${esc(r)}</li>`).join("");
+    return `
+      <section class="card">
+        <h2>${esc(d.alias)} <span class="pill">${(b.settings || []).length} sets · ${(b.characters || []).length} cast</span></h2>
+        ${interp}
+        <div class="section-label">Concept</div>
+        <div class="kv">${esc(b.concept)}</div>
+        <div class="section-label">Look &amp; Lighting</div>
+        <div class="kv"><b>Style:</b> ${esc(b.style)}<br><b>Palette:</b> ${esc(b.palette)}<br><b>Lighting:</b> ${esc(b.lighting)}</div>
+        ${chars ? `<div class="section-label">Characters &amp; Wardrobe</div>${chars}` : ""}
+        <div class="section-label">Sets</div>
+        <ul class="compact">${sets}</ul>
+        ${propsHtml ? `<div class="section-label">Hero Props</div><ul class="compact">${propsHtml}</ul>` : ""}
+        <div class="section-label">Production Rules</div>
+        <ul class="compact">${rulesHtml}</ul>
+      </section>
+    `;
+  }).join("")}</div>`;
+}
+
+function renderShotsTab(track) {
+  const metas = track.shot_meta || [];
+  if (!metas.length) return `<p class="muted">No matched shots available.</p>`;
+  if (state.shotIdx >= metas.length) state.shotIdx = 0;
+  const meta = metas[state.shotIdx];
+  const strip = `<div class="shot-strip">${metas.map((m, i) => `
+    <button class="shot-btn ${i === state.shotIdx ? "active" : ""}" data-shot-idx="${i}">
+      <b>${esc(m.role)}</b><br><span style="opacity:0.8">${esc(m.id)} · ${fmtTime(m.start)} · ${esc(m.type)}</span>
+    </button>
+  `).join("")}</div>`;
+  const banner = `
+    <div class="shot-banner">
+      <b>${esc(meta.role)}</b> — <code>${esc(meta.id)}</code> · Section: <b>${esc(meta.section || "(instrumental)")}</b> ·
+      Time: ${fmtTime(meta.start)}–${fmtTime(meta.end)} · Intensity: ${Number(meta.intensity).toFixed(2)} ·
+      Base type: <span class="pill">${esc(meta.type)}</span>
+      <div style="margin-top:6px;"><b>Lyrics:</b> ${esc(meta.lyrics || "(instrumental)")}</div>
+    </div>
+  `;
+  const cards = `<div class="grid">${track.directors.map(d => {
+    const sh = d.shots[meta.id];
+    if (!sh) return `<section class="card"><h2>${esc(d.alias)}</h2><p class="muted">Shot missing.</p></section>`;
+    const stillText = state.showComposed ? sh.composed_still_prompt : sh.still_prompt;
+    return `
+      <section class="card">
+        <h2>${esc(d.alias)} <span class="pill">${esc(sh.type)} · ${esc(sh.framing)}</span></h2>
+        <div class="kv"><b>Set:</b> ${esc(sh.setting)} ${sh.wardrobe ? `· <b>Wardrobe:</b> <code>${esc(sh.wardrobe)}</code>` : ""} ${sh.character ? `· <b>Cast:</b> <code>${esc((sh.characters || [sh.character]).join(", "))}</code>` : ""}</div>
+        <div class="section-label">${state.showComposed ? "Composed ComfyUI Still Prompt" : "Raw Director still_prompt"}</div>
+        <div class="prompt-box">${esc(stillText)}</div>
+        <div class="section-label">motion_prompt</div>
+        <div class="prompt-box">${esc(sh.motion_prompt)}</div>
+      </section>
+    `;
+  }).join("")}</div>`;
+  return strip + banner + cards;
+}
+
+function renderScoreTab(track) {
+  return `<div class="grid">${track.directors.map(d => {
+    const rows = RUBRICS.map(r => {
+      const cur = getScore(track.track, d.alias, r.key);
+      const btns = [1, 2, 3, 4, 5].map(v => `
+        <button class="star-btn ${cur === v ? "selected" : ""}" data-alias="${esc(d.alias)}" data-rubric="${r.key}" data-val="${v}">${v}</button>
+      `).join("");
+      return `<div class="rubric-row"><span>${esc(r.label)}</span><div class="stars">${btns}</div></div>`;
+    }).join("");
+    const note = getScore(track.track, d.alias, "notes") || "";
+    const vals = RUBRICS.map(r => getScore(track.track, d.alias, r.key)).filter(v => typeof v === "number");
+    const avg = vals.length ? (vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(2) : "—";
+    return `
+      <section class="card">
+        <h2>${esc(d.alias)} <span class="pill">Avg: ${avg} / 5</span></h2>
+        ${rows}
+        <div class="section-label">Notes</div>
+        <textarea data-note-alias="${esc(d.alias)}" placeholder="Strengths, continuity slips, prompt craft observations...">${esc(note)}</textarea>
+      </section>
+    `;
+  }).join("")}</div>`;
+}
+
+function renderLeaderboardTab(track) {
+  const key = decodeKey();
+  const trackKey = key.tracks[track.track] || {};
+  const rows = Object.entries(trackKey).map(([alias, info]) => {
+    const rubricScores = RUBRICS.map(r => getScore(track.track, alias, r.key));
+    const numeric = rubricScores.filter(v => typeof v === "number");
+    const avg = numeric.length ? numeric.reduce((a, b) => a + b, 0) / numeric.length : null;
+    return { alias, info, rubricScores, avg };
+  });
+  rows.sort((a, b) => (b.avg ?? -1) - (a.avg ?? -1));
+
+  const bRow = rows.find(r => r.info.arm_id === "B");
+  const b2Row = rows.find(r => r.info.arm_id === "B2");
+  let audioCallout = "";
+  if (bRow && b2Row && bRow.avg !== null && b2Row.avg !== null) {
+    const deltaNum = bRow.avg - b2Row.avg;
+    const delta = deltaNum.toFixed(2);
+    audioCallout = `<div class="callout"><b>Native Audio Lift (Arm B vs. Arm B2 Text-Only Control):</b> Human avg ${bRow.avg.toFixed(2)} vs. ${b2Row.avg.toFixed(2)} (<b>${deltaNum >= 0 ? "+" : ""}${delta}</b>), cost $${bRow.info.telemetry.estimated_usd.toFixed(4)} vs. $${b2Row.info.telemetry.estimated_usd.toFixed(4)}.</div>`;
+  }
+
+  return `
+    ${audioCallout}
+    <section class="card">
+      <h2>Unblinded Leaderboard — ${esc(track.track)}</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Rank</th><th>Blind Label</th><th>Arm</th><th>Model</th><th>Audio</th>
+            <th>Human Avg</th><th>Orig / Audio / Cont / Craft</th>
+            <th>1st-Pass JSON</th><th>Fallback</th><th>Framing / Affirm.</th>
+            <th>Latency</th><th>Est. USD</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((r, i) => {
+            const t = r.info.telemetry, q = r.info.quality;
+            const breakdown = r.rubricScores.map(v => v ?? "–").join(" / ");
+            return `<tr>
+              <td><b>#${i + 1}</b></td>
+              <td>${esc(r.alias)}</td>
+              <td><b>${esc(r.info.arm_id)}</b></td>
+              <td><code>${esc(r.info.model)}</code><br><span class="muted">${esc(r.info.arm_label)}</span></td>
+              <td>${r.info.attach_audio ? "yes" : "no"}</td>
+              <td><b>${r.avg !== null ? r.avg.toFixed(2) : "—"}</b></td>
+              <td>${esc(breakdown)}</td>
+              <td>${Math.round((t.first_pass_rate || 0) * 100)}% (${t.schema_retries}r/${t.truncations}t)</td>
+              <td>${q.fallback_shots}/${q.total_shots}</td>
+              <td>${Math.round((q.framing_detail_compliance || 0) * 100)}% / ${Math.round((q.affirmative_phrasing_compliance || 0) * 100)}%</td>
+              <td>${Number(r.info.wall_seconds).toFixed(1)}s</td>
+              <td>$${Number(t.estimated_usd).toFixed(4)}</td>
+            </tr>`;
+          }).join("")}
+        </tbody>
+      </table>
+    </section>
+  `;
+}
+
+function render() {
+  const track = currentTrack();
+  document.querySelectorAll(".tab-btn").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.tab === state.tab);
+  });
+  const el = document.getElementById("content");
+  if (state.tab === "bible") el.innerHTML = renderBibleTab(track);
+  else if (state.tab === "shots") el.innerHTML = renderShotsTab(track);
+  else if (state.tab === "score") el.innerHTML = renderScoreTab(track);
+  else if (state.tab === "leaderboard") el.innerHTML = renderLeaderboardTab(track);
+
+  el.querySelectorAll("[data-shot-idx]").forEach(btn => {
+    btn.addEventListener("click", () => { state.shotIdx = Number(btn.dataset.shotIdx); render(); });
+  });
+  el.querySelectorAll("[data-rubric]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      setScore(track.track, btn.dataset.alias, btn.dataset.rubric, Number(btn.dataset.val));
+      render();
+    });
+  });
+  el.querySelectorAll("[data-note-alias]").forEach(area => {
+    area.addEventListener("input", () => {
+      setScore(track.track, area.dataset.noteAlias, "notes", area.value);
+    });
+  });
+}
+
+function init() {
+  const sel = document.getElementById("trackSelect");
+  BLIND_DATA.tracks.forEach((t, idx) => {
+    const opt = document.createElement("option");
+    opt.value = idx; opt.textContent = `${t.track} (${t.directors.length} directors)`;
+    sel.appendChild(opt);
+  });
+  sel.addEventListener("change", () => { state.trackIdx = Number(sel.value); state.shotIdx = 0; render(); });
+  document.getElementById("composedToggle").addEventListener("change", e => {
+    state.showComposed = e.target.checked; render();
+  });
+  document.querySelectorAll(".tab-btn").forEach(btn => {
+    btn.addEventListener("click", () => { state.tab = btn.dataset.tab; render(); });
+  });
+  document.getElementById("revealBtn").addEventListener("click", () => {
+    if (!state.revealed && !confirm("Reveal the real model identities? Make sure you finished blind scoring first.")) return;
+    state.revealed = true;
+    document.getElementById("leaderboardTab").style.display = "inline-block";
+    state.tab = "leaderboard";
+    render();
+  });
+  document.getElementById("exportBtn").addEventListener("click", () => {
+    const payload = {
+      blind_scores: state.scores,
+      unblinded: state.revealed ? decodeKey() : null
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = "blind_scores.json"; a.click();
+    URL.revokeObjectURL(url);
+  });
+  render();
+}
+init();
+</script>
+</body>
+</html>

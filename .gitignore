@@ -15,3 +15,5 @@ htmlcov/
 .env.*
 # Song projects hold large media and are not source code.
 projects/
+# Benchmark outputs hold API run artifacts and are not source code.
+benchmarks/

@@ -20,6 +20,7 @@ from mvdirector.config import (
     LLMConfig,
     LLMProvider,
     ProjectConfig,
+    is_allowed_api_key_env,
     mask_unset_allowed_env_refs,
 )
 from mvdirector.dotenv import read_project_dotenv
@@ -27,6 +28,9 @@ from mvdirector.errors import ConfigError
 from mvdirector.project import Project
 
 _SAFE_ARM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}\Z")
+_SNAPSHOT_SUFFIX_RE = re.compile(
+    r"^-(?:latest|\d{4}(?:-?\d{2}(?:-?\d{2})?)?|v\d+(?:\.\d+)*|preview(?:-[\w.-]+)?|exp(?:-[\w.-]+)?)\Z"
+)
 
 
 class ModelPricing(BaseModel):
@@ -94,13 +98,15 @@ DEFAULT_PRICING: dict[str, ModelPricing] = {
 
 
 def lookup_pricing(model: str) -> ModelPricing:
-    """Return exact or prefix-matched default pricing for ``model``, or zeroed fallback."""
+    """Return exact or snapshot-suffix matched default pricing, or zeroed fallback."""
     cleaned = model.strip().lower().removeprefix("models/")
     if cleaned in DEFAULT_PRICING:
         return DEFAULT_PRICING[cleaned]
     for prefix in sorted(DEFAULT_PRICING, key=len, reverse=True):
         if cleaned.startswith(prefix):
-            return DEFAULT_PRICING[prefix]
+            suffix = cleaned[len(prefix) :]
+            if _SNAPSHOT_SUFFIX_RE.match(suffix):
+                return DEFAULT_PRICING[prefix]
     return ModelPricing(input_per_million=0.0, output_per_million=0.0)
 
 
@@ -149,22 +155,45 @@ class ModelArm(BaseModel):
             raise ValueError("must not be empty")
         return cleaned
 
+    @field_validator("api_key_env")
+    @classmethod
+    def _validate_api_key_env(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            return None
+        if not is_allowed_api_key_env(cleaned):
+            raise ValueError(
+                f"arm api_key_env {value!r} is not allowed. Use a provider key name "
+                "(ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, GOOGLE_API_KEY), "
+                "an MVD_* name, or a name listed in MVD_ALLOWED_ENV_VARS."
+            )
+        return cleaned
+
     def effective_pricing(self) -> ModelPricing:
         return self.pricing if self.pricing is not None else lookup_pricing(self.model)
 
-    def to_llm_config(self) -> LLMConfig:
-        return LLMConfig(
-            enabled=True,
-            provider=self.provider,
-            model=self.model,
-            base_url=self.base_url,
-            api_key_env=self.api_key_env,
-            max_tokens=self.max_tokens,
-            shots_per_request=self.shots_per_request,
-            timeout_seconds=self.timeout_seconds,
-            json_mode=self.json_mode,
-            stream=self.stream,
-        )
+    def to_llm_config(self, *, environ: Mapping[str, str] | None = None) -> LLMConfig:
+        payload = {
+            "enabled": True,
+            "provider": self.provider,
+            "model": self.model,
+            "base_url": self.base_url,
+            "api_key_env": self.api_key_env,
+            "max_tokens": self.max_tokens,
+            "shots_per_request": self.shots_per_request,
+            "timeout_seconds": self.timeout_seconds,
+            "json_mode": self.json_mode,
+            "stream": self.stream,
+        }
+        ctx = {"environ": environ} if environ is not None else None
+        try:
+            return LLMConfig.model_validate(payload, context=ctx)
+        except ValidationError as exc:
+            raise ConfigError(
+                f"Invalid LLM settings for benchmark arm {self.id!r}:\n{exc}"
+            ) from exc
 
 
 class GPUCostConfig(BaseModel):

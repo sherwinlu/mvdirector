@@ -293,6 +293,13 @@ _REFUSAL_MARKERS = (
 )
 
 
+def positive_int(value: object) -> int:
+    """Return ``value`` as a positive ``int``, rejecting ``bool`` and non-positive values."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return 0
+    return int(value)
+
+
 def is_refusal_error(exc: BaseException) -> bool:
     """True when ``exc`` reflects a provider safety filter or policy refusal."""
     lowered = str(exc).lower()
@@ -432,6 +439,13 @@ class ChatBackend(ABC):
                         return parsed_model
                 except (ValidationError, LLMError) as exc:
                     last_error = exc
+                    if reply.refused:
+                        err = LLMError(
+                            f"The model refused the request ({reply.finish_reason or 'refusal'}). "
+                            f"The reply began: {reply.text[:200]!r}"
+                        )
+                        error_text = str(err)
+                        raise err from exc
                     if reply.truncated:
                         truncated = True
                         # A correction cannot help: the reply needs more room, not different words.
@@ -464,23 +478,26 @@ class ChatBackend(ABC):
             raise
         finally:
             if self._on_call is not None:
-                self._on_call(
-                    CallTelemetry(
-                        schema=schema.__name__,
-                        model=self._model,
-                        latency_seconds=round(max(0.0, time.monotonic() - started), 4),
-                        attempts=attempts,
-                        schema_retries=schema_retries,
-                        first_pass_ok=succeeded and schema_retries == 0,
-                        succeeded=succeeded,
-                        truncated=truncated,
-                        refused=refused,
-                        has_audio=has_audio(messages),
-                        has_images=has_images(messages),
-                        usage=total_usage,
-                        error=error_text,
+                try:
+                    self._on_call(
+                        CallTelemetry(
+                            schema=schema.__name__,
+                            model=self._model,
+                            latency_seconds=round(max(0.0, time.monotonic() - started), 4),
+                            attempts=attempts,
+                            schema_retries=schema_retries,
+                            first_pass_ok=succeeded and schema_retries == 0,
+                            succeeded=succeeded,
+                            truncated=truncated,
+                            refused=refused,
+                            has_audio=has_audio(messages),
+                            has_images=has_images(messages),
+                            usage=total_usage,
+                            error=error_text,
+                        )
                     )
-                )
+                except Exception:
+                    log.warning("LLM telemetry hook raised an exception", exc_info=True)
 
     def _warn_if_large(self, system: str, messages: list[Message]) -> None:
         if self._context_tokens is None or self._warned_context:

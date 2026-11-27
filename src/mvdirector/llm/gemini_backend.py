@@ -12,7 +12,15 @@ from typing import Any
 from pydantic import BaseModel
 
 from mvdirector.errors import ConfigError, LLMError
-from mvdirector.llm.base import ChatBackend, Message, Reply, TokenUsage, blocks_of, has_images
+from mvdirector.llm.base import (
+    ChatBackend,
+    Message,
+    Reply,
+    TokenUsage,
+    blocks_of,
+    has_images,
+    positive_int,
+)
 from mvdirector.llm.http import IMAGE_WORDS, HttpJSON, check_response, json_body
 
 _BLOCKED = {"SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY"}
@@ -35,17 +43,17 @@ def _usage_from_data(data: dict[str, Any]) -> TokenUsage | None:
     usage = data.get("usageMetadata")
     if not isinstance(usage, dict):
         return None
-    prompt = usage.get("promptTokenCount")
-    candidates = usage.get("candidatesTokenCount")
-    thoughts = usage.get("thoughtsTokenCount")
-    cached = usage.get("cachedContentTokenCount")
-    if not any(isinstance(v, int) and v > 0 for v in (prompt, candidates, thoughts, cached)):
+    prompt = positive_int(usage.get("promptTokenCount"))
+    candidates = positive_int(usage.get("candidatesTokenCount"))
+    thoughts = positive_int(usage.get("thoughtsTokenCount"))
+    cached = positive_int(usage.get("cachedContentTokenCount"))
+    if not (prompt or candidates or thoughts or cached):
         return None
     return TokenUsage(
-        input_tokens=int(prompt) if isinstance(prompt, int) and prompt > 0 else 0,
-        output_tokens=int(candidates) if isinstance(candidates, int) and candidates > 0 else 0,
-        thoughts_tokens=int(thoughts) if isinstance(thoughts, int) and thoughts > 0 else 0,
-        cached_tokens=int(cached) if isinstance(cached, int) and cached > 0 else 0,
+        input_tokens=prompt,
+        output_tokens=candidates,
+        thoughts_tokens=thoughts,
+        cached_tokens=cached,
     )
 
 
@@ -53,8 +61,7 @@ def _thoughts_token_count(data: dict[str, Any]) -> int:
     usage = data.get("usageMetadata")
     if not isinstance(usage, dict):
         return 0
-    raw = usage.get("thoughtsTokenCount")
-    return int(raw) if isinstance(raw, int) and raw > 0 else 0
+    return positive_int(usage.get("thoughtsTokenCount"))
 
 
 class GeminiChat(ChatBackend):
@@ -200,5 +207,6 @@ class GeminiChat(ChatBackend):
             text,
             truncated=finish == "MAX_TOKENS",
             usage=_usage_from_data(data),
+            refused=finish in _BLOCKED,
             finish_reason=finish if isinstance(finish, str) else None,
         )

@@ -7,9 +7,11 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import re
+from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
@@ -86,6 +88,20 @@ def parse_failure_tags(raw: object) -> list[FailureTag]:
     return parsed
 
 
+def _project_id_prefixes(resolved_projects: Sequence[Path]) -> dict[Path, str]:
+    """Map resolved project paths to stable ID prefixes, disambiguating shared basenames."""
+    unique = list(dict.fromkeys(p.resolve() for p in resolved_projects))
+    counts = Counter(p.name for p in unique)
+    prefixes: dict[Path, str] = {}
+    for p in unique:
+        if counts[p.name] > 1:
+            digest = hashlib.sha256(str(p).encode("utf-8")).hexdigest()[:6]
+            prefixes[p] = f"{p.name}-{digest}"
+        else:
+            prefixes[p] = p.name
+    return prefixes
+
+
 def load_qc_dataset(
     path: Path,
     *,
@@ -114,26 +130,30 @@ def load_qc_dataset(
         except csv.Error as exc:
             raise ConfigError(f"{path}: invalid CSV ({exc})") from exc
 
+    base_dir = path.resolve().parent
+    resolved_rows: list[tuple[int, dict[str, object], Path]] = []
+    for idx, row in enumerate(rows, start=1):
+        raw_proj = row.get("project")
+        proj_str = "" if raw_proj is None else str(raw_proj).strip()
+        if proj_str:
+            cand = Path(proj_str)
+            if not cand.is_absolute():
+                rel_to_file = (base_dir / cand).resolve()
+                rel_to_cwd = cand.resolve()
+                resolved_proj = rel_to_file if rel_to_file.is_dir() else rel_to_cwd
+            else:
+                resolved_proj = cand.resolve()
+        elif default_project is not None:
+            resolved_proj = default_project.resolve()
+        else:
+            raise ConfigError(f"{path} row {idx}: missing 'project' column (or pass --project)")
+        resolved_rows.append((idx, row, resolved_proj))
+
+    prefixes = _project_id_prefixes([proj for _, _, proj in resolved_rows])
     items: list[QCLabelItem] = []
     seen_ids: set[str] = set()
-    base_dir = path.resolve().parent
-    for idx, row in enumerate(rows, start=1):
+    for idx, row, resolved_proj in resolved_rows:
         try:
-            raw_proj = row.get("project")
-            proj_str = "" if raw_proj is None else str(raw_proj).strip()
-            if proj_str:
-                cand = Path(proj_str)
-                if not cand.is_absolute():
-                    rel_to_file = (base_dir / cand).resolve()
-                    rel_to_cwd = cand.resolve()
-                    resolved_proj = rel_to_file if rel_to_file.is_dir() else rel_to_cwd
-                else:
-                    resolved_proj = cand.resolve()
-            elif default_project is not None:
-                resolved_proj = default_project.resolve()
-            else:
-                raise ValueError("missing 'project' column (or pass --project)")
-
             raw_shot = row.get("shot") or row.get("shot_id")
             if raw_shot is None or not str(raw_shot).strip():
                 raise ValueError("shot must not be empty")
@@ -154,7 +174,8 @@ def load_qc_dataset(
             tags = parse_failure_tags(row.get("tags") or row.get("failure_tags"))
             notes = str(row.get("notes") or "").strip()
 
-            item_id = f"{resolved_proj.name}:{shot_id}:a{attempt if attempt is not None else 'sel'}"
+            proj_prefix = prefixes[resolved_proj]
+            item_id = f"{proj_prefix}:{shot_id}:a{attempt if attempt is not None else 'sel'}"
             if item_id in seen_ids:
                 raise ValueError(f"duplicate dataset entry {item_id!r}")
             seen_ids.add(item_id)
@@ -227,13 +248,18 @@ def scaffold_qc_dataset(
         raise ConfigError(f"{output_path} already exists. Pass --overwrite to replace it.")
     if not projects:
         raise ConfigError("Provide at least one project folder to scaffold a Vision QC dataset.")
+    if isinstance(target_size, bool) or target_size < 1:
+        raise ConfigError(f"target_size must be a positive integer, got {target_size!r}.")
+
+    opened_projects = [open_bench_project(proj_dir) for proj_dir in projects]
+    prefixes = _project_id_prefixes([p.root for p in opened_projects])
 
     good_by_proj: list[list[tuple[int, QCLabelItem]]] = []
     bad_by_proj: list[list[tuple[int, QCLabelItem]]] = []
 
-    for proj_dir in projects:
-        project = open_bench_project(proj_dir)
+    for project in opened_projects:
         manifest = project.load_manifest()
+        proj_prefix = prefixes[project.root.resolve()]
         initial_w = next((s.wardrobe for s in manifest.shots if s.wardrobe), None)
         p_good: list[tuple[int, QCLabelItem]] = []
         p_bad: list[tuple[int, QCLabelItem]] = []
@@ -256,8 +282,8 @@ def scaffold_qc_dataset(
                 defect_bonus = sum(2 if t in ("artifact", "character") else 1 for t in tags)
                 priority = len(tricky) * 2 + defect_bonus + (1 if is_selected else 0)
                 item = QCLabelItem(
-                    id=f"{project.root.name}:{shot.id}:a{att.number}",
-                    project=str(project.root),
+                    id=f"{proj_prefix}:{shot.id}:a{att.number}",
+                    project=str(project.root.resolve()),
                     shot_id=shot.id,
                     attempt=att.number,
                     good=good,

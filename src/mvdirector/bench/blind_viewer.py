@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import random
+import re
 import secrets
 from collections import defaultdict
 from collections.abc import Sequence
@@ -322,8 +324,16 @@ def generate_blind_viewer(
     ).decode("ascii")
 
     template = resources.files("mvdirector.bench").joinpath("blind_viewer.html").read_text("utf-8")
-    html_doc = template.replace("__BLIND_DATA__", _safe_json_for_script(blind_data)).replace(
-        "__ENCODED_KEY__", _safe_json_for_script(encoded_key)
+    viewer_id = hashlib.sha256(encoded_key.encode("ascii")).hexdigest()[:12]
+    replacements = {
+        "__BLIND_DATA__": _safe_json_for_script(blind_data),
+        "__ENCODED_KEY__": _safe_json_for_script(encoded_key),
+        "__VIEWER_ID__": _safe_json_for_script(viewer_id),
+    }
+    html_doc = re.sub(
+        r"__BLIND_DATA__|__ENCODED_KEY__|__VIEWER_ID__",
+        lambda match: replacements[match.group(0)],
+        template,
     )
     output_html.parent.mkdir(parents=True, exist_ok=True)
     atomic_write(output_html, html_doc)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import hashlib
 import html
 import io
 import json
@@ -126,6 +127,7 @@ class QCItemVerdict(BaseModel):
     error: str | None = None
     latency_seconds: float = 0.0
     estimated_usd: float = 0.0
+    cache_fingerprint: str = ""
     call: CallRecord | None = None
 
 
@@ -137,6 +139,7 @@ class VisionQCArmResult(BaseModel):
     provider: str
     model: str
     blind_observer: bool = False
+    cache_fingerprint: str = ""
     total_items: int = 0
     evaluated_items: int = 0
     refusals: int = 0
@@ -200,6 +203,89 @@ def _calibrate_check(
     return metrics
 
 
+def _verdict_passes_gate(
+    v: QCItemVerdict,
+    *,
+    spec_min: float,
+    artifacts_min: float,
+    character_min: float,
+) -> bool:
+    """True when ``v`` passes the combined hard gate (refused/errored/missing calls pass)."""
+    if v.error is not None or v.refused or v.vision_spec is None or v.vision_artifacts is None:
+        return True
+    return (
+        v.vision_spec >= spec_min
+        and v.vision_artifacts >= artifacts_min
+        and (v.vision_character is None or v.vision_character >= character_min)
+    )
+
+
+def _qc_cache_fingerprint(
+    arm: ModelArm,
+    *,
+    blind_observer: bool,
+    include_plates: bool,
+) -> str:
+    payload = {
+        "provider": arm.provider,
+        "model": arm.model,
+        "blind_observer": blind_observer,
+        "include_plates": include_plates,
+        "max_tokens": arm.max_tokens,
+        "json_mode": arm.json_mode,
+        "base_url": arm.base_url,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def _load_compatible_cached_verdicts(
+    arm_dir: Path,
+    arm: ModelArm,
+    *,
+    blind_observer: bool,
+    include_plates: bool,
+) -> dict[str, QCItemVerdict]:
+    """Load cached non-error verdicts matching the current arm/mode fingerprint."""
+    verdicts_file = arm_dir / "verdicts.json"
+    if not verdicts_file.is_file():
+        return {}
+    expected_fp = _qc_cache_fingerprint(
+        arm, blind_observer=blind_observer, include_plates=include_plates
+    )
+    metrics_file = arm_dir / "metrics.json"
+    if metrics_file.is_file():
+        try:
+            prev_metrics = VisionQCArmResult.model_validate_json(
+                metrics_file.read_text(encoding="utf-8")
+            )
+            if (
+                prev_metrics.provider != arm.provider
+                or prev_metrics.model != arm.model
+                or prev_metrics.blind_observer != blind_observer
+                or (
+                    prev_metrics.cache_fingerprint and prev_metrics.cache_fingerprint != expected_fp
+                )
+            ):
+                return {}
+        except (OSError, ValueError):
+            pass
+    cached_by_id: dict[str, QCItemVerdict] = {}
+    try:
+        raw_list = json.loads(verdicts_file.read_text(encoding="utf-8"))
+        if isinstance(raw_list, list):
+            for entry in raw_list:
+                parsed = QCItemVerdict.model_validate(entry)
+                # Never reuse transient non-refusal errors; retry them on re-run.
+                if parsed.error is not None and not parsed.refused:
+                    continue
+                if parsed.cache_fingerprint and parsed.cache_fingerprint != expected_fp:
+                    continue
+                cached_by_id[parsed.item_id] = parsed
+    except (OSError, ValueError):
+        return {}
+    return cached_by_id
+
+
 def evaluate_hard_gate(
     verdicts: Sequence[QCItemVerdict],
     *,
@@ -217,14 +303,12 @@ def evaluate_hard_gate(
     """
     tp = tn = fp = fn = 0
     for v in verdicts:
-        if v.error is not None or v.refused or v.vision_spec is None or v.vision_artifacts is None:
-            predicted_pass = True
-        else:
-            predicted_pass = (
-                v.vision_spec >= spec_min
-                and v.vision_artifacts >= artifacts_min
-                and (v.vision_character is None or v.vision_character >= character_min)
-            )
+        predicted_pass = _verdict_passes_gate(
+            v,
+            spec_min=spec_min,
+            artifacts_min=artifacts_min,
+            character_min=character_min,
+        )
         if v.ground_truth_good:
             if predicted_pass:
                 tp += 1
@@ -282,6 +366,7 @@ def summarize_vision_qc_arm(
     gpu_costs: GPUCostConfig,
     wall_seconds: float,
     blind_observer: bool = False,
+    cache_fingerprint: str = "",
 ) -> VisionQCArmResult:
     """Compute per-check calibration, combined gate accuracy, and Net Effective Cost for an arm."""
     calls = [v.call for v in verdicts if v.call is not None]
@@ -331,6 +416,7 @@ def summarize_vision_qc_arm(
         provider=arm.provider,
         model=arm.model,
         blind_observer=blind_observer,
+        cache_fingerprint=cache_fingerprint,
         total_items=total,
         evaluated_items=evaluated,
         refusals=refusals,
@@ -354,6 +440,7 @@ def run_vision_qc_arm(
     blind_observer: bool = False,
     include_plates: bool = False,
     overwrite: bool = False,
+    max_budget_usd: float | None = None,
     environ: Mapping[str, str] | None = None,
     llm_factory: Callable[[ModelArm, Mapping[str, str] | None], Any] | None = None,
     on_progress: Callable[[str], None] | None = None,
@@ -362,17 +449,17 @@ def run_vision_qc_arm(
     arm_dir = out_root / "vision_qc" / arm.id
     arm_dir.mkdir(parents=True, exist_ok=True)
     verdicts_file = arm_dir / "verdicts.json"
+    cache_fp = _qc_cache_fingerprint(
+        arm, blind_observer=blind_observer, include_plates=include_plates
+    )
 
-    cached_by_id: dict[str, QCItemVerdict] = {}
-    if not overwrite and verdicts_file.is_file():
-        try:
-            raw_list = json.loads(verdicts_file.read_text(encoding="utf-8"))
-            if isinstance(raw_list, list):
-                for entry in raw_list:
-                    parsed = QCItemVerdict.model_validate(entry)
-                    cached_by_id[parsed.item_id] = parsed
-        except (OSError, ValueError):
-            cached_by_id = {}
+    cached_by_id: dict[str, QCItemVerdict] = (
+        {}
+        if overwrite
+        else _load_compatible_cached_verdicts(
+            arm_dir, arm, blind_observer=blind_observer, include_plates=include_plates
+        )
+    )
 
     project_cache: dict[str, tuple[Project, Manifest]] = {}
 
@@ -392,11 +479,15 @@ def run_vision_qc_arm(
         resolved_items.append((item, manifest, shot, still_path, ref_img, extra_refs))
 
     started = time.monotonic()
-    need_live = any(item.id not in cached_by_id for item, *_ in resolved_items)
+    need_live = any(item.id not in cached_by_id for item, *_ in resolved_items) and (
+        max_budget_usd is None or max_budget_usd > 0.0
+    )
 
     raw_llm = None
     instrumented: InstrumentedLLM | None = None
     verdicts: list[QCItemVerdict] = []
+    live_spent_usd = 0.0
+    budget_hit = False
 
     try:
         if need_live:
@@ -405,7 +496,7 @@ def run_vision_qc_arm(
             raw_llm = (
                 llm_factory(arm, effective_env)
                 if llm_factory is not None
-                else build_llm(arm.to_llm_config(), environ=effective_env)
+                else build_llm(arm.to_llm_config(environ=effective_env), environ=effective_env)
             )
             if raw_llm is None:
                 raise ConfigError(f"Arm {arm.id} produced no LLM client.")
@@ -429,6 +520,15 @@ def run_vision_qc_arm(
                         }
                     )
                 )
+                continue
+            if max_budget_usd is not None and live_spent_usd >= max_budget_usd:
+                if on_progress and not budget_hit:
+                    on_progress(
+                        f"Budget cap reached during Arm {arm.id} "
+                        f"(${live_spent_usd:.4f} >= ${max_budget_usd:.2f}); "
+                        "skipping remaining uncached stills."
+                    )
+                budget_hit = True
                 continue
             assert instrumented is not None and judge is not None
             if on_progress:
@@ -516,13 +616,17 @@ def run_vision_qc_arm(
                 error=error_text,
                 latency_seconds=item_lat,
                 estimated_usd=item_usd,
+                cache_fingerprint=cache_fp,
                 call=primary_call,
             )
+            live_spent_usd += item_usd
             verdicts.append(item_verdict)
-            cached_by_id[item.id] = item_verdict
+            if item_verdict.error is None or item_verdict.refused:
+                cached_by_id[item.id] = item_verdict
             atomic_write(
                 verdicts_file,
-                json.dumps([v.model_dump(mode="json") for v in verdicts], indent=2) + "\n",
+                json.dumps([v.model_dump(mode="json") for v in cached_by_id.values()], indent=2)
+                + "\n",
             )
     finally:
         if instrumented is not None:
@@ -541,6 +645,7 @@ def run_vision_qc_arm(
         gpu_costs=gpu_costs,
         wall_seconds=wall,
         blind_observer=blind_observer,
+        cache_fingerprint=cache_fp,
     )
     atomic_write(arm_dir / "metrics.json", result.model_dump_json(indent=2) + "\n")
     return result
@@ -585,20 +690,15 @@ def run_vision_qc_benchmark(
     spent_usd = 0.0
     budget_hit = False
     for arm in arms:
-        verdicts_file = out_root / "vision_qc" / arm.id / "verdicts.json"
-        prior_usd = 0.0
-        fully_cached = False
-        if not overwrite and verdicts_file.is_file():
-            try:
-                raw_list = json.loads(verdicts_file.read_text(encoding="utf-8"))
-                if isinstance(raw_list, list):
-                    cached_ids = {str(e.get("item_id")) for e in raw_list if isinstance(e, dict)}
-                    fully_cached = dataset_ids.issubset(cached_ids)
-                    prior_usd = sum(
-                        float(e.get("estimated_usd", 0.0)) for e in raw_list if isinstance(e, dict)
-                    )
-            except (OSError, ValueError):
-                pass
+        arm_dir = out_root / "vision_qc" / arm.id
+        prior_cached = (
+            {}
+            if overwrite
+            else _load_compatible_cached_verdicts(
+                arm_dir, arm, blind_observer=blind_observer, include_plates=include_plates
+            )
+        )
+        fully_cached = dataset_ids.issubset(prior_cached)
         if max_budget_usd is not None and not fully_cached and spent_usd >= max_budget_usd:
             if on_progress and not budget_hit:
                 on_progress(
@@ -609,6 +709,9 @@ def run_vision_qc_benchmark(
             continue
         if on_progress:
             on_progress(f"Starting Track 2 Vision QC for Arm {arm.id} ({arm.model})...")
+        remaining_budget = (
+            max(0.0, max_budget_usd - spent_usd) if max_budget_usd is not None else None
+        )
         res = run_vision_qc_arm(
             dataset,
             arm,
@@ -617,11 +720,12 @@ def run_vision_qc_benchmark(
             blind_observer=blind_observer,
             include_plates=include_plates,
             overwrite=overwrite,
+            max_budget_usd=remaining_budget,
             environ=environ,
             llm_factory=llm_factory,
             on_progress=on_progress,
         )
-        spent_usd += max(0.0, res.telemetry.estimated_usd - prior_usd)
+        spent_usd += sum(v.estimated_usd for v in res.verdicts if v.item_id not in prior_cached)
         results.append(res)
     merged = load_vision_qc_results(out_root / "vision_qc")
     write_vision_qc_reports(merged or results, out_root / "vision_qc")
@@ -748,13 +852,16 @@ def _thumbnail_data_uri(path: str, max_side: int = 320) -> str:
         return ""
     try:
         with Image.open(p) as opened:
+            max_pixels = Image.MAX_IMAGE_PIXELS
+            if max_pixels is not None and (opened.width * opened.height) > max_pixels:
+                return ""
             pil = opened.convert("RGB")
         pil.thumbnail((max_side, max_side))
         buf = io.BytesIO()
         pil.save(buf, format="JPEG", quality=75)
         encoded = base64.standard_b64encode(buf.getvalue()).decode("ascii")
         return f"data:image/jpeg;base64,{encoded}"
-    except OSError:
+    except (OSError, Image.DecompressionBombError, ValueError):
         return ""
 
 
@@ -777,10 +884,11 @@ def render_vision_qc_errors_html(results: Sequence[VisionQCArmResult]) -> str:
             if v.refused or v.error is not None:
                 kind = "REFUSAL" if v.refused else "ERROR"
             else:
-                passed = (
-                    (v.vision_spec or 0.0) >= dg.spec_threshold
-                    and (v.vision_artifacts or 0.0) >= dg.artifacts_threshold
-                    and (v.vision_character is None or v.vision_character >= dg.character_threshold)
+                passed = _verdict_passes_gate(
+                    v,
+                    spec_min=dg.spec_threshold,
+                    artifacts_min=dg.artifacts_threshold,
+                    character_min=dg.character_threshold,
                 )
                 if passed == v.ground_truth_good:
                     continue

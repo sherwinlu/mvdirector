@@ -17,7 +17,15 @@ from typing import Any
 from pydantic import BaseModel
 
 from mvdirector.errors import LLMError
-from mvdirector.llm.base import ChatBackend, Message, Reply, TokenUsage, blocks_of, has_images
+from mvdirector.llm.base import (
+    ChatBackend,
+    Message,
+    Reply,
+    TokenUsage,
+    blocks_of,
+    has_images,
+    positive_int,
+)
 from mvdirector.llm.http import (
     IMAGE_WORDS,
     HttpJSON,
@@ -31,31 +39,41 @@ log = logging.getLogger("mvdirector.llm")
 
 
 _JSON_MODE_WORDS = ("response_format", "json_schema", "json_object")
+_STREAM_OPTIONS_WORDS = ("stream_options", "include_usage")
 
 
 def _openai_usage(data: dict[str, Any]) -> TokenUsage | None:
     usage = data.get("usage")
     if not isinstance(usage, dict):
         return None
-    prompt = usage.get("prompt_tokens")
-    completion = usage.get("completion_tokens")
+    prompt = positive_int(usage.get("prompt_tokens"))
+    completion = positive_int(usage.get("completion_tokens"))
     comp_details = usage.get("completion_tokens_details")
-    reasoning = comp_details.get("reasoning_tokens") if isinstance(comp_details, dict) else None
+    reasoning = (
+        positive_int(comp_details.get("reasoning_tokens")) if isinstance(comp_details, dict) else 0
+    )
     prompt_details = usage.get("prompt_tokens_details")
-    cached = prompt_details.get("cached_tokens") if isinstance(prompt_details, dict) else None
-    if not any(isinstance(v, int) and v > 0 for v in (prompt, completion, reasoning, cached)):
+    cached = (
+        positive_int(prompt_details.get("cached_tokens")) if isinstance(prompt_details, dict) else 0
+    )
+    if not (prompt or completion or reasoning or cached):
         return None
     return TokenUsage(
-        input_tokens=int(prompt) if isinstance(prompt, int) and prompt > 0 else 0,
-        output_tokens=int(completion) if isinstance(completion, int) and completion > 0 else 0,
-        thoughts_tokens=int(reasoning) if isinstance(reasoning, int) and reasoning > 0 else 0,
-        cached_tokens=int(cached) if isinstance(cached, int) and cached > 0 else 0,
+        input_tokens=prompt,
+        output_tokens=completion,
+        thoughts_tokens=reasoning,
+        cached_tokens=cached,
     )
 
 
 def _mentions_json_mode(text: str) -> bool:
     lowered = text.lower()
     return any(word in lowered for word in _JSON_MODE_WORDS)
+
+
+def _mentions_stream_options(text: str) -> bool:
+    lowered = text.lower()
+    return any(word in lowered for word in _STREAM_OPTIONS_WORDS)
 
 
 class OpenAIChat(ChatBackend):
@@ -81,6 +99,7 @@ class OpenAIChat(ChatBackend):
         self._token_param = token_param
         self._key_hint = key_hint
         self._stream = stream
+        self._stream_include_usage = True
 
     # ------------------------------------------------------------------ request
 
@@ -156,18 +175,35 @@ class OpenAIChat(ChatBackend):
         images: bool,
     ) -> Reply:
         payload["stream"] = True
+        if self._stream_include_usage:
+            payload["stream_options"] = {"include_usage": True}
         response, events = self._http.post_sse(
             self._url, payload, unreachable_hint=hint, no_retry_words=words
         )
-        if response_format and response.status_code == 400 and _mentions_json_mode(response.text):
-            log.warning(
-                "%s does not accept response_format (%s); continuing with the prompt alone. "
-                "Set llm.json_mode: off to silence this.",
-                self._provider,
-                error_message(response),
-            )
-            self._json_mode = "off"
-            payload.pop("response_format")
+        for _ in range(2):
+            if response.status_code != 400:
+                break
+            retried = False
+            if "stream_options" in payload and _mentions_stream_options(response.text):
+                self._stream_include_usage = False
+                payload.pop("stream_options", None)
+                retried = True
+            if (
+                "response_format" in payload
+                and response_format
+                and _mentions_json_mode(response.text)
+            ):
+                log.warning(
+                    "%s does not accept response_format (%s); continuing with the prompt alone. "
+                    "Set llm.json_mode: off to silence this.",
+                    self._provider,
+                    error_message(response),
+                )
+                self._json_mode = "off"
+                payload.pop("response_format", None)
+                retried = True
+            if not retried:
+                break
             response, events = self._http.post_sse(
                 self._url, payload, unreachable_hint=hint, no_retry_words=words
             )
@@ -232,6 +268,7 @@ class OpenAIChat(ChatBackend):
             text,
             truncated=finish == "length",
             usage=usage,
+            refused=finish == "content_filter" or bool(refusal_text),
             finish_reason=finish,
         )
 
@@ -270,5 +307,6 @@ class OpenAIChat(ChatBackend):
             text,
             truncated=finish == "length",
             usage=_openai_usage(data),
+            refused=finish == "content_filter" or bool(message.get("refusal")),
             finish_reason=finish if isinstance(finish, str) else None,
         )

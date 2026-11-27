@@ -184,7 +184,10 @@ def _build_project_llm(project: Project, config: LLMConfig | None = None) -> LLM
 
 @contextmanager
 def _open_qc_llm(project: Project, primary_llm: LLMClient | None) -> Iterator[LLMClient | None]:
-    """Yield the dedicated ``qc.llm`` client when configured, otherwise ``primary_llm``."""
+    """Yield dedicated ``qc.llm`` (or ``primary_llm``) when Vision QC is enabled, else ``None``."""
+    if not project.config.qc.vision_enabled:
+        yield None
+        return
     qc_cfg = project.config.qc.llm
     if qc_cfg is None:
         yield primary_llm
@@ -792,15 +795,16 @@ def plan(
                     else ""
                 )
             with _close_llm(_build_project_llm(project, plan_config.llm)) as llm:
-                audio_cfg = (
-                    _resolve_audio_llm_config(plan_config)
-                    if (
-                        llm is not None
-                        and mix_path is not None
-                        and not getattr(llm, "supports_audio", False)
+                wants_audio_listen = (
+                    llm is not None
+                    and mix_path is not None
+                    and plan_config.planning.audio_listen != "never"
+                    and (
+                        plan_config.planning.audio_listen == "always"
+                        or not getattr(llm, "supports_audio", False)
                     )
-                    else None
                 )
+                audio_cfg = _resolve_audio_llm_config(plan_config) if wants_audio_listen else None
                 audio_ctx = (
                     _close_llm(_build_project_llm(project, audio_cfg))
                     if audio_cfg is not None
@@ -1378,9 +1382,13 @@ def generate(
                     emit(RunEvent("warning", message=f"Skipping check: {problem}"))
             else:
                 ready.raise_if_blocked()
-        for label, active_llm in (
-            ("language model", llm),
-            ("Vision QC language model", qc_llm if qc_llm is not llm else None),
+        for label, active_llm, disable_hint in (
+            ("language model", llm, "set llm.enabled: false to run without a model"),
+            (
+                "Vision QC language model",
+                qc_llm if qc_llm is not llm else None,
+                "set qc.vision_enabled: false (or remove qc.llm) to run without Vision QC",
+            ),
         ):
             if active_llm is not None:
                 # Fail before any GPU time is spent, not as a stream of skipped checks afterwards.
@@ -1389,7 +1397,7 @@ def generate(
                 except LLMError as exc:
                     raise LLMError(
                         f"The {label} is not usable: {exc}\nFix it (`mvd llm-check` tests the "
-                        "settings), or set llm.enabled: false to run without a model."
+                        f"settings), or {disable_hint}."
                     ) from exc
         result = GenerateResult(project, manifest)
         gates = build_quality_gates(project.config, qc_llm)
@@ -1527,9 +1535,13 @@ def regenerate_still(
                     emit(RunEvent("warning", message=f"Skipping check: {problem}"))
             else:
                 ready.raise_if_blocked()
-        for label, active_llm in (
-            ("language model", llm),
-            ("Vision QC language model", qc_llm if qc_llm is not llm else None),
+        for label, active_llm, disable_hint in (
+            ("language model", llm, "set llm.enabled: false to run without a model"),
+            (
+                "Vision QC language model",
+                qc_llm if qc_llm is not llm else None,
+                "set qc.vision_enabled: false (or remove qc.llm) to run without Vision QC",
+            ),
         ):
             if active_llm is not None:
                 try:
@@ -1537,7 +1549,7 @@ def regenerate_still(
                 except LLMError as exc:
                     raise LLMError(
                         f"The {label} is not usable: {exc}\nFix it (`mvd llm-check` tests the "
-                        "settings), or set llm.enabled: false to run without a model."
+                        f"settings), or {disable_hint}."
                     ) from exc
         result = GenerateResult(project, manifest)
         gates = build_quality_gates(project.config, qc_llm)
@@ -1689,7 +1701,11 @@ def generate_draft_grid(
         draft_grid_mod.select_r2v_template(templates, [s for _, grp in chunks for s in grp])
 
     qc_cfg = project.config.qc.llm or project.config.llm
-    llm_ctx = _close_llm(_build_project_llm(project, qc_cfg)) if run_qc else nullcontext(None)
+    llm_ctx = (
+        _close_llm(_build_project_llm(project, qc_cfg))
+        if (run_qc and project.config.qc.vision_enabled)
+        else nullcontext(None)
+    )
     with llm_ctx as llm:
         gates = build_quality_gates(project.config, llm) if run_qc else None
         try:

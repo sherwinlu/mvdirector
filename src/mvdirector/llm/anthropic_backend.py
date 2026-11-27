@@ -11,7 +11,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from mvdirector.errors import DependencyMissing, LLMError, LLMQuotaError, LLMUnavailableError
-from mvdirector.llm.base import ChatBackend, Message, Reply, TokenUsage
+from mvdirector.llm.base import ChatBackend, Message, Reply, TokenUsage, positive_int
 from mvdirector.llm.http import is_quota_error
 
 
@@ -19,16 +19,12 @@ def _anthropic_usage(response: Any) -> TokenUsage | None:
     usage = getattr(response, "usage", None)
     if usage is None:
         return None
-    inp = getattr(usage, "input_tokens", None)
-    out = getattr(usage, "output_tokens", None)
-    cached = getattr(usage, "cache_read_input_tokens", None)
-    if not any(isinstance(v, int) and v > 0 for v in (inp, out, cached)):
+    inp = positive_int(getattr(usage, "input_tokens", None))
+    out = positive_int(getattr(usage, "output_tokens", None))
+    cached = positive_int(getattr(usage, "cache_read_input_tokens", None))
+    if not (inp or out or cached):
         return None
-    return TokenUsage(
-        input_tokens=int(inp) if isinstance(inp, int) and inp > 0 else 0,
-        output_tokens=int(out) if isinstance(out, int) and out > 0 else 0,
-        cached_tokens=int(cached) if isinstance(cached, int) and cached > 0 else 0,
-    )
+    return TokenUsage(input_tokens=inp, output_tokens=out, cached_tokens=cached)
 
 
 class AnthropicChat(ChatBackend):

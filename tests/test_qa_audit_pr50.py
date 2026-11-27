@@ -636,3 +636,254 @@ def test_l3_video_config_legacy_max_clip_and_bool_rejection() -> None:
     ):
         with pytest.raises(ValidationError, match="not a boolean"):
             VideoConfig(**kwargs)  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- Live FFmpeg AV QC
+
+
+def test_live_ffmpeg_assembly_intercut_cut_and_xfade_frame_exact(tmp_path: Path) -> None:
+    """Real FFmpeg H.264 assemble() with assembly_intercut preserves exact decoded frame counts
+    and monotonic per-source frame progression for both hard cuts and xfade (including 1-2 frame
+    leftover tails that previously duplicated a frame on libx264 MP4 concat seams)."""
+    import json
+    import shutil
+    import subprocess
+    import wave
+
+    import numpy as np
+
+    if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+        pytest.skip("ffmpeg/ffprobe required for live assembly test")
+
+    fps = 24
+    dur = 16.0
+    (tmp_path / "inputs").mkdir(parents=True)
+    (tmp_path / "assets" / "videos").mkdir(parents=True)
+
+    # 16s mono WAV mix.
+    n_samples = int(dur * 48000)
+    sig = (0.2 * np.sin(2 * np.pi * 440.0 * np.arange(n_samples) / 48000) * 32767).astype(np.int16)
+    with wave.open(str(tmp_path / "inputs" / "mix.wav"), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(48000)
+        wf.writeframes(sig.tobytes())
+
+    # 4 real H.264 clips (GOP=24, B-frames enabled) encoding (clip_tag, frame_idx) in RGB blocks.
+    palette = [(235, 30, 30), (30, 235, 30), (30, 30, 235), (235, 235, 30)]
+    for clip_tag in range(4):
+        raw = bytearray()
+        for f_idx in range(109):
+            arr = np.zeros((128, 128, 3), dtype=np.uint8)
+            arr[:64, :, :] = palette[clip_tag]
+            for bit in range(8):
+                arr[64:, bit * 16 : (bit + 1) * 16, :] = 235 if ((f_idx >> bit) & 1) else 20
+            raw.extend(arr.tobytes())
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-v",
+                "error",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-s",
+                "128x128",
+                "-r",
+                str(fps),
+                "-i",
+                "pipe:0",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "fast",
+                "-crf",
+                "16",
+                "-g",
+                "24",
+                "-bf",
+                "2",
+                "-pix_fmt",
+                "yuv420p",
+                str(tmp_path / "assets" / "videos" / f"s{clip_tag + 1:03d}.mp4"),
+            ],
+            input=bytes(raw),
+            check=True,
+        )
+
+    bpm = 136.0
+    beats = [round(i * 60.0 / bpm, 4) for i in range(1, int(dur * bpm / 60.0) + 2)]
+    bar_s = 4.0 * 60.0 / bpm
+    bars = [round(i * bar_s, 4) for i in range(int(dur / bar_s) + 1)]
+    analysis = Analysis(
+        duration=dur,
+        tempo_bpm=bpm,
+        beats=beats,
+        bars=bars,
+        bar_intensity=[0.92] * len(bars),
+        vocal_windows=[TimeSpan(start=0.0, end=4.0)],
+    )
+    shots = [
+        Shot(
+            id=f"s{i + 1:03d}",
+            index=i,
+            start=i * 4.0,
+            end=(i + 1) * 4.0,
+            type=stype,
+            framing=Framing.CLOSE_UP if i == 0 else Framing.WIDE,
+            intensity=0.92,
+            still_prompt="p",
+            motion_prompt="m",
+            audio_slice=AudioSlice(
+                path=f"s{i + 1:03d}.wav",
+                start=max(0.0, i * 4.0 - 0.25),
+                end=(i + 1) * 4.0 + 0.25,
+                head_handle=0.25,
+            ),
+            num_frames=109,
+            video=AssetState(
+                status=AssetStatus.PASSED,
+                selected_attempt=1,
+                attempts=[
+                    Attempt(
+                        number=1,
+                        strategy=RetryStrategy.INITIAL,
+                        seed=i + 1,
+                        prompt="m",
+                        path=f"assets/videos/s{i + 1:03d}.mp4",
+                    )
+                ],
+            ),
+        )
+        for i, stype in enumerate(
+            [ShotType.LIPSYNC, ShotType.BROLL, ShotType.PERFORMANCE, ShotType.BROLL]
+        )
+    ]
+    manifest = Manifest(
+        title="LiveIntercut",
+        duration=dur,
+        fps=fps,
+        visual_bible=VisualBible(concept="c", style="s", palette="p", lighting="l"),
+        shots=shots,
+    )
+    colors_arr = np.array(palette, dtype=float)
+
+    for transition, t_sec in (("cut", 0.0), ("blend", 0.25)):
+        cfg = ProjectConfig(
+            title="LiveIntercut",
+            video=VideoConfig(
+                width=128,
+                height=128,
+                fps=fps,
+                encoder="libx264",
+                assembly_intercut=True,
+                assembly_intercut_min_intensity=0.70,
+                assembly_intercut_anticipation_frames=1,
+                assembly_workers=2,
+                transition=transition,  # type: ignore[arg-type]
+                transition_seconds=t_sec,
+            ),
+        )
+        proj = Project(root=tmp_path, config=cfg)
+        proj.save_analysis(analysis)
+        out_mp4 = tmp_path / f"final_{transition}.mp4"
+        assemble_mod.assemble(proj, manifest, out_mp4, force=True)
+
+        probe = json.loads(
+            subprocess.check_output(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-show_streams",
+                    "-of",
+                    "json",
+                    str(out_mp4),
+                ]
+            ).decode()
+        )
+        vstream = next(s for s in probe["streams"] if s["codec_type"] == "video")
+        astream = next(s for s in probe["streams"] if s["codec_type"] == "audio")
+        assert abs(float(vstream["duration"]) - dur) < 0.05
+        assert abs(float(vstream["duration"]) - float(astream["duration"])) < 0.05
+
+        raw_out = subprocess.check_output(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-i",
+                str(out_mp4),
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "pipe:1",
+            ]
+        )
+        frames = np.frombuffer(raw_out, dtype=np.uint8).reshape(-1, 128, 128, 3)
+        # Exact decoded frame count conservation (no MP4 concat seam duplication).
+        assert len(frames) == 384
+
+        # Decode every frame back to (clip_tag, source_frame_idx).
+        decoded: list[tuple[int, int, float]] = []
+        for idx_f in range(len(frames)):
+            top = frames[idx_f, 16:48, 16:112, :].mean(axis=(0, 1))
+            dists = np.linalg.norm(colors_arr - top, axis=1)
+            tag = int(np.argmin(dists))
+            src_f = sum(
+                (1 << b)
+                for b in range(8)
+                if frames[idx_f, 80:112, b * 16 + 4 : b * 16 + 12, :].mean() > 128
+            )
+            decoded.append((tag, src_f, float(dists[tag])))
+
+        # Lip-sync shot s001 occupies frames 0..95 untouched with source frames 6..101.
+        assert all(tag == 0 for tag, _, _ in decoded[:96])
+        assert [src_f for _, src_f, _ in decoded[:96]] == list(range(6, 102))
+
+        # Every intercut sub-clip advances strictly forward within its source (zero frame replays).
+        ic_plans = intercut_plans(
+            assemble_mod.plan_clips(proj, manifest, force=True),
+            manifest,
+            analysis,
+            min_intensity=0.70,
+            anticipation_frames=1,
+        )
+        assert len(ic_plans) > len(shots)
+        cursor = 0
+        prev_overlap = 0
+        last_src_frame: dict[int, int] = {}
+        for idx_p, p in enumerate(ic_plans):
+            expected_tag = int(p.shot_id[1:4]) - 1
+            expected_start = round((p.head_handle + p.sync_delay) * fps)
+            seg = decoded[cursor : cursor + p.frames]
+            if transition == "cut":
+                assert all(tag == expected_tag for tag, _, _ in seg)
+                assert [src_f for _, src_f, _ in seg] == [
+                    min(108, expected_start + k) for k in range(p.frames)
+                ]
+            else:
+                # Frames after prev_overlap must match exact source tag & frame index.
+                body_seg = seg[prev_overlap:]
+                assert body_seg
+                assert all(tag == expected_tag for tag, _, _ in body_seg)
+                assert [src_f for _, src_f, _ in body_seg] == [
+                    min(108, expected_start + k) for k in range(prev_overlap, p.frames)
+                ]
+                if expected_tag in last_src_frame:
+                    assert body_seg[0][1] > last_src_frame[expected_tag]
+                last_src_frame[expected_tag] = body_seg[-1][1]
+                # Mirror assemble()'s xfade overlap rule (>= 3 frames).
+                is_last = idx_p == len(ic_plans) - 1
+                next_frames = ic_plans[idx_p + 1].frames if not is_last else 0
+                ov = 0
+                if not is_last and p.frames >= 3 and next_frames >= 3:
+                    avail = max(0, round((p.tail_handle - max(0.0, p.sync_delay)) * fps))
+                    ov = min(round(t_sec * fps), p.frames // 3, next_frames // 3, avail)
+                    if ov < 3:
+                        ov = 0
+                prev_overlap = ov
+            cursor += p.frames

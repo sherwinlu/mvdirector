@@ -209,6 +209,10 @@ def plan_clips(
 
 
 _MAX_INTERCUT_WINDOW_SECONDS = 3600.0
+# Fewer than 3 frames leaves libx264 without B-frames (dts=0), which shifts PTS/DTS when
+# concat-copied beside B-frame body pieces (duplicating a frame) and yields no visible dissolve
+# at 1 frame. Fall back to a clean hard cut below this floor.
+_MIN_XFADE_FRAMES = 3
 
 
 def _partition_intercut_windows(
@@ -275,6 +279,7 @@ def _intercut_window(
     # Keep every intercut comfortably readable (>= 0.75s) so edits never feel stroby/jumpy,
     # while breaking up 3-4s B-roll holds that drag like slow motion.
     min_sub_frames = max(18, round(0.75 * fps))
+    relaxed_min = max(12, round(0.50 * fps))
     step_pattern: tuple[int, ...]
     if beat_step_s >= 0.70:
         # Mid-tempo / ballad (<= 85 BPM): 2-beat hold alternating with 1-beat punch (~1.6s / ~0.8s)
@@ -399,13 +404,17 @@ def _intercut_window(
         has_next_slice = s_idx + 1 < len(slice_needs)
         while need > 0:
             rem_after_slice = rem_total - need
-            full = [
-                idx
-                for idx in range(len(originals))
-                if idx != prev_src
-                and remaining_frames[idx] >= need
-                and _usable_after(idx, need) >= rem_after_slice
-            ]
+            full = (
+                [
+                    idx
+                    for idx in range(len(originals))
+                    if idx != prev_src
+                    and remaining_frames[idx] >= need
+                    and _usable_after(idx, need) >= rem_after_slice
+                ]
+                if need >= relaxed_min
+                else []
+            )
             if full:
                 chosen = max(
                     full,
@@ -501,13 +510,15 @@ def _intercut_window(
                     ext = remaining_frames[prev_src]
                     _extend_prev(ext)
                     need -= ext
-                    if need < min_sub_frames and has_next_slice:
-                        slice_needs[s_idx + 1] += need
-                        need = 0
-                        break
+                    if need < min_sub_frames:
+                        if has_next_slice:
+                            slice_needs[s_idx + 1] += need
+                            need = 0
+                            break
+                        if need < relaxed_min:
+                            return _rollback()
                     continue
 
-            relaxed_min = max(12, round(0.50 * fps))
             if need >= 2 * relaxed_min:
                 relaxed_cands = [
                     idx
@@ -935,6 +946,8 @@ def assemble(
                         0, round((plan.tail_handle - max(0.0, plan.sync_delay)) * manifest.fps)
                     )
                     overlap = min(overlap, avail_tail)
+                if overlap < _MIN_XFADE_FRAMES:
+                    overlap = 0
             else:
                 overlap = 0
             clips.append((plan, clip, overlap))

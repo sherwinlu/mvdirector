@@ -158,7 +158,10 @@ def parse_dotenv(text: str) -> dict[str, str]:
 
 def _read_regular_text(path: Path, *, warn_permissions: bool = False) -> str | None:
     """Read a regular, non-symlinked, size-bounded UTF-8 file using O_NOFOLLOW when available."""
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    # O_NONBLOCK: opening a FIFO read-only otherwise blocks until a writer appears, so a `.env`
+    # FIFO hung `mvd setup` before the S_ISREG check below could reject it. It is a no-op for the
+    # regular files this reads.
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         fd = os.open(path, flags)
     except OSError:

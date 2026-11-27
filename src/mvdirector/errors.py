@@ -11,6 +11,18 @@ class MVDError(Exception):
     """Base class for all expected pipeline errors."""
 
 
+class UnknownIdError(KeyError):
+    """A lookup by id (shot, chapter, job) found nothing.
+
+    Subclasses ``KeyError`` so existing ``except KeyError`` handlers keep working, but renders its
+    message verbatim: ``str(KeyError("No shot ..."))`` is the *repr* of the message, which surfaced
+    to users as ``Error: "No shot with id 's9'"`` with stray quotes and doubled backslashes.
+    """
+
+    def __str__(self) -> str:
+        return str(self.args[0]) if self.args else ""
+
+
 class ConfigError(MVDError):
     """The project configuration or layout is invalid."""
 

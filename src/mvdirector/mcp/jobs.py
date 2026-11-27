@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from mvdirector.errors import MVDError
+from mvdirector.errors import MVDError, UnknownIdError
 from mvdirector.generation.runner import RunEvent
 
 log = logging.getLogger(__name__)
@@ -228,7 +228,7 @@ class JobManager:
         with self._lock:
             record = self._jobs.get(job_id)
             if record is None:
-                raise KeyError(f"Unknown job_id: {job_id!r}")
+                raise UnknownIdError(f"Unknown job_id: {job_id!r}")
             return record.snapshot(event_limit=event_limit)
 
     def list_jobs(self, *, status: str | None = None) -> list[dict[str, Any]]:
@@ -244,7 +244,7 @@ class JobManager:
         with self._lock:
             record = self._jobs.get(job_id)
             if record is None:
-                raise KeyError(f"Unknown job_id: {job_id!r}")
+                raise UnknownIdError(f"Unknown job_id: {job_id!r}")
             if record.status not in _TERMINAL_STATES:
                 record.cancel_requested = True
                 record.cancel_event.set()

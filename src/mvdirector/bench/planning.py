@@ -308,7 +308,42 @@ def evaluate_planning_quality(
     )
 
 
-def _planning_cache_fingerprint(arm: ModelArm) -> str:
+def _file_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _planning_inputs_digest(source_project: Project, arm: ModelArm) -> str:
+    """Digest of everything a planning run reads from the source project.
+
+    A cached plan is only valid for the inputs it was planned from: editing lyrics, the style
+    brief, the frozen analysis or the planning config must invalidate it, as must pointing the
+    same track slug at a different project folder.
+    """
+    cfg = source_project.config
+    parts: dict[str, Any] = {
+        "root": str(source_project.root.resolve()),
+        # llm is replaced per arm and comfy/title never reach the planner.
+        "config": cfg.model_dump(mode="json", exclude={"llm", "comfy", "title"}),
+    }
+    analysis_path = source_project.root / "analysis.json"
+    parts["analysis"] = _file_digest(analysis_path) if analysis_path.is_file() else None
+    for key, rel in (("style", cfg.inputs.style), ("lyrics", cfg.inputs.lyrics)):
+        cand = source_project.path(rel) if rel else None
+        parts[key] = _file_digest(cand) if cand is not None and cand.is_file() else None
+    if arm.attach_audio and cfg.inputs.mix:
+        mix = source_project.path(cfg.inputs.mix)
+        if mix.is_file():
+            st = mix.stat()
+            parts["mix"] = [st.st_size, st.st_mtime_ns]
+    blob = json.dumps(parts, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _planning_cache_fingerprint(arm: ModelArm, source_project: Project | None = None) -> str:
     payload = {
         "provider": arm.provider,
         "model": arm.model,
@@ -317,6 +352,9 @@ def _planning_cache_fingerprint(arm: ModelArm) -> str:
         "shots_per_request": arm.shots_per_request,
         "json_mode": arm.json_mode,
         "base_url": arm.base_url,
+        "inputs": (
+            _planning_inputs_digest(source_project, arm) if source_project is not None else None
+        ),
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
@@ -325,6 +363,7 @@ def _load_valid_cached_planning(
     metrics_path: Path,
     manifest_path: Path,
     arm: ModelArm,
+    source_project: Project,
 ) -> PlanningArmResult | None:
     if not (metrics_path.is_file() and manifest_path.is_file()):
         return None
@@ -338,10 +377,15 @@ def _load_valid_cached_planning(
         cached.provider != arm.provider
         or cached.model != arm.model
         or cached.attach_audio != arm.attach_audio
+        or cached.source_project != str(source_project.root)
     ):
         return None
-    expected_fp = _planning_cache_fingerprint(arm)
-    if cached.config_fingerprint and cached.config_fingerprint != expected_fp:
+    try:
+        expected_fp = _planning_cache_fingerprint(arm, source_project)
+    except (OSError, MVDError):
+        return None
+    # A result without a fingerprint cannot prove which inputs it was planned from.
+    if cached.config_fingerprint != expected_fp:
         return None
     return cached
 
@@ -488,7 +532,7 @@ def run_planning_arm(
     manifest_path = arm_dir / "manifest.json"
 
     if not overwrite:
-        cached = _load_valid_cached_planning(metrics_path, manifest_path, arm)
+        cached = _load_valid_cached_planning(metrics_path, manifest_path, arm, source_project)
         if cached is not None:
             log.info("Skipping cached Track 1 run %s / %s (%s)", track, arm.id, arm_dir)
             return cached
@@ -501,7 +545,7 @@ def run_planning_arm(
         source_project, arm, arm_dir, environ=effective_env
     )
     analysis = source_project.load_analysis()
-    cache_fp = _planning_cache_fingerprint(arm)
+    cache_fp = _planning_cache_fingerprint(arm, source_project)
 
     started = time.monotonic()
     collector = _PlannerWarningCollector()
@@ -606,6 +650,7 @@ def run_planning_benchmark(
     budget_hit = False
     used_tracks: set[str] = set()
     for project_dir in projects:
+        source_project = open_bench_project(project_dir)
         base_track = _safe_track_slug(project_dir.resolve().name)
         track = base_track
         suffix = 2
@@ -618,7 +663,7 @@ def run_planning_benchmark(
             already_cached = (
                 not overwrite
                 and _load_valid_cached_planning(
-                    arm_dir / "metrics.json", arm_dir / "manifest.json", arm
+                    arm_dir / "metrics.json", arm_dir / "manifest.json", arm, source_project
                 )
                 is not None
             )

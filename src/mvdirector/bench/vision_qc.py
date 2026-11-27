@@ -48,7 +48,7 @@ from mvdirector.config import ImageQCConfig
 from mvdirector.errors import ConfigError, ImagesNotSupportedError, LLMError
 from mvdirector.llm.base import is_refusal_error
 from mvdirector.llm.factory import build_llm
-from mvdirector.models import AssetKind, Manifest
+from mvdirector.models import AssetKind, Manifest, Shot
 from mvdirector.project import Project
 from mvdirector.qc.vision import VisionJudge
 from mvdirector.store import atomic_write
@@ -137,6 +137,8 @@ class QCItemVerdict(BaseModel):
     latency_seconds: float = 0.0
     estimated_usd: float = 0.0
     cache_fingerprint: str = ""
+    # Digest of the still, reference images and shot specification that were judged.
+    input_digest: str = ""
     call: CallRecord | None = None
 
 
@@ -157,6 +159,8 @@ class VisionQCArmResult(BaseModel):
     errors: int = 0
     refusal_rate: float = 0.0
     wall_seconds: float = 0.0
+    # USD spent on live (uncached) judge calls during the run that produced this result.
+    live_usd: float = 0.0
     telemetry: TelemetrySummary = Field(default_factory=TelemetrySummary)
     per_check: dict[str, CheckCalibrationMetrics] = Field(default_factory=dict)
     default_gate: GateOutcomeMetrics | None = None
@@ -247,6 +251,36 @@ def _qc_cache_fingerprint(
         "base_url": arm.base_url,
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _qc_item_input_digest(
+    shot: Shot,
+    manifest: Manifest,
+    still_path: Path,
+    reference_image: Path | None,
+    extra_references: Sequence[tuple[str, Path]],
+) -> str:
+    """Digest of everything the judge sees for one item.
+
+    Item ids name a shot and attempt, not an image: an ``attempt``-less row follows whichever
+    take is selected, and a regenerated still, re-locked reference sheet or edited prompt keeps
+    the same id. A cached verdict is reused only when this digest still matches.
+    """
+    payload = {
+        "still": _file_sha256(still_path),
+        "reference": _file_sha256(reference_image) if reference_image is not None else None,
+        "extra": [[label, _file_sha256(path)] for label, path in extra_references],
+        "spec": VisionJudge.specification(shot, manifest),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def _load_compatible_cached_verdicts(
@@ -501,6 +535,17 @@ def run_vision_qc_arm(
             proj, manifest, item, include_plates=include_plates
         )
         resolved_items.append((item, manifest, shot, still_path, ref_img, extra_refs))
+    input_digests = {
+        item.id: _qc_item_input_digest(shot, manifest, still_path, ref_img, extra_refs)
+        for item, manifest, shot, still_path, ref_img, extra_refs in resolved_items
+    }
+    # Verdicts for items outside this dataset are kept (and re-persisted) untouched.
+    cached_by_id = {
+        item_id: verdict
+        for item_id, verdict in cached_by_id.items()
+        if item_id not in input_digests
+        or (verdict.input_digest and verdict.input_digest == input_digests[item_id])
+    }
 
     started = time.monotonic()
     need_live = any(item.id not in cached_by_id for item, *_ in resolved_items) and (
@@ -641,6 +686,7 @@ def run_vision_qc_arm(
                 latency_seconds=item_lat,
                 estimated_usd=item_usd,
                 cache_fingerprint=cache_fp,
+                input_digest=input_digests[item.id],
                 call=primary_call,
             )
             live_spent_usd += item_usd
@@ -671,6 +717,7 @@ def run_vision_qc_arm(
         blind_observer=blind_observer,
         cache_fingerprint=cache_fp,
     )
+    result.live_usd = round(live_spent_usd, 6)
     atomic_write(arm_dir / "metrics.json", result.model_dump_json(indent=2) + "\n")
     return result
 
@@ -748,7 +795,9 @@ def run_vision_qc_benchmark(
             llm_factory=llm_factory,
             on_progress=on_progress,
         )
-        spent_usd += sum(v.estimated_usd for v in res.verdicts if v.item_id not in prior_cached)
+        # Count what this arm actually spent: an id in prior_cached is still re-judged live when
+        # its still, references or spec changed since the cached verdict.
+        spent_usd += res.live_usd
         results.append(res)
     merged = load_vision_qc_results(out_root / "vision_qc")
     write_vision_qc_reports(merged or results, out_root / "vision_qc")

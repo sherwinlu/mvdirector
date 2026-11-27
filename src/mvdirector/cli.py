@@ -2151,7 +2151,7 @@ def bench_plan(
 
     try:
         cfg = load_benchmark_config(config_path)
-        run_planning_benchmark(
+        run_results = run_planning_benchmark(
             projects,
             cfg,
             out_dir,
@@ -2172,6 +2172,15 @@ def bench_plan(
             typer.echo(f"Unblinding key:          {key_json}")
     except MVDError as exc:
         raise _fail(exc) from exc
+    # Arms fail independently so one outage does not abort the matrix, but a run in which every
+    # arm failed produced nothing and must not report success to scripts and CI.
+    if run_results and not any(r.status == "ok" for r in run_results):
+        typer.secho(
+            f"Error: all {len(run_results)} planning arm(s) failed; see the errors above.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
 
 @bench_app.command("viewer")

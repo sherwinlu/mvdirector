@@ -283,6 +283,26 @@ _VOWEL_GROUP_RE = re.compile(r"[aeiouyøœæіїєаеиоуыэюяαεηιου
 _INDIC_VIRAMAS = frozenset("\u094d\u09cd\u0a4d\u0acd\u0b4d\u0bcd\u0c4d\u0ccd\u0d4d")
 _LATIN_WORD_RE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ']+")
 
+# Former built-in defaults still written verbatim in projects created from older templates.
+# Auto-tune treats them like the current default so those projects keep their upgrades.
+_LEGACY_DEFAULTS: dict[str, tuple[str, ...]] = {"prepare.whisper_model": ("small",)}
+
+# Lower-case letters that set a Cyrillic language apart from Russian, checked most specific
+# first because several are shared (see _cyrillic_language). Locking Whisper to 'ru' for these
+# lyrics forces Russian transcription, which is worse than letting Whisper auto-detect.
+_CYRILLIC_LANG_MARKERS: tuple[tuple[str, frozenset[str]], ...] = (
+    ("tg", frozenset("ӣӯҷ")),  # Tajik
+    ("uz", frozenset("ҳ")),  # Uzbek (Tajik also writes 'ҳ', matched above)
+    ("ba", frozenset("ҙҫҡ")),  # Bashkir
+    ("tt", frozenset("җ")),  # Tatar
+    ("kk", frozenset("әғқұһң")),  # Kazakh (Tatar/Bashkir share some, matched above)
+    ("mn", frozenset("өү")),  # Mongolian ('ө/ү' with any Kazakh letter matched as Kazakh)
+    ("sr", frozenset("ђћ")),  # Serbian
+    ("mk", frozenset("ѓќѕ")),  # Macedonian
+    ("sr", frozenset("јљњџ")),  # Serbian or Macedonian; Macedonian-only letters matched above
+    ("uk", frozenset("іїєґ")),  # Ukrainian ('і' is also Kazakh/Belarusian, matched before)
+)
+
 _SCRIPT_LANG_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("ru", re.compile(r"[\u0400-\u04FF]")),
     ("el", re.compile(r"[\u0370-\u03FF\u1F00-\u1FFF]")),
@@ -366,8 +386,20 @@ def _script_languages(text: str) -> list[str]:
         found.append("zh")
     for code, pattern in _SCRIPT_LANG_PATTERNS:
         if pattern.search(text):
-            found.append(code)
+            found.append(_cyrillic_language(text) if code == "ru" else code)
     return found
+
+
+def _cyrillic_language(text: str) -> str:
+    """Pick the Cyrillic-script language from its unique letters (shared letters only → 'ru')."""
+    letters = set(text.lower())
+    # 'ў' is Belarusian, or Uzbek when it appears beside Uzbek 'қ/ғ' (Belarusian has neither).
+    if "ў" in letters and not letters & {"ҳ", "ӯ", "ӣ", "ҷ"}:
+        return "uz" if letters & {"қ", "ғ"} else "be"
+    for code, markers in _CYRILLIC_LANG_MARKERS:
+        if letters & markers:
+            return code
+    return "ru"
 
 
 def detect_languages(
@@ -871,7 +903,10 @@ def recommend_adjustments(
             and isinstance(current, str)
             and current.lower().endswith(".en")
         )
-        can_apply = force or current == default_val or en_model_conflict
+        legacy_default = isinstance(current, str) and current.lower() in _LEGACY_DEFAULTS.get(
+            key, ()
+        )
+        can_apply = force or current == default_val or en_model_conflict or legacy_default
         adjustments.append(
             Adjustment(
                 key=key,

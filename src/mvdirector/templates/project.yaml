@@ -23,7 +23,7 @@ inputs:
 prepare:
   stem_model: htdemucs           # Demucs model for `mvd prepare` stem separation
   stem_device: auto              # auto | cpu | cuda | mps
-  whisper_model: large-v3-turbo  # faster-whisper model size (use small/medium for lighter CPU runs)
+  whisper_model: large-v3-turbo  # faster-whisper model size (medium = lighter CPU runs; auto_tune upgrades tiny/base/small for non-English)
   whisper_language: null         # optional ISO code (e.g. en, es, ja, ko); null = auto-detect
   whisper_multilingual: false    # true = detect language per segment (for code-switching songs)
   whisper_stall_timeout_seconds: 600  # abort a stalled transcription (first segment: 3x); 0 = off

@@ -140,6 +140,12 @@ class ClipTiming:
         return source_frame_index(self.in_point, self.drop_first_frame, played, fps, native)
 
 
+# Largest source frame index a float64 timestamp still resolves one frame apart (2**52).
+_MAX_EXACT_FRAME_INDEX = float(2**52)
+# The closed form lands within a frame or two of the answer; this only caps pathological input.
+_SOURCE_FRAME_SETTLE_STEPS = 64
+
+
 def source_frame_index(
     in_point: float, drop_first_frame: bool, played: int, fps: int, source_fps: float
 ) -> int:
@@ -159,6 +165,10 @@ def source_frame_index(
     if fps <= 0 or not math.isfinite(source_fps) or source_fps <= 0:
         return 0
     start = max(0.0, in_point) if math.isfinite(in_point) else 0.0
+    # Past 2**52 source frames a float can no longer tell idx from idx + 1, so the settle loops
+    # below would never move: treat such (corrupt-probe) inputs as the clip start.
+    if not start * source_fps < _MAX_EXACT_FRAME_INDEX:
+        return 0
 
     def tick(idx: int) -> int:
         return math.floor((idx / source_fps - start) * fps + 0.5)
@@ -167,10 +177,15 @@ def source_frame_index(
     target = tick(first) + max(0, played) + (1 if drop_first_frame else 0)
     # Closed form for the last source frame whose tick is <= target, then settle float error with
     # the exact predicate (O(1): a probed rate such as 90000 fps must not make this a long scan).
+    # The settle steps are bounded so no float corner case can turn them into an endless loop.
     idx = max(first, math.ceil((start + (target + 0.5) / fps) * source_fps) - 1)
-    while tick(idx + 1) <= target:
+    for _ in range(_SOURCE_FRAME_SETTLE_STEPS):
+        if tick(idx + 1) > target:
+            break
         idx += 1
-    while idx > first and tick(idx) > target:
+    for _ in range(_SOURCE_FRAME_SETTLE_STEPS):
+        if idx <= first or tick(idx) <= target:
+            break
         idx -= 1
     return idx
 

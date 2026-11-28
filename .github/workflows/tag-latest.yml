@@ -1,0 +1,26 @@
+name: Update latest tag
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: tag-latest
+  cancel-in-progress: false
+
+jobs:
+  tag-latest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Move latest tag to main HEAD
+        run: |
+          git tag -f latest "$GITHUB_SHA"
+          git push -f origin refs/tags/latest

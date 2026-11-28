@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -63,9 +64,23 @@ def render_candidate_batch(
             log.info("%s candidate %d saved to %s", label, index + 1, destination)
         return paths
 
-    def _run_one(item: tuple[int, Path, dict[str, Any]]) -> tuple[int, Path]:
+    abort_event = threading.Event()
+    first_error: BaseException | None = None
+    error_lock = threading.Lock()
+
+    def _run_one(item: tuple[int, Path, dict[str, Any]]) -> tuple[int, Path] | None:
+        nonlocal first_error
+        if abort_event.is_set():
+            return None
         idx, dest, gr = item
-        out = comfy.run(gr, template.bindings.output, dest)
+        try:
+            out = comfy.run(gr, template.bindings.output, dest)
+        except BaseException as exc:
+            with error_lock:
+                if first_error is None:
+                    first_error = exc
+            abort_event.set()
+            raise
         log.info("%s candidate %d saved to %s", label, idx + 1, dest)
         return idx, out
 
@@ -74,12 +89,22 @@ def render_candidate_batch(
         futures = [pool.submit(_run_one, item) for item in tasks]
         try:
             for fut in as_completed(futures):
-                idx, out = fut.result()
-                ordered[idx] = out
+                if abort_event.is_set():
+                    for pending in futures:
+                        pending.cancel()
+                if not fut.cancelled():
+                    res = fut.result()
+                    if res is not None:
+                        idx, out = res
+                        ordered[idx] = out
         except BaseException:
+            abort_event.set()
             for pending in futures:
                 pending.cancel()
             raise
+
+    if first_error is not None:
+        raise first_error
     return [p for p in ordered if p is not None]
 
 

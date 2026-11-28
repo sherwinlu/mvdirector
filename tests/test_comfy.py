@@ -471,3 +471,136 @@ def test_render_candidate_batch_parallel_preserves_order(tmp_path, template) -> 
         "lead_candidate_03.png",
     ]
     assert [p.read_text(encoding="utf-8") for p in paths] == ["100", "101", "102"]
+
+
+def test_render_candidate_batch_boundary_and_security(tmp_path, template) -> None:
+    from mvdirector.errors import ConfigError
+    from mvdirector.generation.candidates import render_candidate_batch
+
+    class _NoopComfy:
+        def run(self, graph, output_node, destination):
+            raise AssertionError("Should not invoke comfy.run on invalid inputs")
+
+    for bad_conc in (0, -1, 65, True):
+        with pytest.raises(ConfigError):
+            render_candidate_batch(
+                comfy=_NoopComfy(),  # type: ignore[arg-type]
+                template=template,
+                base_params={"positive_prompt": "p", "negative_prompt": ""},
+                base_seed=1,
+                count=2,
+                folder=tmp_path,
+                prefix="lead",
+                label="Ref",
+                max_concurrency=bad_conc,  # type: ignore[arg-type]
+            )
+
+    for bad_count in (0, -3, True):
+        with pytest.raises(ConfigError):
+            render_candidate_batch(
+                comfy=_NoopComfy(),  # type: ignore[arg-type]
+                template=template,
+                base_params={"positive_prompt": "p", "negative_prompt": ""},
+                base_seed=1,
+                count=bad_count,  # type: ignore[arg-type]
+                folder=tmp_path,
+                prefix="lead",
+                label="Ref",
+                max_concurrency=2,
+            )
+
+    for bad_prefix in ("../escape", "a/b", "bad\\name"):
+        with pytest.raises(ConfigError):
+            render_candidate_batch(
+                comfy=_NoopComfy(),  # type: ignore[arg-type]
+                template=template,
+                base_params={"positive_prompt": "p", "negative_prompt": ""},
+                base_seed=1,
+                count=2,
+                folder=tmp_path,
+                prefix=bad_prefix,
+                label="Ref",
+                max_concurrency=2,
+            )
+
+
+def test_render_candidate_batch_aborts_queued_work_on_error(tmp_path, template) -> None:
+    import threading
+
+    from mvdirector.generation.candidates import render_candidate_batch
+
+    started = 0
+    lock = threading.Lock()
+    gate = threading.Event()
+
+    class _FailingComfy:
+        def run(self, graph, output_node, destination):
+            nonlocal started
+            del output_node
+            seed = graph["2"]["inputs"]["seed"]
+            with lock:
+                started += 1
+            if seed == 100:
+                gate.set()
+                raise ComfyJobError("synthetic workflow failure")
+            gate.wait(timeout=2.0)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(b"ok")
+            return destination
+
+    with pytest.raises(ComfyJobError, match="synthetic workflow failure"):
+        render_candidate_batch(
+            comfy=_FailingComfy(),  # type: ignore[arg-type]
+            template=template,
+            base_params={"positive_prompt": "p", "negative_prompt": ""},
+            base_seed=100,
+            count=12,
+            folder=tmp_path,
+            prefix="lead",
+            label="Ref",
+            max_concurrency=2,
+        )
+    assert started < 12
+
+
+def test_render_candidate_batch_64x_stress(tmp_path, template) -> None:
+    import threading
+
+    from mvdirector.generation.candidates import render_candidate_batch
+
+    barrier = threading.Barrier(64, timeout=10.0)
+    active = 0
+    peak_active = 0
+    lock = threading.Lock()
+
+    class _StressComfy:
+        def run(self, graph, output_node, destination):
+            nonlocal active, peak_active
+            del output_node
+            with lock:
+                active += 1
+                peak_active = max(peak_active, active)
+            barrier.wait()
+            try:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(str(graph["2"]["inputs"]["seed"]).encode("utf-8"))
+                return destination
+            finally:
+                with lock:
+                    active -= 1
+
+    paths = render_candidate_batch(
+        comfy=_StressComfy(),  # type: ignore[arg-type]
+        template=template,
+        base_params={"positive_prompt": "stress", "negative_prompt": ""},
+        base_seed=1000,
+        count=64,
+        folder=tmp_path,
+        prefix="stress",
+        label="Stress",
+        max_concurrency=64,
+    )
+    assert peak_active == 64
+    assert len(paths) == 64
+    assert [p.name for p in paths] == [f"stress_candidate_{i:02d}.png" for i in range(1, 65)]
+    assert [p.read_text(encoding="utf-8") for p in paths] == [str(1000 + i) for i in range(64)]

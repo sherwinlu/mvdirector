@@ -231,6 +231,7 @@ def generate_candidates(
             folder=project.plates_dir,
             prefix=plate_slug(scene.name),
             label=f"Plate for '{scene.name}'",
+            max_concurrency=project.config.comfy.max_concurrency,
         )
     return results
 
@@ -350,6 +351,7 @@ def generate_turnaround(
         folder=project.plates_dir,
         prefix=f"{plate_slug(scene.name)}_turnaround",
         label=f"Plate turnaround for '{scene.name}'",
+        max_concurrency=project.config.comfy.max_concurrency,
     )
     if lock:
         lock_turnaround(project, manifest, candidates[0], scene.name, inset=inset)

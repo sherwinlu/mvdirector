@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ from PIL import Image, UnidentifiedImageError
 from mvdirector import media
 from mvdirector.comfy.client import ComfyClient
 from mvdirector.comfy.workflow import WorkflowTemplate
+from mvdirector.config import validate_max_concurrency
 from mvdirector.errors import ConfigError, MediaToolError
 from mvdirector.project import Project, require_safe_id
 from mvdirector.store import path_is_file
@@ -34,13 +36,16 @@ def render_candidate_batch(
     prefix: str,
     label: str,
     extension: str = ".png",
+    *,
+    max_concurrency: int = 1,
 ) -> list[Path]:
     """Render ``count`` candidate files into ``folder`` with deterministic sequential seeds."""
     if isinstance(count, bool) or count < 1:
         raise ConfigError(f"{label} candidate count must be >= 1, got {count}.")
+    effective_concurrency = validate_max_concurrency(max_concurrency)
     safe_prefix = require_safe_id(prefix, "candidate prefix")
     resolved_folder = folder.resolve()
-    paths: list[Path] = []
+    tasks: list[tuple[int, Path, dict[str, Any]]] = []
     for index in range(count):
         destination = (
             resolved_folder / f"{safe_prefix}_candidate_{index + 1:02d}{extension}"
@@ -48,9 +53,34 @@ def render_candidate_batch(
         if not destination.is_relative_to(resolved_folder):
             raise ConfigError(f"Candidate path '{destination}' escapes {resolved_folder}")
         graph = template.render({**base_params, "seed": base_seed + index})
-        paths.append(comfy.run(graph, template.bindings.output, destination))
-        log.info("%s candidate %d saved to %s", label, index + 1, destination)
-    return paths
+        tasks.append((index, destination, graph))
+
+    worker_count = min(effective_concurrency, len(tasks))
+    if worker_count <= 1:
+        paths: list[Path] = []
+        for index, destination, graph in tasks:
+            paths.append(comfy.run(graph, template.bindings.output, destination))
+            log.info("%s candidate %d saved to %s", label, index + 1, destination)
+        return paths
+
+    def _run_one(item: tuple[int, Path, dict[str, Any]]) -> tuple[int, Path]:
+        idx, dest, gr = item
+        out = comfy.run(gr, template.bindings.output, dest)
+        log.info("%s candidate %d saved to %s", label, idx + 1, dest)
+        return idx, out
+
+    ordered: list[Path | None] = [None] * len(tasks)
+    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="mvd-cand") as pool:
+        futures = [pool.submit(_run_one, item) for item in tasks]
+        try:
+            for fut in as_completed(futures):
+                idx, out = fut.result()
+                ordered[idx] = out
+        except BaseException:
+            for pending in futures:
+                pending.cancel()
+            raise
+    return [p for p in ordered if p is not None]
 
 
 def load_rgb_candidate(image: Path, label: str) -> Image.Image:

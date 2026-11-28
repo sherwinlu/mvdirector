@@ -425,3 +425,49 @@ def test_convert_ui_workflow_supports_dict_links_and_control_after_generate():
         "batch_seed": 42,
         "steps": 25,
     }
+
+
+def test_render_candidate_batch_parallel_preserves_order(tmp_path, template) -> None:
+    import threading
+
+    from mvdirector.generation.candidates import render_candidate_batch
+
+    barrier = threading.Barrier(3, timeout=5.0)
+    active = 0
+    peak_active = 0
+    lock = threading.Lock()
+
+    class _ParallelFakeComfy:
+        def run(self, graph, output_node, destination):
+            nonlocal active, peak_active
+            del output_node
+            with lock:
+                active += 1
+                peak_active = max(peak_active, active)
+            barrier.wait()
+            try:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(str(graph["2"]["inputs"]["seed"]).encode("utf-8"))
+                return destination
+            finally:
+                with lock:
+                    active -= 1
+
+    paths = render_candidate_batch(
+        comfy=_ParallelFakeComfy(),  # type: ignore[arg-type]
+        template=template,
+        base_params={"positive_prompt": "a portrait", "negative_prompt": ""},
+        base_seed=100,
+        count=3,
+        folder=tmp_path,
+        prefix="lead",
+        label="Reference",
+        max_concurrency=3,
+    )
+    assert peak_active == 3
+    assert [p.name for p in paths] == [
+        "lead_candidate_01.png",
+        "lead_candidate_02.png",
+        "lead_candidate_03.png",
+    ]
+    assert [p.read_text(encoding="utf-8") for p in paths] == ["100", "101", "102"]

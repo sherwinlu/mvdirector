@@ -64,6 +64,7 @@ def generate_candidates(
             folder=project.props_dir,
             prefix=safe_id,
             label=f"Prop '{prop.name}'",
+            max_concurrency=project.config.comfy.max_concurrency,
         )
     return results
 

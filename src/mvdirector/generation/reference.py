@@ -324,6 +324,7 @@ def generate_candidates(
         folder=project.reference_dir,
         prefix=prefix,
         label=f"Reference for '{prefix}'",
+        max_concurrency=project.config.comfy.max_concurrency,
     )
 
 
@@ -410,6 +411,7 @@ def generate_video_candidates(
         prefix=f"{prefix}_video",
         label=f"Reference video for '{prefix}'",
         extension=".mp4",
+        max_concurrency=project.config.comfy.max_concurrency,
     )
 
 
@@ -799,6 +801,7 @@ def seed_from_photos(
         folder=project.reference_dir,
         prefix=f"{prefix}_seed",
         label=f"Seeded reference for '{prefix}'",
+        max_concurrency=project.config.comfy.max_concurrency,
     )
 
     if not lock:
